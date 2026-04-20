@@ -129,7 +129,25 @@ const BUILT_IN_CLUBS = [
     name: "GC Adamstal (Championship)",
     region: "Niederösterreich",
     numHoles: 18,
-    tees: { "Gelb (Herren)": { cr: 71.0, slope: 140, par: 70 } },
+    tees: {
+      "Weiss (Herren)":  { cr: 73.3, slope: 137, par: 70 },
+      "Gelb (Herren)":   { cr: 71.0, slope: 140, par: 70 },
+      "Blau (Herren)":   { cr: 68.9, slope: 135, par: 70 },
+      "Rot (Herren)":    { cr: 66.9, slope: 125, par: 70 },
+      "Orange (Herren)": { cr: 65.1, slope: 118, par: 70 },
+      "Gelb (Damen)":    { cr: 77.5, slope: 139, par: 70 },
+      "Blau (Damen)":    { cr: 74.8, slope: 136, par: 70 },
+      "Rot (Damen)":     { cr: 72.2, slope: 131, par: 70 },
+      "Orange (Damen)":  { cr: 69.5, slope: 125, par: 70 },
+    },
+    holes: [
+      { par:4, si:13 }, { par:4, si:5 },  { par:5, si:17 },
+      { par:4, si:7 },  { par:4, si:11 }, { par:3, si:15 },
+      { par:5, si:1 },  { par:3, si:9 },  { par:4, si:3 },
+      { par:4, si:12 }, { par:4, si:8 },  { par:3, si:18 },
+      { par:4, si:4 },  { par:4, si:14 }, { par:5, si:2 },
+      { par:3, si:6 },  { par:4, si:10 }, { par:3, si:16 },
+    ],
   },
   simple("GC Wien-Freudenau",              "Wien",            70.5, 120, 72),
   simple("GC Wien-Süßenbrunn",             "Wien",            70.0, 118, 72),
@@ -138,7 +156,22 @@ const BUILT_IN_CLUBS = [
   simple("Golfclub Frühling Götzendorf",   "Niederösterreich",71.5, 124, 73),
   simple("GC St. Pölten (Schloss Goldegg)","Niederösterreich",71.5, 125, 72),
   simple("Golfclub Schwechat",             "Niederösterreich",70.5, 121, 72),
-  simple("Golf & Country Club Brunn",      "Niederösterreich",71.5, 128, 72),
+  {
+    name: "Golf & Country Club Brunn",
+    region: "Niederösterreich",
+    numHoles: 18,
+    tees: {
+      "Gelb (Herren)": { cr: 71.5, slope: 128, par: 70 },
+    },
+    holes: [
+      { par:4, si:7 },  { par:5, si:1 },  { par:3, si:17 },
+      { par:4, si:9 },  { par:3, si:13 }, { par:4, si:5 },
+      { par:4, si:15 }, { par:5, si:3 },  { par:3, si:11 },
+      { par:4, si:4 },  { par:4, si:6 },  { par:5, si:16 },
+      { par:4, si:2 },  { par:4, si:18 }, { par:3, si:14 },
+      { par:4, si:8 },  { par:3, si:12 }, { par:4, si:10 },
+    ],
+  },
   simple("Golfclub Lengenfeld",            "Niederösterreich",71.0, 123, 72),
   simple("GC Spillern",                    "Niederösterreich",71.5, 127, 72),
   simple("Fontana Golf Club",              "Niederösterreich",72.5, 133, 72),
@@ -394,6 +427,7 @@ export default function GolfApp() {
   const [importErrors, setImportErrors] = useState([]);
   const [padOpen, setPadOpen] = useState(null); // { playerId, holeIdx } | null
   const [teePickerFor, setTeePickerFor] = useState(null); // playerId to change tee for
+  const [loadedRoundId, setLoadedRoundId] = useState(null); // track which round is being viewed/edited
   // Scoring mode
   const [scoringMode, setScoringMode] = useState("batch"); // batch | live
   const [currentHole, setCurrentHole] = useState(0);
@@ -553,31 +587,58 @@ export default function GolfApp() {
   });
 
   // Auto-advance for number pad
+  // Batch mode: same player, next hole → then next player, hole 0 (reads top-to-bottom per player)
+  // Live mode: same hole, next player → then next hole, player 0 (reads hole-by-hole)
   const advanceToNext = () => {
     if (!padOpen) return;
     const { playerId, holeIdx } = padOpen;
     const playerIdx = players.findIndex(p => p.id === playerId);
-    // Next player same hole
-    for (let i = playerIdx + 1; i < players.length; i++) {
-      if (scores[players[i].id]?.[holeIdx] === undefined) {
-        setPadOpen({ playerId: players[i].id, holeIdx });
-        return;
-      }
-    }
-    // Next hole
-    if (holeIdx + 1 < cfg.numHoles) {
-      for (let i = 0; i < players.length; i++) {
-        if (scores[players[i].id]?.[holeIdx + 1] === undefined) {
-          setPadOpen({ playerId: players[i].id, holeIdx: holeIdx + 1 });
-          if (scoringMode === "live") setCurrentHole(holeIdx + 1);
+
+    if (scoringMode === "batch") {
+      // Find next empty hole for same player
+      for (let h = holeIdx + 1; h < cfg.numHoles; h++) {
+        if (scores[playerId]?.[h] === undefined) {
+          setPadOpen({ playerId, holeIdx: h });
           return;
         }
       }
-      setPadOpen({ playerId: players[0].id, holeIdx: holeIdx + 1 });
-      if (scoringMode === "live") setCurrentHole(holeIdx + 1);
-      return;
+      // Move to next player, first empty hole
+      for (let i = playerIdx + 1; i < players.length; i++) {
+        for (let h = 0; h < cfg.numHoles; h++) {
+          if (scores[players[i].id]?.[h] === undefined) {
+            setPadOpen({ playerId: players[i].id, holeIdx: h });
+            return;
+          }
+        }
+      }
+      // Fallback: next player, hole 0 if they have no empty holes left
+      if (playerIdx + 1 < players.length) {
+        setPadOpen({ playerId: players[playerIdx + 1].id, holeIdx: 0 });
+        return;
+      }
+      setPadOpen(null);
+    } else {
+      // Live mode: next player same hole → next hole player 0
+      for (let i = playerIdx + 1; i < players.length; i++) {
+        if (scores[players[i].id]?.[holeIdx] === undefined) {
+          setPadOpen({ playerId: players[i].id, holeIdx });
+          return;
+        }
+      }
+      if (holeIdx + 1 < cfg.numHoles) {
+        for (let i = 0; i < players.length; i++) {
+          if (scores[players[i].id]?.[holeIdx + 1] === undefined) {
+            setPadOpen({ playerId: players[i].id, holeIdx: holeIdx + 1 });
+            setCurrentHole(holeIdx + 1);
+            return;
+          }
+        }
+        setPadOpen({ playerId: players[0].id, holeIdx: holeIdx + 1 });
+        setCurrentHole(holeIdx + 1);
+        return;
+      }
+      setPadOpen(null);
     }
-    setPadOpen(null);
   };
 
   const padEnter = (n) => {
@@ -617,12 +678,23 @@ export default function GolfApp() {
 
   // ── Rounds
   const saveRound = async () => {
-    const r = { id: uid(), cfg, holes, players, scores, savedAt: new Date().toISOString() };
-    const u = [r, ...rounds].slice(0, 50);
+    let u;
+    if (loadedRoundId) {
+      // Update existing round (avoid duplicates when viewing then re-saving)
+      u = rounds.map(r => r.id === loadedRoundId
+        ? { ...r, cfg, holes, players, scores, savedAt: new Date().toISOString() }
+        : r);
+    } else {
+      // New round
+      const newR = { id: uid(), cfg, holes, players, scores, savedAt: new Date().toISOString() };
+      u = [newR, ...rounds].slice(0, 50);
+      setLoadedRoundId(newR.id); // so subsequent saves update this one
+    }
     setRounds(u);
     try { await window.storage.set("golf-rounds", JSON.stringify(u)); } catch {}
   };
   const loadRound = r => {
+    setLoadedRoundId(r.id);
     setCfg(r.cfg); setHoles(r.holes); setPlayers(r.players); setScores(r.scores);
     setCurrentHole(0); setScoringMode("batch");
     setView("results");
@@ -630,10 +702,12 @@ export default function GolfApp() {
   const deleteRound = async (id) => {
     const updated = rounds.filter(r => r.id !== id);
     setRounds(updated);
+    if (id === loadedRoundId) setLoadedRoundId(null);
     try { await window.storage.set("golf-rounds", JSON.stringify(updated)); } catch {}
   };
 
   const newRound = () => {
+    setLoadedRoundId(null); // first save will create a new record
     setCfg({ name: "", date: toDay(), numHoles: 18, clubName: "", defaultTeeName: "" });
     setHoles(makeHoles(72, 18)); setPlayers([]); setScores({});
     setClubQ(""); setPickedClub(null);
@@ -966,8 +1040,21 @@ export default function GolfApp() {
             ))}
           </div>
         )}
-        <button onClick={e => { e.stopPropagation(); if (confirm("Runde löschen?")) deleteRound(r.id); }}
-          style={{ position: "absolute", top: "10px", right: "10px", background: "transparent", border: "none", color: T.textDim, fontSize: "16px", padding: "4px", opacity: 0.5 }}>×</button>
+        <button
+          onClick={e => { e.stopPropagation(); if (confirm("Runde löschen?")) deleteRound(r.id); }}
+          aria-label="Runde löschen"
+          style={{
+            position: "absolute", top: "8px", right: "8px",
+            width: "32px", height: "32px",
+            background: T.surface2,
+            border: `1px solid ${T.line}`,
+            borderRadius: "8px",
+            color: T.textDim,
+            fontSize: "18px",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            lineHeight: 1,
+            padding: 0,
+          }}>×</button>
       </div>
     );
   };
@@ -1658,6 +1745,32 @@ export default function GolfApp() {
             <button style={{ ...S.btnSecondary, flex: 1 }} onClick={() => setView("scoring")}>← Scores</button>
             <button style={{ ...S.btnPrimary, flex: 1 }} className="gold-hover" onClick={() => { setTab("rounds"); setView("home"); }}>Fertig</button>
           </div>
+
+          {/* Delete button - only shown when viewing/editing a saved round */}
+          {loadedRoundId && rounds.find(r => r.id === loadedRoundId) && (
+            <button
+              onClick={async () => {
+                if (confirm("Diese Runde wirklich löschen? Das kann nicht rückgängig gemacht werden.")) {
+                  await deleteRound(loadedRoundId);
+                  setLoadedRoundId(null);
+                  setTab("rounds");
+                  setView("home");
+                }
+              }}
+              style={{
+                width: "100%", marginTop: "14px",
+                background: "transparent",
+                color: T.double,
+                border: `1px solid ${T.double}40`,
+                borderRadius: "12px",
+                padding: "12px",
+                fontSize: "13px",
+                fontWeight: 500,
+                fontFamily: "Inter, sans-serif",
+              }}>
+              🗑 Diese Runde löschen
+            </button>
+          )}
         </div>
       </div>
     );
