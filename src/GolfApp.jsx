@@ -251,6 +251,7 @@ const isValid    = v => typeof v === "number" && v > 0;
 const sfNetto    = (g, hs, par) => isStrich(g) ? 0 : (isValid(g) ? Math.max(0, par - (g - hs) + 2) : null);
 const sfBrutto   = (g, par)     => isStrich(g) ? 0 : (isValid(g) ? Math.max(0, par - g + 2) : null);
 
+
 const scoreColor = (gross, par) => {
   if (isStrich(gross)) return T.strich;
   if (!isValid(gross)) return T.textSoft;
@@ -322,6 +323,226 @@ function validateClub(c) {
     if (sumP !== firstTeePar) e.push(`Par-Summe ${sumP} ≠ Tee-Par ${firstTeePar}`);
   }
   return e;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// USCHI MODE CALCULATIONS
+// (Low-Ball, Best-Ball, Birdie, Uschi)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Compute stroke-adjusted handicaps for Uschi mode.
+ * Best (lowest CH) player = baseline (0 strokes).
+ * Others: round((diff) × 0.8). For 9-hole: ceil × 9/18.
+ * Strokes are distributed on the hardest SI holes.
+ * Returns [{ playerId, ch, strokes, perHole: [0|1|2...] }, ...]
+ */
+function uschiAdjustedStrokes(players, cfg, club, holes) {
+  const numHoles = holes.length;
+  const is9 = numHoles === 9;
+  const par = sumPar(holes);
+
+  // Compute Kurs-HC for each player
+  const withCH = players.map(p => {
+    const tee = playerTee(p, cfg, club);
+    if (!tee) return { playerId: p.id, ch: p.hcp || 0 };
+    const ch = calcPH(p.hcp, tee.slope, tee.cr, tee.par || par);
+    return { playerId: p.id, ch };
+  });
+  if (withCH.length === 0) return [];
+
+  const minCH = Math.min(...withCH.map(c => c.ch));
+
+  // Pre-compute hole order by SI (hardest first)
+  const sortedByHardness = holes.map((h, i) => ({ i, si: h.si })).sort((a, b) => a.si - b.si);
+
+  return withCH.map(({ playerId, ch }) => {
+    const diff = ch - minCH;
+    const strokes18 = Math.max(0, Math.round(diff * 0.8));
+    const strokes = is9 ? Math.ceil(strokes18 * 9 / 18) : strokes18;
+
+    // Distribute strokes across holes (repeating for >numHoles edge case, though unlikely)
+    const perHole = new Array(numHoles).fill(0);
+    let remaining = strokes;
+    let safety = 3;
+    while (remaining > 0 && safety > 0) {
+      for (const { i } of sortedByHardness) {
+        if (remaining === 0) break;
+        perHole[i]++;
+        remaining--;
+      }
+      safety--;
+    }
+    return { playerId, ch, diff, strokes, perHole };
+  });
+}
+
+/**
+ * Compute per-hole Uschi points and totals for all players.
+ *
+ * Per hole:
+ *   - Netto = gross - playerStrokesOnThisHole
+ *   - Best netto → +1 (all ties get +1)
+ *   - Worst netto → -1 (all ties get -1)
+ *   - Middle → 0
+ *   - If all nettos tied → nobody gets points
+ * Birdie/Eagle bonus:
+ *   - gross <= par - 1 → +1 (birdie or better, per-player)
+ * Uschi (Par 3 only):
+ *   - If data.closest hit green and made par (gross <= 3) → +carry
+ *   - If closest hit green but didn't par → burnt (no winner, carry resets to 1)
+ *   - If nobody hit green → carry += 1 (doubles/triples next par 3)
+ *   - If par-3 data not yet entered → no points yet (treated same as carry=1 next time)
+ *
+ * par3Data: { [holeIdx]: { greenHits: [pid, ...], closest: pid } }
+ *
+ * Returns:
+ *   {
+ *     perHole: [{ holeIdx, holePoints: {pid: n}, uschi: {winner|burnt|carryTo, points, multiplier}, netto: {pid: n|null} }, ...],
+ *     totals: { [pid]: { total, best, worst, birdies, uschi } },
+ *     carry: finalCarry,
+ *     openUschi: [holeIdx, ...],  // par-3 holes still missing data
+ *   }
+ */
+function computeUschiPoints(players, holes, scores, adjStrokes, par3Data) {
+  const strokesByPid = {};
+  adjStrokes.forEach(a => { strokesByPid[a.playerId] = a.perHole; });
+
+  const totals = {};
+  players.forEach(p => {
+    totals[p.id] = { total: 0, best: 0, worst: 0, birdies: 0, uschi: 0 };
+  });
+
+  const perHole = [];
+  let carry = 1;
+  const openUschi = [];
+
+  for (let i = 0; i < holes.length; i++) {
+    const hole = holes[i];
+    const holePoints = {};
+    players.forEach(p => { holePoints[p.id] = 0; });
+
+    // Compute netto for each player who played this hole
+    const netto = {};
+    const nettos = [];
+    players.forEach(p => {
+      const gross = scores[p.id]?.[i];
+      if (isValid(gross)) {
+        const s = strokesByPid[p.id]?.[i] || 0;
+        const n = gross - s;
+        netto[p.id] = n;
+        nettos.push({ pid: p.id, netto: n });
+      } else {
+        netto[p.id] = null;
+      }
+    });
+
+    // Best/worst points (only if ≥2 valid nettos AND not all same)
+    if (nettos.length >= 2) {
+      const best = Math.min(...nettos.map(n => n.netto));
+      const worst = Math.max(...nettos.map(n => n.netto));
+      if (best !== worst) {
+        nettos.forEach(n => {
+          if (n.netto === best)  { holePoints[n.pid] += 1; totals[n.pid].best += 1;  }
+          if (n.netto === worst) { holePoints[n.pid] -= 1; totals[n.pid].worst -= 1; }
+        });
+      }
+    }
+
+    // Birdie bonus (per player)
+    players.forEach(p => {
+      const gross = scores[p.id]?.[i];
+      if (isValid(gross) && gross <= hole.par - 1) {
+        holePoints[p.id] += 1;
+        totals[p.id].birdies += 1;
+      }
+    });
+
+    // Uschi (Par 3 only)
+    let uschiInfo = null;
+    if (hole.par === 3) {
+      const data = par3Data?.[i];
+      const allPar3Scored = players.every(p => {
+        const g = scores[p.id]?.[i];
+        return isValid(g) || isStrich(g);
+      });
+
+      if (!data) {
+        if (allPar3Scored) openUschi.push(i);
+        uschiInfo = { pending: true, multiplier: carry };
+        // Don't change carry yet — wait for data
+      } else {
+        const greenHits = data.greenHits || [];
+        const closest = data.closest;
+
+        if (greenHits.length === 0) {
+          // Nobody hit green → carry over
+          uschiInfo = { type: "carry", multiplier: carry, newMultiplier: carry + 1 };
+          carry += 1;
+        } else if (closest && greenHits.includes(closest)) {
+          const closestGross = scores[closest]?.[i];
+          if (isValid(closestGross) && closestGross <= hole.par) {
+            // WON! Closest hit green AND made par (or better)
+            holePoints[closest] += carry;
+            totals[closest].uschi += carry;
+            uschiInfo = { type: "won", winner: closest, points: carry, multiplier: carry };
+            carry = 1;
+          } else {
+            // Burnt — closest hit green but didn't make par
+            uschiInfo = { type: "burnt", burnBy: closest, multiplier: carry };
+            carry = 1;
+          }
+        } else {
+          // Data incomplete — green hit recorded but no closest selected yet
+          if (allPar3Scored) openUschi.push(i);
+          uschiInfo = { pending: true, multiplier: carry };
+        }
+      }
+    }
+
+    perHole.push({ holeIdx: i, holePoints, uschi: uschiInfo, netto });
+
+    // Add hole points to totals
+    players.forEach(p => { totals[p.id].total += holePoints[p.id]; });
+  }
+
+  return { perHole, totals, carry, openUschi };
+}
+
+/**
+ * Aggregate Uschi points by team (2v2).
+ * teams: { A: [pid, pid], B: [pid, pid] }
+ */
+function computeTeamUschiPoints(uschiResult, teams) {
+  const teamTotals = { A: 0, B: 0 };
+  const teamPerHole = [];
+  const teamOf = {};
+  (teams.A || []).forEach(p => { teamOf[p] = "A"; });
+  (teams.B || []).forEach(p => { teamOf[p] = "B"; });
+
+  uschiResult.perHole.forEach(h => {
+    const holeA = (teams.A || []).reduce((s, p) => s + (h.holePoints[p] || 0), 0);
+    const holeB = (teams.B || []).reduce((s, p) => s + (h.holePoints[p] || 0), 0);
+    teamTotals.A += holeA;
+    teamTotals.B += holeB;
+    teamPerHole.push({ holeIdx: h.holeIdx, A: holeA, B: holeB });
+  });
+
+  return { teamTotals, teamPerHole };
+}
+
+/**
+ * Auto-assign teams: best + worst CH vs the two middle players.
+ * Input: adjStrokes sorted by CH ascending.
+ */
+function autoAssignTeams(adjStrokes) {
+  if (adjStrokes.length !== 4) return { A: [], B: [] };
+  // adjStrokes already ordered by computation — but sort by ch ascending to be safe
+  const sorted = [...adjStrokes].sort((a, b) => a.ch - b.ch);
+  return {
+    A: [sorted[0].playerId, sorted[3].playerId], // best + worst
+    B: [sorted[1].playerId, sorted[2].playerId], // middle two
+  };
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -431,6 +652,12 @@ export default function GolfApp() {
   // Scoring mode
   const [scoringMode, setScoringMode] = useState("batch"); // batch | live
   const [currentHole, setCurrentHole] = useState(0);
+  // Game mode (Uschi)
+  const [gameMode, setGameMode] = useState("stableford"); // "stableford" | "uschi-single" | "uschi-team"
+  const [teams, setTeams] = useState(null); // { A: [pid], B: [pid] } | null (null = not split yet)
+  const [par3Data, setPar3Data] = useState({}); // { [holeIdx]: { greenHits: [pid], closest: pid } }
+  const [uschiPromptHole, setUschiPromptHole] = useState(null); // holeIdx currently prompting for par-3 data
+  const [showUschiReview, setShowUschiReview] = useState(false); // Uschi protocol review screen
   const touchStartX = useRef(null);
   const syncTimerRef = useRef(null);
 
@@ -643,17 +870,44 @@ export default function GolfApp() {
 
   const padEnter = (n) => {
     if (!padOpen) return;
-    setScore(padOpen.playerId, padOpen.holeIdx, n);
-    setTimeout(advanceToNext, 120);
+    const { playerId, holeIdx } = padOpen;
+    setScore(playerId, holeIdx, n);
+    setTimeout(() => {
+      maybePromptUschi(holeIdx, playerId);
+      advanceToNext();
+    }, 120);
   };
   const padStrich = () => {
     if (!padOpen) return;
-    setScore(padOpen.playerId, padOpen.holeIdx, STRICH);
-    setTimeout(advanceToNext, 120);
+    const { playerId, holeIdx } = padOpen;
+    setScore(playerId, holeIdx, STRICH);
+    setTimeout(() => {
+      maybePromptUschi(holeIdx, playerId);
+      advanceToNext();
+    }, 120);
   };
   const padClear = () => {
     if (!padOpen) return;
     clearScore(padOpen.playerId, padOpen.holeIdx);
+  };
+
+  // Open Uschi par-3 dialog if conditions are met
+  // Called right after a score is set for `latestPlayerId` on `holeIdx`
+  const maybePromptUschi = (holeIdx, latestPlayerId) => {
+    if (gameMode === "stableford") return;
+    const hole = holes[holeIdx];
+    if (!hole || hole.par !== 3) return;
+    if (par3Data[holeIdx]) return; // already have data
+    // check all players have a score (valid or strich) for this hole.
+    // Use latestPlayerId as a hint: treat that player as scored even if state not yet flushed.
+    const allScored = players.every(p => {
+      if (p.id === latestPlayerId) return true;
+      const g = scores[p.id]?.[holeIdx];
+      return isValid(g) || isStrich(g);
+    });
+    if (allScored) {
+      setTimeout(() => setUschiPromptHole(holeIdx), 250);
+    }
   };
 
   // ── Stats (uses per-player tee data)
@@ -676,19 +930,34 @@ export default function GolfApp() {
     };
   };
 
+  // ── Uschi mode: adjusted strokes + point calculation (memoized)
+  const uschiStrokes = useMemo(() => {
+    if (gameMode === "stableford") return [];
+    return uschiAdjustedStrokes(players, cfg, selectedClub, holes);
+  }, [gameMode, players, cfg, selectedClub, holes]);
+
+  const uschiResult = useMemo(() => {
+    if (gameMode === "stableford" || uschiStrokes.length === 0) return null;
+    return computeUschiPoints(players, holes, scores, uschiStrokes, par3Data);
+  }, [gameMode, players, holes, scores, uschiStrokes, par3Data]);
+
+  const teamResult = useMemo(() => {
+    if (gameMode !== "uschi-team" || !uschiResult || !teams?.A?.length || !teams?.B?.length) return null;
+    return computeTeamUschiPoints(uschiResult, teams);
+  }, [gameMode, uschiResult, teams]);
+
   // ── Rounds
   const saveRound = async () => {
     let u;
+    const extra = { gameMode, teams, par3Data };
     if (loadedRoundId) {
-      // Update existing round (avoid duplicates when viewing then re-saving)
       u = rounds.map(r => r.id === loadedRoundId
-        ? { ...r, cfg, holes, players, scores, savedAt: new Date().toISOString() }
+        ? { ...r, cfg, holes, players, scores, ...extra, savedAt: new Date().toISOString() }
         : r);
     } else {
-      // New round
-      const newR = { id: uid(), cfg, holes, players, scores, savedAt: new Date().toISOString() };
+      const newR = { id: uid(), cfg, holes, players, scores, ...extra, savedAt: new Date().toISOString() };
       u = [newR, ...rounds].slice(0, 50);
-      setLoadedRoundId(newR.id); // so subsequent saves update this one
+      setLoadedRoundId(newR.id);
     }
     setRounds(u);
     try { await window.storage.set("golf-rounds", JSON.stringify(u)); } catch {}
@@ -696,6 +965,9 @@ export default function GolfApp() {
   const loadRound = r => {
     setLoadedRoundId(r.id);
     setCfg(r.cfg); setHoles(r.holes); setPlayers(r.players); setScores(r.scores);
+    setGameMode(r.gameMode || "stableford");
+    setTeams(r.teams || null);
+    setPar3Data(r.par3Data || r.uschiInputs || {});
     setCurrentHole(0); setScoringMode("batch");
     setView("results");
   };
@@ -707,9 +979,10 @@ export default function GolfApp() {
   };
 
   const newRound = () => {
-    setLoadedRoundId(null); // first save will create a new record
+    setLoadedRoundId(null);
     setCfg({ name: "", date: toDay(), numHoles: 18, clubName: "", defaultTeeName: "" });
     setHoles(makeHoles(72, 18)); setPlayers([]); setScores({});
+    setGameMode("stableford"); setTeams(null); setPar3Data({});
     setClubQ(""); setPickedClub(null);
     setCurrentHole(0); setScoringMode("batch");
     setView("setup");
@@ -1060,6 +1333,179 @@ export default function GolfApp() {
   };
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // GAME MODE CARD (Setup sub-component)
+  // ═══════════════════════════════════════════════════════════════════════════
+  const renderGameModeCard = () => {
+    const canTeam = players.length === 4;
+    const modes = [
+      { k: "stableford",  l: "Stableford Netto",  sub: "Klassisch, Punkte pro Loch",     emoji: "⛳" },
+      { k: "uschi-single",l: "Uschi (Einzel)",    sub: "Low/Best Ball · Birdies · Uschi", emoji: "🎯" },
+      { k: "uschi-team",  l: "Uschi (2 vs 2)",    sub: "Teamwertung · nur bei 4 Spielern", emoji: "🎯🤝", disabled: !canTeam },
+    ];
+
+    return (
+      <div style={{ ...S.card, marginTop: "12px" }}>
+        <div style={{ ...S.eyebrow, marginBottom: "12px" }}>04 · Spielmodus</div>
+        <div style={{ display: "grid", gap: "8px" }}>
+          {modes.map(m => {
+            const active = gameMode === m.k;
+            return (
+              <button key={m.k}
+                onClick={() => {
+                  if (m.disabled) return;
+                  setGameMode(m.k);
+                  if (m.k === "uschi-team" && canTeam && !teams) {
+                    // Auto-assign teams by default
+                    const strokes = uschiAdjustedStrokes(players, cfg, selectedClub, holes);
+                    setTeams(autoAssignTeams(strokes));
+                  }
+                  if (m.k === "stableford") setTeams(null);
+                }}
+                disabled={m.disabled}
+                style={{
+                  padding: "14px 16px", textAlign: "left",
+                  background: active ? `${T.gold}15` : T.surface2,
+                  color: active ? T.text : (m.disabled ? T.textDim : T.text),
+                  border: `1.5px solid ${active ? T.gold : T.line}`,
+                  borderRadius: "12px",
+                  fontFamily: "Inter, sans-serif",
+                  opacity: m.disabled ? 0.5 : 1,
+                  display: "flex", alignItems: "center", gap: "12px",
+                }}>
+                <span style={{ fontSize: "22px" }}>{m.emoji}</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: "14px", fontWeight: 600, marginBottom: "2px" }}>{m.l}</div>
+                  <div style={{ fontSize: "11px", color: active ? T.textSoft : T.textDim }}>{m.sub}</div>
+                </div>
+                {active && <span style={{ color: T.gold, fontSize: "18px" }}>✓</span>}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Uschi Strokes Preview */}
+        {gameMode !== "stableford" && players.length >= 2 && renderUschiStrokesPreview()}
+
+        {/* Team Assignment UI */}
+        {gameMode === "uschi-team" && canTeam && renderTeamAssignmentUI()}
+      </div>
+    );
+  };
+
+  const renderUschiStrokesPreview = () => {
+    const strokes = uschiAdjustedStrokes(players, cfg, selectedClub, holes);
+    if (strokes.length < 2) return null;
+    const sorted = [...strokes].sort((a, b) => a.ch - b.ch);
+    const best = sorted[0];
+    const bestPlayer = players.find(p => p.id === best.playerId);
+
+    return (
+      <div style={{ marginTop: "14px", padding: "14px", background: T.surface1, border: `1px solid ${T.line}`, borderRadius: "10px" }}>
+        <div style={{ ...S.eyebrow, marginBottom: "8px" }}>Angepasste Strokes</div>
+        <div style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px", lineHeight: 1.5 }}>
+          <span style={{ color: T.gold, fontWeight: 600 }}>{bestPlayer?.name || "Scratch"}</span> (CH {best.ch}) ist der Maßstab. Andere bekommen Strokes = <span className="mono">Diff × 0.8</span> gerundet, auf den schwersten Löchern.
+        </div>
+        {sorted.map(s => {
+          const p = players.find(pl => pl.id === s.playerId);
+          if (!p) return null;
+          const isRef = s.playerId === best.playerId;
+          return (
+            <div key={s.playerId} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "6px 0", borderBottom: `1px solid ${T.line}`, fontSize: "12px" }}>
+              <div style={{ width: "24px", height: "24px", borderRadius: "50%", background: `${T.gold}20`, border: `1px solid ${T.gold}40`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px", fontWeight: 700, color: T.gold }}>
+                {p.name.charAt(0).toUpperCase()}
+              </div>
+              <div style={{ flex: 1 }}>
+                <span style={{ color: T.text, fontWeight: 500 }}>{p.name}</span>
+                <span style={{ color: T.textDim, marginLeft: "6px" }}>CH {s.ch}</span>
+              </div>
+              {isRef ? (
+                <span style={{ fontSize: "10px", color: T.gold, fontWeight: 600, letterSpacing: "0.05em" }}>MASSSTAB</span>
+              ) : (
+                <span className="mono" style={{ fontSize: "12px", color: T.gold, fontWeight: 700 }}>
+                  +{s.strokes} {s.strokes === 1 ? "Stroke" : "Strokes"}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderTeamAssignmentUI = () => {
+    const strokes = uschiAdjustedStrokes(players, cfg, selectedClub, holes);
+    const teamA = teams?.A || [];
+    const teamB = teams?.B || [];
+    const inTeam = (pid) => teamA.includes(pid) ? "A" : teamB.includes(pid) ? "B" : null;
+
+    const togglePlayer = (pid) => {
+      const cur = inTeam(pid);
+      let newA = [...teamA], newB = [...teamB];
+      if (cur === "A") { newA = newA.filter(x => x !== pid); if (newB.length < 2) newB.push(pid); }
+      else if (cur === "B") { newB = newB.filter(x => x !== pid); if (newA.length < 2) newA.push(pid); }
+      else { if (newA.length < 2) newA.push(pid); else if (newB.length < 2) newB.push(pid); }
+      setTeams({ A: newA, B: newB });
+    };
+
+    return (
+      <div style={{ marginTop: "14px", padding: "14px", background: T.surface1, border: `1px solid ${T.line}`, borderRadius: "10px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+          <div style={{ ...S.eyebrow }}>Teams</div>
+          <button onClick={() => setTeams(autoAssignTeams(strokes))} className="btn-hover"
+            style={{ ...S.btnGhost, fontSize: "11px", padding: "5px 9px" }}>
+            🎲 Auto: Bester+Schlechtester
+          </button>
+        </div>
+        <div style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px" }}>
+          Tap auf einen Spieler um sein Team zu wechseln.
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+          {[["A", teamA], ["B", teamB]].map(([label, members]) => (
+            <div key={label} style={{ background: T.surface2, border: `1px solid ${T.line}`, borderRadius: "8px", padding: "10px", minHeight: "80px" }}>
+              <div style={{ ...S.eyebrow, color: label === "A" ? T.gold : T.sage, marginBottom: "6px" }}>Team {label}</div>
+              {members.length === 0 && (
+                <div style={{ fontSize: "11px", color: T.textDim, fontStyle: "italic" }}>leer</div>
+              )}
+              {members.map(pid => {
+                const p = players.find(pl => pl.id === pid);
+                if (!p) return null;
+                return (
+                  <div key={pid} onClick={() => togglePlayer(pid)}
+                    style={{
+                      padding: "6px 8px", background: T.surface3, borderRadius: "6px",
+                      fontSize: "12px", color: T.text, fontWeight: 500,
+                      marginTop: "4px", cursor: "pointer",
+                      display: "flex", alignItems: "center", gap: "6px",
+                    }}>
+                    <div style={{ width: "18px", height: "18px", borderRadius: "50%", background: `${T.gold}20`, border: `1px solid ${T.gold}40`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "9px", fontWeight: 700, color: T.gold }}>
+                      {p.name.charAt(0).toUpperCase()}
+                    </div>
+                    <span>{p.name}</span>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+        {/* Unassigned players */}
+        {players.some(p => !inTeam(p.id)) && (
+          <div style={{ marginTop: "10px" }}>
+            <div style={{ fontSize: "10px", color: T.textDim, marginBottom: "4px" }}>Nicht zugewiesen:</div>
+            <div style={{ display: "flex", gap: "5px", flexWrap: "wrap" }}>
+              {players.filter(p => !inTeam(p.id)).map(p => (
+                <button key={p.id} onClick={() => togglePlayer(p.id)}
+                  style={{ padding: "4px 9px", borderRadius: "12px", border: `1px dashed ${T.line}`, background: "transparent", color: T.textSoft, fontSize: "11px" }}>
+                  + {p.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // SETUP SCREEN
   // ═══════════════════════════════════════════════════════════════════════════
   const renderSetup = () => (
@@ -1284,6 +1730,9 @@ export default function GolfApp() {
           </div>
         </div>
 
+        {/* SPIELMODUS */}
+        {players.length > 0 && cfg.clubName && renderGameModeCard()}
+
         <div style={{ display: "flex", gap: "10px", marginTop: "18px" }}>
           <button style={{ ...S.btnSecondary, flex: 1 }} onClick={() => setView("home")}>← Zurück</button>
           <button style={{ ...S.btnPrimary, flex: 2, opacity: players.length === 0 || !cfg.clubName ? 0.35 : 1 }}
@@ -1402,6 +1851,24 @@ export default function GolfApp() {
             ))}
           </div>
 
+          {/* Uschi protocol button */}
+          {gameMode !== "stableford" && (
+            <button onClick={() => setShowUschiReview(true)}
+              style={{
+                width: "100%", marginBottom: "14px",
+                background: `${T.gold}12`,
+                color: T.gold,
+                border: `1px solid ${T.gold}40`,
+                borderRadius: "10px",
+                padding: "10px 14px",
+                fontSize: "13px", fontWeight: 600,
+                fontFamily: "Inter, sans-serif",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+              }}>
+              🎯 Uschi-Protokoll öffnen
+            </button>
+          )}
+
           {scoringMode === "batch" ? renderBatchMode() : renderLiveMode()}
 
           {/* Live totals card */}
@@ -1470,6 +1937,18 @@ export default function GolfApp() {
                 <td style={{ padding: "8px 12px", fontSize: "13px", fontWeight: 700, color: T.gold, position: "sticky", left: 0, background: T.surface1, zIndex: 1, borderRight: `1px solid ${T.line}` }}>
                   <span className="mono">{i+1}</span>
                   <span style={{ fontSize: "9px", color: T.textDim, marginLeft: "6px", fontWeight: 500 }}>SI{hole.si}</span>
+                  {gameMode !== "stableford" && hole.par === 3 && (
+                    <button onClick={e => { e.stopPropagation(); setUschiPromptHole(i); }}
+                      title="Uschi-Daten"
+                      style={{
+                        marginLeft: "6px",
+                        background: par3Data[i] ? `${T.gold}20` : "transparent",
+                        border: `1px solid ${par3Data[i] ? T.gold + "60" : T.line}`,
+                        color: par3Data[i] ? T.gold : T.textDim,
+                        borderRadius: "5px", padding: "2px 5px",
+                        fontSize: "11px", lineHeight: 1,
+                      }}>🎯</button>
+                  )}
                 </td>
                 <td className="mono" style={{ padding: "8px 8px", textAlign: "center", fontSize: "13px", color: T.textSoft }}>{hole.par}</td>
                 {players.map(p => {
@@ -1629,12 +2108,111 @@ export default function GolfApp() {
   };
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // USCHI RANKING (called from results)
+  // ═══════════════════════════════════════════════════════════════════════════
+  const renderUschiRanking = () => {
+    if (!uschiResult) return null;
+    const medals = ["🥇", "🥈", "🥉"];
+
+    // Individual ranking
+    const individual = players.map(p => ({
+      p,
+      total: uschiResult.totals[p.id]?.total || 0,
+      best: uschiResult.totals[p.id]?.best || 0,
+      worst: uschiResult.totals[p.id]?.worst || 0,
+      birdies: uschiResult.totals[p.id]?.birdies || 0,
+      uschi: uschiResult.totals[p.id]?.uschi || 0,
+    })).sort((a, b) => b.total - a.total);
+
+    // Team ranking if applicable
+    const showTeam = gameMode === "uschi-team" && teamResult && teams?.A?.length === 2 && teams?.B?.length === 2;
+    const teamNames = (tkey) => {
+      const ids = teams[tkey] || [];
+      return ids.map(id => players.find(p => p.id === id)?.name).filter(Boolean).join(" + ");
+    };
+
+    // Pending uschi holes
+    const openCount = uschiResult.openUschi?.length || 0;
+
+    return (
+      <>
+        {showTeam && (
+          <div style={{ ...S.card, background: `linear-gradient(135deg, ${T.surface3}, ${T.surface2})`, border: `2px solid ${T.gold}`, marginBottom: "14px" }}>
+            <div style={{ ...S.eyebrow, color: T.gold, marginBottom: "14px" }}>🏆 🤝 Team-Wertung</div>
+            {[
+              { k: "A", color: T.gold },
+              { k: "B", color: T.sage },
+            ].sort((a, b) => teamResult.teamTotals[b.k] - teamResult.teamTotals[a.k]).map((t, i) => (
+              <div key={t.k} style={{ display: "flex", alignItems: "center", gap: "14px", padding: "14px 0", borderBottom: i === 0 ? `1px solid ${T.line}` : "none" }}>
+                <div style={{ fontSize: "28px", width: "34px", textAlign: "center" }}>
+                  {medals[i]}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ ...S.eyebrow, color: t.color, marginBottom: "3px" }}>Team {t.k}</div>
+                  <div style={{ fontSize: "14px", fontWeight: 600, color: T.text }}>{teamNames(t.k) || `(${t.k})`}</div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div className="mono serif" style={{ fontSize: "36px", fontWeight: 700, color: teamResult.teamTotals[t.k] >= 0 ? T.gold : T.double, lineHeight: 1 }}>
+                    {teamResult.teamTotals[t.k] > 0 ? "+" : ""}{teamResult.teamTotals[t.k]}
+                  </div>
+                  <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>PUNKTE</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ ...S.card, background: `linear-gradient(135deg, ${T.surface2}, ${T.surface1})`, border: `1px solid ${T.gold}40`, marginBottom: "14px" }}>
+          <div style={{ ...S.eyebrow, color: T.gold, marginBottom: "14px" }}>
+            🎯 {showTeam ? "Einzelpunkte" : "Uschi-Ranking"}
+          </div>
+          {individual.map((s, i) => (
+            <div key={s.p.id} style={{ display: "flex", alignItems: "center", gap: "12px", padding: "12px 0", borderBottom: i < individual.length - 1 ? `1px solid ${T.line}` : "none" }}>
+              <div style={{ fontSize: "24px", width: "30px", textAlign: "center" }}>
+                {(!showTeam && medals[i]) || <span className="mono" style={{ fontSize: "15px", color: T.textSoft, fontWeight: 700 }}>{i+1}.</span>}
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: "15px", color: T.text }}>{s.p.name}</div>
+                <div style={{ fontSize: "10px", color: T.textSoft, marginTop: "3px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                  {s.best > 0 && <span style={{ color: T.sage }}>★{s.best}</span>}
+                  {s.worst < 0 && <span style={{ color: T.double }}>☆{s.worst}</span>}
+                  {s.birdies > 0 && <span style={{ color: T.birdie }}>🐦{s.birdies}</span>}
+                  {s.uschi > 0 && <span style={{ color: T.gold }}>🎯{s.uschi}</span>}
+                </div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div className="mono serif" style={{ fontSize: "30px", fontWeight: 700, color: s.total >= 0 ? T.gold : T.double, lineHeight: 1 }}>
+                  {s.total > 0 ? "+" : ""}{s.total}
+                </div>
+                <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>PUNKTE</div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {openCount > 0 && (
+          <div onClick={() => setShowUschiReview(true)}
+            style={{ background: `${T.bogey}15`, border: `1px solid ${T.bogey}50`, borderRadius: "12px", padding: "14px", marginBottom: "14px", fontSize: "13px", color: T.bogey, cursor: "pointer", display: "flex", alignItems: "center", gap: "10px" }}>
+            <span style={{ fontSize: "20px" }}>⚠️</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, marginBottom: "2px" }}>{openCount} Par-3 ohne Uschi-Daten</div>
+              <div style={{ fontSize: "11px", color: T.textSoft }}>Tap zum Vervollständigen — betrifft die Endpunkte.</div>
+            </div>
+            <span style={{ color: T.bogey, fontSize: "18px" }}>›</span>
+          </div>
+        )}
+      </>
+    );
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // RESULTS
   // ═══════════════════════════════════════════════════════════════════════════
   const renderResults = () => {
     const all = players.map(p => ({ p, ...getStats(p) }));
     const ranked = [...all].sort((a,b) => b.sfNT - a.sfNT);
     const medals = ["🥇", "🥈", "🥉"];
+    const isUschi = gameMode !== "stableford";
 
     return (
       <div className="fade-in">
@@ -1643,14 +2221,21 @@ export default function GolfApp() {
           <h2 className="serif" style={{ fontSize: "28px", margin: "0 0 6px", color: T.text }}>Auswertung</h2>
           <div style={{ fontSize: "12px", color: T.textSoft, marginBottom: "20px" }}>
             {cfg.clubName || cfg.name || "Runde"} · {fmtDate(cfg.date)} · Par {par}
+            {isUschi && <span style={{ color: T.gold, marginLeft: "6px" }}>· 🎯 Uschi-Modus{gameMode === "uschi-team" ? " (2v2)" : ""}</span>}
           </div>
 
+          {/* USCHI RANKING (only in uschi mode) */}
+          {isUschi && uschiResult && renderUschiRanking()}
+
+          {/* Standard Stableford Netto Ranking */}
           <div style={{ ...S.card, background: `linear-gradient(135deg, ${T.surface2}, ${T.surface1})`, border: `1px solid ${T.gold}40`, marginBottom: "20px" }}>
-            <div style={{ ...S.eyebrow, color: T.gold, marginBottom: "14px" }}>🏆 Stableford Netto</div>
+            <div style={{ ...S.eyebrow, color: T.gold, marginBottom: "14px" }}>
+              {isUschi ? "📊 Stableford Netto (Nebenwertung)" : "🏆 Stableford Netto"}
+            </div>
             {ranked.map((s,i) => (
               <div key={s.p.id} style={{ display: "flex", alignItems: "center", gap: "12px", padding: "12px 0", borderBottom: i < ranked.length - 1 ? `1px solid ${T.line}` : "none" }}>
                 <div style={{ fontSize: "24px", width: "30px", textAlign: "center" }}>
-                  {medals[i] || <span className="mono" style={{ fontSize: "15px", color: T.textSoft, fontWeight: 700 }}>{i+1}.</span>}
+                  {!isUschi && medals[i] || <span className="mono" style={{ fontSize: "15px", color: T.textSoft, fontWeight: 700 }}>{i+1}.</span>}
                 </div>
                 <div style={{ flex: 1 }}>
                   <div style={{ fontWeight: 700, fontSize: "15px", color: T.text, display: "flex", alignItems: "center", gap: "6px" }}>
@@ -1771,6 +2356,232 @@ export default function GolfApp() {
               🗑 Diese Runde löschen
             </button>
           )}
+        </div>
+      </div>
+    );
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // USCHI PAR-3 DIALOG
+  // ═══════════════════════════════════════════════════════════════════════════
+  const renderUschiPar3Dialog = () => {
+    if (uschiPromptHole === null) return null;
+    const holeIdx = uschiPromptHole;
+    const hole = holes[holeIdx];
+    if (!hole || hole.par !== 3) return null;
+
+    const current = par3Data[holeIdx] || { greenHits: [], closest: null };
+    const greenHits = current.greenHits || [];
+    const closest = current.closest || null;
+
+    const toggleGreen = (pid) => {
+      const next = greenHits.includes(pid)
+        ? greenHits.filter(x => x !== pid)
+        : [...greenHits, pid];
+      const newClosest = next.includes(closest) ? closest : null;
+      setPar3Data({ ...par3Data, [holeIdx]: { greenHits: next, closest: newClosest } });
+    };
+    const setClosest = (pid) => {
+      setPar3Data({ ...par3Data, [holeIdx]: { greenHits, closest: pid } });
+    };
+    const clearAll = () => {
+      const next = { ...par3Data };
+      delete next[holeIdx];
+      setPar3Data(next);
+    };
+
+    const canClose = greenHits.length === 0 || closest !== null;
+
+    return (
+      <div onClick={() => canClose && setUschiPromptHole(null)}
+        style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+        <div onClick={e => e.stopPropagation()} className="slide-up"
+          style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
+          <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 18px" }}/>
+
+          <div style={{ display: "flex", alignItems: "flex-start", gap: "14px", marginBottom: "16px" }}>
+            <div style={{ fontSize: "32px" }}>🎯</div>
+            <div>
+              <div className="serif" style={{ fontSize: "22px", color: T.text, lineHeight: 1.1 }}>
+                Uschi · Loch <span style={{ color: T.gold }}>{holeIdx + 1}</span>
+              </div>
+              <div style={{ fontSize: "12px", color: T.textSoft, marginTop: "4px" }}>
+                Par {hole.par} · SI {hole.si}
+              </div>
+            </div>
+          </div>
+
+          {/* Step 1: Green hits */}
+          <div style={{ ...S.eyebrow, marginBottom: "8px" }}>1 · Wer hat das Grün getroffen?</div>
+          <div style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px" }}>
+            Auch jene die Par verfehlt haben — das bestimmt ob die Uschi "verbrannt" wird.
+          </div>
+          <div style={{ display: "grid", gap: "6px", marginBottom: "18px" }}>
+            {players.map(p => {
+              const sc = scores[p.id]?.[holeIdx];
+              const isStr = isStrich(sc);
+              const active = greenHits.includes(p.id);
+              return (
+                <button key={p.id} onClick={() => !isStr && toggleGreen(p.id)}
+                  disabled={isStr}
+                  style={{
+                    padding: "12px 14px", textAlign: "left",
+                    background: active ? `${T.sage}15` : T.surface2,
+                    color: isStr ? T.textDim : T.text,
+                    border: `1.5px solid ${active ? T.sage : T.line}`,
+                    borderRadius: "10px",
+                    display: "flex", alignItems: "center", gap: "10px",
+                    opacity: isStr ? 0.5 : 1,
+                  }}>
+                  <div style={{ width: "22px", height: "22px", borderRadius: "5px", background: active ? T.sage : "transparent", border: `1.5px solid ${active ? T.sage : T.lineStrong}`, display: "flex", alignItems: "center", justifyContent: "center", color: T.canvas, fontSize: "13px", fontWeight: 700 }}>
+                    {active ? "✓" : ""}
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: "14px", fontWeight: 600 }}>{p.name}</div>
+                    <div style={{ fontSize: "11px", color: T.textSoft }}>
+                      Score: {isStr ? "Gestrichen" : isValid(sc) ? `${sc} (${scoreLabel(sc, hole.par)})` : "—"}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Step 2: Closest - only if at least one green hit */}
+          {greenHits.length > 0 && (
+            <>
+              <div style={{ ...S.eyebrow, marginBottom: "8px" }}>2 · Wer war am nächsten zur Fahne?</div>
+              <div style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px" }}>
+                Nur unter denen die Grün getroffen haben.
+              </div>
+              <div style={{ display: "grid", gap: "6px", marginBottom: "12px" }}>
+                {players.filter(p => greenHits.includes(p.id)).map(p => {
+                  const active = closest === p.id;
+                  return (
+                    <button key={p.id} onClick={() => setClosest(p.id)}
+                      style={{
+                        padding: "12px 14px", textAlign: "left",
+                        background: active ? `${T.gold}15` : T.surface2,
+                        color: T.text,
+                        border: `1.5px solid ${active ? T.gold : T.line}`,
+                        borderRadius: "10px",
+                        display: "flex", alignItems: "center", gap: "10px",
+                      }}>
+                      <div style={{ width: "22px", height: "22px", borderRadius: "50%", background: active ? T.gold : "transparent", border: `1.5px solid ${active ? T.gold : T.lineStrong}`, display: "flex", alignItems: "center", justifyContent: "center", color: T.canvas, fontSize: "13px", fontWeight: 700 }}>
+                        {active ? "✓" : ""}
+                      </div>
+                      <span style={{ fontSize: "14px", fontWeight: 600 }}>{p.name}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {/* If no green hits */}
+          {greenHits.length === 0 && (
+            <div style={{ background: `${T.bogey}15`, border: `1px solid ${T.bogey}40`, borderRadius: "10px", padding: "12px 14px", marginBottom: "12px", fontSize: "12px", color: T.bogey, lineHeight: 1.4 }}>
+              ⚠️ Wenn niemand das Grün getroffen hat, wird die Uschi zum nächsten Par 3 weitervererbt (Doppel-Uschi).
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button onClick={clearAll} style={{ ...S.btnGhost, flex: 1, color: T.textSoft }}>
+              Zurücksetzen
+            </button>
+            <button onClick={() => setUschiPromptHole(null)}
+              className={canClose ? "gold-hover" : ""}
+              disabled={!canClose}
+              style={{ ...S.btnPrimary, flex: 2, opacity: canClose ? 1 : 0.4 }}>
+              {greenHits.length === 0 ? "Niemand trifft → Speichern" : "Speichern"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // USCHI REVIEW SCREEN (all Par-3 overview)
+  // ═══════════════════════════════════════════════════════════════════════════
+  const renderUschiReview = () => {
+    if (!showUschiReview) return null;
+    const par3Indices = holes.map((h, i) => ({ h, i })).filter(x => x.h.par === 3);
+
+    return (
+      <div onClick={() => setShowUschiReview(false)}
+        style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1050, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+        <div onClick={e => e.stopPropagation()} className="slide-up"
+          style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
+          <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 18px" }}/>
+
+          <h3 className="serif" style={{ fontSize: "24px", margin: "0 0 6px", color: T.text }}>
+            🎯 Uschi-Protokoll
+          </h3>
+          <p style={{ fontSize: "12px", color: T.textSoft, marginBottom: "14px" }}>
+            Alle Par-3 Löcher auf einen Blick. Tap auf ein Loch zum Nachbearbeiten.
+          </p>
+
+          {par3Indices.length === 0 && (
+            <EmptyState icon="🎯" title="Keine Par-3 Löcher" sub="Dieser Platz hat keine Par 3." />
+          )}
+
+          {par3Indices.map(({ h, i }) => {
+            const data = par3Data[i];
+            const hasData = !!data;
+            const closest = data?.closest;
+            const closestPlayer = players.find(p => p.id === closest);
+            const greenHits = data?.greenHits || [];
+            const allScored = players.every(p => {
+              const g = scores[p.id]?.[i];
+              return isValid(g) || isStrich(g);
+            });
+            const status = !allScored
+              ? { label: "Score fehlt noch", color: T.textDim }
+              : !hasData
+                ? { label: "⚠️ Uschi-Eingabe fehlt", color: T.bogey }
+                : greenHits.length === 0
+                  ? { label: "↻ Niemand Grün → carry", color: T.sage }
+                  : !closest
+                    ? { label: "⚠️ Closest fehlt", color: T.bogey }
+                    : (() => {
+                        const cScore = scores[closest]?.[i];
+                        if (!isValid(cScore)) return { label: "⚠️ unklar", color: T.bogey };
+                        const madePar = cScore - h.par <= 0;
+                        return madePar
+                          ? { label: `✓ ${closestPlayer?.name || "?"} gewinnt`, color: T.gold }
+                          : { label: `🔥 ${closestPlayer?.name || "?"} verbrennt`, color: T.double };
+                      })();
+
+            return (
+              <button key={i} onClick={() => { setShowUschiReview(false); setUschiPromptHole(i); }}
+                style={{
+                  width: "100%", textAlign: "left",
+                  padding: "12px 14px", marginBottom: "8px",
+                  background: T.surface2,
+                  border: `1px solid ${T.line}`,
+                  borderRadius: "10px",
+                  display: "flex", alignItems: "center", gap: "12px",
+                  color: T.text,
+                }}>
+                <div className="mono serif" style={{ fontSize: "22px", color: T.gold, lineHeight: 1, minWidth: "40px" }}>{i + 1}</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: "13px", fontWeight: 600, color: T.text }}>
+                    Loch {i + 1} · Par {h.par} · SI {h.si}
+                  </div>
+                  <div style={{ fontSize: "11px", color: status.color, marginTop: "3px", fontWeight: 500 }}>
+                    {status.label}
+                  </div>
+                </div>
+                <span style={{ color: T.textDim, fontSize: "16px" }}>›</span>
+              </button>
+            );
+          })}
+
+          <button onClick={() => setShowUschiReview(false)}
+            style={{ ...S.btnSecondary, width: "100%", marginTop: "14px" }}>
+            Schließen
+          </button>
         </div>
       </div>
     );
@@ -1983,6 +2794,8 @@ export default function GolfApp() {
       {padOpen && renderNumberPad()}
       {showImport && renderImportModal()}
       {renderSyncModal()}
+      {renderUschiPar3Dialog()}
+      {renderUschiReview()}
     </div>
   );
 }
