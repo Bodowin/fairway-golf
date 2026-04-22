@@ -1116,7 +1116,7 @@ export default function GolfApp() {
   // ── Stats (uses per-player tee data + any manual PH override)
   const getStats = (player) => {
     const tee = playerTee(player, cfg, selectedClub);
-    if (!tee) return { ph: 0, hr: [], bT: 0, nT: 0, sfNT: 0, sfBT: 0, phSource: "formula" };
+    if (!tee) return { ph: 0, hr: [], bT: 0, nT: 0, sfNT: 0, sfBT: 0, phSource: "formula", strichCount: 0 };
     const { ph, source: phSource } = resolvePlayerPH(player, cfg, selectedClub, par);
     const hr = holes.map((h, i) => {
       const g = scores[player.id]?.[i];
@@ -1125,8 +1125,9 @@ export default function GolfApp() {
     });
     const played = hr.filter(h => isValid(h.g));
     const bT = played.reduce((s, h) => s + h.g, 0);
+    const strichCount = hr.filter(h => isStrich(h.g)).length;
     return {
-      ph, hr, bT, tee, phSource,
+      ph, hr, bT, tee, phSource, strichCount,
       nT: played.length ? bT - ph : 0,
       sfNT: hr.reduce((s, h) => s + (h.sfN || 0), 0),
       sfBT: hr.reduce((s, h) => s + (h.sfB || 0), 0),
@@ -2136,30 +2137,81 @@ export default function GolfApp() {
 
           {/* Live totals card */}
           <div style={{ ...S.card, marginTop: "14px", marginBottom: "14px" }}>
-            <div style={{ ...S.eyebrow, marginBottom: "12px" }}>Zwischenstand</div>
-            {players.map((p,i) => {
-              const s = getStats(p);
-              return (
-                <div key={p.id} style={{ display: "flex", alignItems: "center", gap: "12px", padding: "10px 0", borderBottom: i < players.length - 1 ? `1px solid ${T.line}` : "none" }}>
-                  <div style={{ width: "30px", height: "30px", borderRadius: "50%", background: `${T.gold}20`, border: `1px solid ${T.gold}40`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", fontWeight: 700, color: T.gold }}>
-                    {p.name.charAt(0).toUpperCase()}
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600, fontSize: "14px", color: T.text, display: "flex", alignItems: "center", gap: "6px" }}>
-                      {p.name}
-                      {s.tee?.teeName && <TeeDot name={s.tee.teeName} size={8} />}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+              <div style={{ ...S.eyebrow }}>Zwischenstand</div>
+              {gameMode !== "stableford" && uschiResult && (
+                <div style={{ fontSize: "9px", color: T.gold, letterSpacing: "0.08em", fontWeight: 600 }}>🎯 USCHI-MODUS</div>
+              )}
+            </div>
+            {/* Sort by uschi points if in uschi mode, else by sf netto */}
+            {(() => {
+              const withStats = players.map(p => ({ p, s: getStats(p), uschiTotal: uschiResult?.totals?.[p.id]?.total ?? 0 }));
+              const sorted = gameMode !== "stableford" && uschiResult
+                ? [...withStats].sort((a, b) => b.uschiTotal - a.uschiTotal)
+                : [...withStats].sort((a, b) => b.s.sfNT - a.s.sfNT);
+              return sorted.map((item, i) => {
+                const p = item.p;
+                const s = item.s;
+                const isUschi = gameMode !== "stableford" && uschiResult;
+                const uschiTotal = item.uschiTotal;
+                return (
+                  <div key={p.id} style={{ display: "flex", alignItems: "center", gap: "12px", padding: "10px 0", borderBottom: i < sorted.length - 1 ? `1px solid ${T.line}` : "none" }}>
+                    <div style={{ width: "30px", height: "30px", borderRadius: "50%", background: `${T.gold}20`, border: `1px solid ${T.gold}40`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", fontWeight: 700, color: T.gold, flexShrink: 0 }}>
+                      {p.name.charAt(0).toUpperCase()}
                     </div>
-                    <div style={{ fontSize: "11px", color: T.textSoft }}>
-                      Vorgabe <span className="mono">{s.ph}</span> · Brutto <span className="mono">{s.bT || "—"}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: "14px", color: T.text, display: "flex", alignItems: "center", gap: "6px" }}>
+                        {p.name}
+                        {s.tee?.teeName && <TeeDot name={s.tee.teeName} size={8} />}
+                        {i === 0 && isUschi && <span style={{ fontSize: "14px" }}>👑</span>}
+                      </div>
+                      <div style={{ fontSize: "11px", color: T.textSoft }}>
+                        {isUschi ? (
+                          <>SF <span className="mono">{s.sfNT}</span> · Brutto <span className="mono">{s.bT || "—"}{s.strichCount > 0 ? "*" : ""}</span></>
+                        ) : (
+                          <>Vorgabe <span className="mono">{s.ph}</span> · Brutto <span className="mono">{s.bT || "—"}{s.strichCount > 0 ? "*" : ""}</span></>
+                        )}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      {isUschi ? (
+                        <>
+                          <div className="mono" style={{ fontSize: "22px", fontWeight: 800, color: uschiTotal >= 0 ? T.gold : T.double, lineHeight: 1 }}>
+                            {uschiTotal > 0 ? "+" : ""}{uschiTotal}
+                          </div>
+                          <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>USCHI</div>
+                        </>
+                      ) : (
+                        <>
+                          <div className="mono" style={{ fontSize: "22px", fontWeight: 800, color: T.gold, lineHeight: 1 }}>{s.sfNT}</div>
+                          <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>SF NETTO</div>
+                        </>
+                      )}
                     </div>
                   </div>
-                  <div style={{ textAlign: "right" }}>
-                    <div className="mono" style={{ fontSize: "22px", fontWeight: 800, color: T.gold, lineHeight: 1 }}>{s.sfNT}</div>
-                    <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>SF NETTO</div>
-                  </div>
+                );
+              });
+            })()}
+            {/* Team totals if in team mode */}
+            {gameMode === "uschi-team" && teamResult && teams?.A?.length === 2 && teams?.B?.length === 2 && (
+              <div style={{ marginTop: "10px", paddingTop: "10px", borderTop: `1px solid ${T.lineStrong}` }}>
+                <div style={{ fontSize: "9px", color: T.textDim, letterSpacing: "0.08em", fontWeight: 600, marginBottom: "6px" }}>TEAM-STAND</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+                  {["A", "B"].map(k => {
+                    const names = (teams[k] || []).map(pid => players.find(p => p.id === pid)?.name).filter(Boolean).join(" + ");
+                    const total = teamResult.teamTotals[k];
+                    return (
+                      <div key={k} style={{ background: T.surface2, borderRadius: "8px", padding: "8px 10px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div style={{ fontSize: "11px", color: T.textSoft, fontWeight: 500 }}>{names}</div>
+                        <div className="mono" style={{ fontSize: "16px", fontWeight: 700, color: total >= 0 ? T.gold : T.double }}>
+                          {total > 0 ? "+" : ""}{total}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-              );
-            })}
+              </div>
+            )}
           </div>
 
           <div style={{ display: "flex", gap: "10px" }}>
@@ -2609,7 +2661,8 @@ export default function GolfApp() {
       ctx.fillText(`HCP ${s.p.hcp} · Vorgabe ${s.ph}${teeName}`, 275, y + 62);
 
       if (s.bT) {
-        ctx.fillText(`Brutto ${s.bT} · SF Brutto ${s.sfBT}`, 275, y + 86);
+        const bruttoStar = s.strichCount > 0 ? "*" : "";
+        ctx.fillText(`Brutto ${s.bT}${bruttoStar} · SF Brutto ${s.sfBT}`, 275, y + 86);
       }
 
       // Points (big, gold)
@@ -2750,7 +2803,7 @@ export default function GolfApp() {
                     {s.tee?.teeName && <TeeDot name={s.tee.teeName} size={9} />}
                   </div>
                   <div style={{ fontSize: "11px", color: T.textSoft, marginTop: "1px" }}>
-                    HCP <span className="mono">{s.p.hcp}</span> · Vorgabe <span className="mono">{s.ph}</span> · Brutto <span className="mono">{s.bT || "—"}</span>
+                    HCP <span className="mono">{s.p.hcp}</span> · Vorgabe <span className="mono">{s.ph}</span> · Brutto <span className="mono">{s.bT || "—"}{s.strichCount > 0 ? "*" : ""}</span>
                   </div>
                 </div>
                 <div style={{ textAlign: "right" }}>
@@ -2759,6 +2812,11 @@ export default function GolfApp() {
                 </div>
               </div>
             ))}
+            {all.some(s => s.strichCount > 0) && (
+              <div style={{ fontSize: "10px", color: T.textDim, marginTop: "12px", paddingTop: "10px", borderTop: `1px dashed ${T.line}`, fontStyle: "italic", lineHeight: 1.5 }}>
+                * Brutto ohne gestrichene Löcher — {all.filter(s => s.strichCount > 0).map(s => `${s.p.name}: ${s.strichCount}`).join(", ")}
+              </div>
+            )}
           </div>
 
           {all.map(s => (
@@ -2780,7 +2838,7 @@ export default function GolfApp() {
                   { l: "SF Netto ★", v: `${s.sfNT}`, hi: true, suffix: "Pkt" },
                   { l: "SF Brutto",  v: `${s.sfBT}`, suffix: "Pkt" },
                   { l: "Netto Strokeplay",  v: s.nT },
-                  { l: "Brutto Strokeplay", v: s.bT },
+                  { l: s.strichCount > 0 ? "Brutto Strokeplay *" : "Brutto Strokeplay", v: s.bT },
                 ].map(item => (
                   <div key={item.l} style={{ background: item.hi ? `${T.gold}12` : T.surface2, border: `1px solid ${item.hi ? T.gold + "40" : T.line}`, borderRadius: "12px", padding: "12px 14px" }}>
                     <div style={{ fontSize: "9px", color: item.hi ? T.gold : T.textDim, letterSpacing: "0.08em", textTransform: "uppercase", fontWeight: 600, marginBottom: "5px" }}>{item.l}</div>
@@ -2996,7 +3054,16 @@ export default function GolfApp() {
             <button onClick={clearAll} style={{ ...S.btnGhost, flex: 1, color: T.textSoft }}>
               Zurücksetzen
             </button>
-            <button onClick={() => setUschiPromptHole(null)}
+            <button onClick={() => {
+                // CRITICAL: always persist the current state, even if nobody hit the green.
+                // Without this, an empty {greenHits:[], closest:null} entry is missing
+                // and the carry-over logic cannot track that this par-3 was resolved as "nobody hit".
+                setPar3Data(prev => ({
+                  ...prev,
+                  [holeIdx]: { greenHits: [...greenHits], closest: closest || null },
+                }));
+                setUschiPromptHole(null);
+              }}
               className={canClose ? "gold-hover" : ""}
               disabled={!canClose}
               style={{ ...S.btnPrimary, flex: 2, opacity: canClose ? 1 : 0.4 }}>
@@ -3043,12 +3110,16 @@ export default function GolfApp() {
               const g = scores[p.id]?.[i];
               return isValid(g) || isStrich(g);
             });
+            // Find the uschi info from the computed result to show multiplier
+            const uschiInfo = uschiResult?.perHole?.find(ph => ph.holeIdx === i)?.uschi;
+            const multiplierText = uschiInfo?.multiplier > 1 ? ` (${uschiInfo.multiplier}×)` : "";
+
             const status = !allScored
               ? { label: "Score fehlt noch", color: T.textDim }
               : !hasData
                 ? { label: "⚠️ Uschi-Eingabe fehlt", color: T.bogey }
                 : greenHits.length === 0
-                  ? { label: "↻ Niemand Grün → carry", color: T.sage }
+                  ? { label: `↻ Niemand Grün → carry${multiplierText}`, color: T.sage }
                   : !closest
                     ? { label: "⚠️ Closest fehlt", color: T.bogey }
                     : (() => {
@@ -3056,8 +3127,8 @@ export default function GolfApp() {
                         if (!isValid(cScore)) return { label: "⚠️ unklar", color: T.bogey };
                         const madePar = cScore - h.par <= 0;
                         return madePar
-                          ? { label: `✓ ${closestPlayer?.name || "?"} gewinnt`, color: T.gold }
-                          : { label: `🔥 ${closestPlayer?.name || "?"} verbrennt`, color: T.double };
+                          ? { label: `✓ ${closestPlayer?.name || "?"} gewinnt${multiplierText}`, color: T.gold }
+                          : { label: `🔥 ${closestPlayer?.name || "?"} verbrennt${multiplierText}`, color: T.double };
                       })();
 
             return (
