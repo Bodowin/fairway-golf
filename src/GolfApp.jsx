@@ -153,7 +153,162 @@ const BUILT_IN_CLUBS = [
   simple("GC Wien-Süßenbrunn",             "Wien",            70.0, 118, 72),
   simple("C&C Golfclub am Wienerberg",     "Wien",            70.0, 119, 71),
   simple("GC Adamstal (Wallerbach 9L)",    "Niederösterreich",34.7, 125, 35, 9),
-  simple("Golfclub Frühling Götzendorf",   "Niederösterreich",71.5, 124, 73),
+  {
+    name: "GC Frühling Götzendorf (DayCourse)",
+    region: "Niederösterreich",
+    numHoles: 18,
+    tees: {
+      "Weiss (Herren)": { cr: 75.0, slope: 129, par: 73 },
+      "Gelb (Herren)":  { cr: 71.9, slope: 122, par: 73 },
+      "Blau (Herren)":  { cr: 70.7, slope: 118, par: 73 },
+      "Rot (Herren)":   { cr: 68.4, slope: 114, par: 73 },
+      "Gelb (Damen)":   { cr: 78.4, slope: 135, par: 73 },
+      "Blau (Damen)":   { cr: 77.3, slope: 131, par: 73 },
+      "Rot (Damen)":    { cr: 74.4, slope: 124, par: 73 },
+    },
+    conversionTables: {
+      "Weiss (Herren)": [
+        { min: 4.9, max: 5.6, spielvorgabe: 8 },   { min: 5.7, max: 6.5, spielvorgabe: 9 },
+        { min: 6.6, max: 7.4, spielvorgabe: 10 },  { min: 7.5, max: 8.3, spielvorgabe: 11 },
+        { min: 8.4, max: 9.1, spielvorgabe: 12 },  { min: 9.2, max: 10.0, spielvorgabe: 13 },
+        { min: 10.1, max: 10.9, spielvorgabe: 14 },{ min: 11.0, max: 11.8, spielvorgabe: 15 },
+        { min: 11.9, max: 12.7, spielvorgabe: 16 },{ min: 12.8, max: 13.5, spielvorgabe: 17 },
+        { min: 13.6, max: 14.4, spielvorgabe: 18 },{ min: 14.5, max: 15.3, spielvorgabe: 19 },
+        { min: 15.4, max: 16.2, spielvorgabe: 20 },{ min: 16.3, max: 17.0, spielvorgabe: 21 },
+        { min: 17.1, max: 17.9, spielvorgabe: 22 },{ min: 18.0, max: 18.8, spielvorgabe: 23 },
+        { min: 18.9, max: 19.7, spielvorgabe: 24 },{ min: 19.8, max: 20.5, spielvorgabe: 25 },
+        { min: 20.6, max: 21.4, spielvorgabe: 26 },{ min: 21.5, max: 22.3, spielvorgabe: 27 },
+        { min: 22.4, max: 23.2, spielvorgabe: 28 },{ min: 23.3, max: 24.0, spielvorgabe: 29 },
+        { min: 24.1, max: 24.9, spielvorgabe: 30 },{ min: 25.0, max: 25.8, spielvorgabe: 31 },
+        { min: 25.9, max: 26.7, spielvorgabe: 32 },{ min: 26.8, max: 27.5, spielvorgabe: 33 },
+        { min: 27.6, max: 28.4, spielvorgabe: 34 },{ min: 28.5, max: 29.3, spielvorgabe: 35 },
+        { min: 29.4, max: 30.2, spielvorgabe: 36 },{ min: 30.3, max: 31.0, spielvorgabe: 37 },
+        { min: 31.1, max: 31.9, spielvorgabe: 38 },{ min: 32.0, max: 32.8, spielvorgabe: 39 },
+        { min: 32.9, max: 33.7, spielvorgabe: 40 },{ min: 33.8, max: 34.6, spielvorgabe: 41 },
+        { min: 34.7, max: 35.4, spielvorgabe: 42 },{ min: 35.5, max: 36.0, spielvorgabe: 43 },
+      ],
+      "Gelb (Herren)": [
+        { min: 3.4, max: 4.2, spielvorgabe: 3 },   { min: 4.3, max: 5.1, spielvorgabe: 4 },
+        { min: 5.2, max: 6.1, spielvorgabe: 5 },   { min: 6.2, max: 7.0, spielvorgabe: 6 },
+        { min: 7.1, max: 7.9, spielvorgabe: 7 },   { min: 8.0, max: 8.8, spielvorgabe: 8 },
+        { min: 8.9, max: 9.8, spielvorgabe: 9 },   { min: 9.9, max: 10.7, spielvorgabe: 10 },
+        { min: 10.8, max: 11.6, spielvorgabe: 11 },{ min: 11.7, max: 12.5, spielvorgabe: 12 },
+        { min: 12.6, max: 13.5, spielvorgabe: 13 },{ min: 13.6, max: 14.4, spielvorgabe: 14 },
+        { min: 14.5, max: 15.3, spielvorgabe: 15 },{ min: 15.4, max: 16.3, spielvorgabe: 16 },
+        { min: 16.4, max: 17.2, spielvorgabe: 17 },{ min: 17.3, max: 18.1, spielvorgabe: 18 },
+        { min: 18.2, max: 19.0, spielvorgabe: 19 },{ min: 19.1, max: 20.0, spielvorgabe: 20 },
+        { min: 20.1, max: 20.9, spielvorgabe: 21 },{ min: 21.0, max: 21.8, spielvorgabe: 22 },
+        { min: 21.9, max: 22.7, spielvorgabe: 23 },{ min: 22.8, max: 23.7, spielvorgabe: 24 },
+        { min: 23.8, max: 24.6, spielvorgabe: 25 },{ min: 24.7, max: 25.5, spielvorgabe: 26 },
+        { min: 25.6, max: 26.4, spielvorgabe: 27 },{ min: 26.5, max: 27.4, spielvorgabe: 28 },
+        { min: 27.5, max: 28.3, spielvorgabe: 29 },{ min: 28.4, max: 29.2, spielvorgabe: 30 },
+        { min: 29.3, max: 30.1, spielvorgabe: 31 },{ min: 30.2, max: 31.1, spielvorgabe: 32 },
+        { min: 31.2, max: 32.0, spielvorgabe: 33 },{ min: 32.1, max: 32.9, spielvorgabe: 34 },
+        { min: 33.0, max: 33.8, spielvorgabe: 35 },{ min: 33.9, max: 34.8, spielvorgabe: 36 },
+        { min: 34.9, max: 35.7, spielvorgabe: 37 },{ min: 35.8, max: 36.0, spielvorgabe: 38 },
+      ],
+      "Blau (Herren)": [
+        { min: 1.8, max: 2.6, spielvorgabe: 0 },   { min: 2.7, max: 3.6, spielvorgabe: 1 },
+        { min: 3.7, max: 4.5, spielvorgabe: 2 },   { min: 4.6, max: 5.5, spielvorgabe: 3 },
+        { min: 5.6, max: 6.5, spielvorgabe: 4 },   { min: 6.6, max: 7.4, spielvorgabe: 5 },
+        { min: 7.5, max: 8.4, spielvorgabe: 6 },   { min: 8.5, max: 9.3, spielvorgabe: 7 },
+        { min: 9.4, max: 10.3, spielvorgabe: 8 },  { min: 10.4, max: 11.2, spielvorgabe: 9 },
+        { min: 11.3, max: 12.2, spielvorgabe: 10 },{ min: 12.3, max: 13.2, spielvorgabe: 11 },
+        { min: 13.3, max: 14.1, spielvorgabe: 12 },{ min: 14.2, max: 15.1, spielvorgabe: 13 },
+        { min: 15.2, max: 16.0, spielvorgabe: 14 },{ min: 16.1, max: 17.0, spielvorgabe: 15 },
+        { min: 17.1, max: 18.0, spielvorgabe: 16 },{ min: 18.1, max: 18.9, spielvorgabe: 17 },
+        { min: 19.0, max: 19.9, spielvorgabe: 18 },{ min: 20.0, max: 20.8, spielvorgabe: 19 },
+        { min: 20.9, max: 21.8, spielvorgabe: 20 },{ min: 21.9, max: 22.7, spielvorgabe: 21 },
+        { min: 22.8, max: 23.7, spielvorgabe: 22 },{ min: 23.8, max: 24.7, spielvorgabe: 23 },
+        { min: 24.8, max: 25.6, spielvorgabe: 24 },{ min: 25.7, max: 26.6, spielvorgabe: 25 },
+        { min: 26.7, max: 27.5, spielvorgabe: 26 },{ min: 27.6, max: 28.5, spielvorgabe: 27 },
+        { min: 28.6, max: 29.4, spielvorgabe: 28 },{ min: 29.5, max: 30.4, spielvorgabe: 29 },
+        { min: 30.5, max: 31.4, spielvorgabe: 30 },{ min: 31.5, max: 32.3, spielvorgabe: 31 },
+        { min: 32.4, max: 33.3, spielvorgabe: 32 },{ min: 33.4, max: 34.2, spielvorgabe: 33 },
+        { min: 34.3, max: 35.2, spielvorgabe: 34 },{ min: 35.3, max: 36.0, spielvorgabe: 35 },
+      ],
+      "Rot (Herren)": [
+        { min: 1.1, max: 2.0, spielvorgabe: -3 },  { min: 2.1, max: 3.0, spielvorgabe: -2 },
+        { min: 3.1, max: 4.0, spielvorgabe: -1 },  { min: 4.1, max: 5.0, spielvorgabe: 0 },
+        { min: 5.1, max: 6.0, spielvorgabe: 1 },   { min: 6.1, max: 7.0, spielvorgabe: 2 },
+        { min: 7.1, max: 8.0, spielvorgabe: 3 },   { min: 8.1, max: 9.0, spielvorgabe: 4 },
+        { min: 9.1, max: 10.0, spielvorgabe: 5 },  { min: 10.1, max: 11.0, spielvorgabe: 6 },
+        { min: 11.1, max: 11.9, spielvorgabe: 7 }, { min: 12.0, max: 12.9, spielvorgabe: 8 },
+        { min: 13.0, max: 13.9, spielvorgabe: 9 }, { min: 14.0, max: 14.9, spielvorgabe: 10 },
+        { min: 15.0, max: 15.9, spielvorgabe: 11 },{ min: 16.0, max: 16.9, spielvorgabe: 12 },
+        { min: 17.0, max: 17.9, spielvorgabe: 13 },{ min: 18.0, max: 18.9, spielvorgabe: 14 },
+        { min: 19.0, max: 19.9, spielvorgabe: 15 },{ min: 20.0, max: 20.9, spielvorgabe: 16 },
+        { min: 21.0, max: 21.9, spielvorgabe: 17 },{ min: 22.0, max: 22.8, spielvorgabe: 18 },
+        { min: 22.9, max: 23.8, spielvorgabe: 19 },{ min: 23.9, max: 24.8, spielvorgabe: 20 },
+        { min: 24.9, max: 25.8, spielvorgabe: 21 },{ min: 25.9, max: 26.8, spielvorgabe: 22 },
+        { min: 26.9, max: 27.8, spielvorgabe: 23 },{ min: 27.9, max: 28.8, spielvorgabe: 24 },
+        { min: 28.9, max: 29.8, spielvorgabe: 25 },{ min: 29.9, max: 30.8, spielvorgabe: 26 },
+        { min: 30.9, max: 31.8, spielvorgabe: 27 },{ min: 31.9, max: 32.8, spielvorgabe: 28 },
+        { min: 32.9, max: 33.8, spielvorgabe: 29 },{ min: 33.9, max: 34.7, spielvorgabe: 30 },
+        { min: 34.8, max: 35.7, spielvorgabe: 31 },{ min: 35.8, max: 36.0, spielvorgabe: 32 },
+      ],
+      "Gelb (Damen)": [
+        { min: 6.0, max: 6.7, spielvorgabe: 13 },  { min: 6.8, max: 7.6, spielvorgabe: 14 },
+        { min: 7.7, max: 8.4, spielvorgabe: 15 },  { min: 8.5, max: 9.2, spielvorgabe: 16 },
+        { min: 9.3, max: 10.1, spielvorgabe: 17 }, { min: 10.2, max: 10.9, spielvorgabe: 18 },
+        { min: 11.0, max: 11.8, spielvorgabe: 19 },{ min: 11.9, max: 12.6, spielvorgabe: 20 },
+        { min: 12.7, max: 13.4, spielvorgabe: 21 },{ min: 13.5, max: 14.3, spielvorgabe: 22 },
+        { min: 14.4, max: 15.1, spielvorgabe: 23 },{ min: 15.2, max: 15.9, spielvorgabe: 24 },
+        { min: 16.0, max: 16.8, spielvorgabe: 25 },{ min: 16.9, max: 17.6, spielvorgabe: 26 },
+        { min: 17.7, max: 18.4, spielvorgabe: 27 },{ min: 18.5, max: 19.3, spielvorgabe: 28 },
+        { min: 19.4, max: 20.1, spielvorgabe: 29 },{ min: 20.2, max: 21.0, spielvorgabe: 30 },
+        { min: 21.1, max: 21.8, spielvorgabe: 31 },{ min: 21.9, max: 22.6, spielvorgabe: 32 },
+        { min: 22.7, max: 23.5, spielvorgabe: 33 },{ min: 23.6, max: 24.3, spielvorgabe: 34 },
+        { min: 24.4, max: 25.1, spielvorgabe: 35 },{ min: 25.2, max: 26.0, spielvorgabe: 36 },
+        { min: 26.1, max: 26.8, spielvorgabe: 37 },{ min: 26.9, max: 27.7, spielvorgabe: 38 },
+        { min: 27.8, max: 28.5, spielvorgabe: 39 },{ min: 28.6, max: 29.3, spielvorgabe: 40 },
+        { min: 29.4, max: 30.2, spielvorgabe: 41 },{ min: 30.3, max: 31.0, spielvorgabe: 42 },
+        { min: 31.1, max: 31.8, spielvorgabe: 43 },{ min: 31.9, max: 32.7, spielvorgabe: 44 },
+        { min: 32.8, max: 33.5, spielvorgabe: 45 },{ min: 33.6, max: 34.4, spielvorgabe: 46 },
+        { min: 34.5, max: 35.2, spielvorgabe: 47 },{ min: 35.3, max: 36.0, spielvorgabe: 48 },
+      ],
+      "Blau (Damen)": [
+        { min: 5.4, max: 6.2, spielvorgabe: 11 },  { min: 6.3, max: 7.0, spielvorgabe: 12 },
+        { min: 7.1, max: 7.9, spielvorgabe: 13 },  { min: 8.0, max: 8.7, spielvorgabe: 14 },
+        { min: 8.8, max: 9.6, spielvorgabe: 15 },  { min: 9.7, max: 10.5, spielvorgabe: 16 },
+        { min: 10.6, max: 11.3, spielvorgabe: 17 },{ min: 11.4, max: 12.2, spielvorgabe: 18 },
+        { min: 12.3, max: 13.1, spielvorgabe: 19 },{ min: 13.2, max: 13.9, spielvorgabe: 20 },
+        { min: 14.0, max: 14.8, spielvorgabe: 21 },{ min: 14.9, max: 15.6, spielvorgabe: 22 },
+        { min: 15.7, max: 16.5, spielvorgabe: 23 },{ min: 16.6, max: 17.4, spielvorgabe: 24 },
+        { min: 17.5, max: 18.2, spielvorgabe: 25 },{ min: 18.3, max: 19.1, spielvorgabe: 26 },
+        { min: 19.2, max: 20.0, spielvorgabe: 27 },{ min: 20.1, max: 20.8, spielvorgabe: 28 },
+        { min: 20.9, max: 21.7, spielvorgabe: 29 },{ min: 21.8, max: 22.5, spielvorgabe: 30 },
+        { min: 22.6, max: 23.4, spielvorgabe: 31 },{ min: 23.5, max: 24.3, spielvorgabe: 32 },
+        { min: 24.4, max: 25.1, spielvorgabe: 33 },{ min: 25.2, max: 26.0, spielvorgabe: 34 },
+        { min: 26.1, max: 26.9, spielvorgabe: 35 },{ min: 27.0, max: 27.7, spielvorgabe: 36 },
+        { min: 27.8, max: 28.6, spielvorgabe: 37 },{ min: 28.7, max: 29.5, spielvorgabe: 38 },
+        { min: 29.6, max: 30.3, spielvorgabe: 39 },{ min: 30.4, max: 31.2, spielvorgabe: 40 },
+        { min: 31.3, max: 32.0, spielvorgabe: 41 },{ min: 32.1, max: 32.9, spielvorgabe: 42 },
+        { min: 33.0, max: 33.8, spielvorgabe: 43 },{ min: 33.9, max: 34.6, spielvorgabe: 44 },
+        { min: 34.7, max: 35.5, spielvorgabe: 45 },{ min: 35.6, max: 36.0, spielvorgabe: 46 },
+      ],
+      "Rot (Damen)": [
+        { min: 3.8, max: 4.6, spielvorgabe: 6 },   { min: 4.7, max: 5.5, spielvorgabe: 7 },
+        { min: 5.6, max: 6.4, spielvorgabe: 8 },   { min: 6.5, max: 7.3, spielvorgabe: 9 },
+        { min: 7.4, max: 8.2, spielvorgabe: 10 },  { min: 8.3, max: 9.2, spielvorgabe: 11 },
+        { min: 9.3, max: 10.1, spielvorgabe: 12 }, { min: 10.2, max: 11.0, spielvorgabe: 13 },
+        { min: 11.1, max: 11.9, spielvorgabe: 14 },{ min: 12.0, max: 12.8, spielvorgabe: 15 },
+        { min: 12.9, max: 13.7, spielvorgabe: 16 },{ min: 13.8, max: 14.6, spielvorgabe: 17 },
+        { min: 14.7, max: 15.5, spielvorgabe: 18 },{ min: 15.6, max: 16.4, spielvorgabe: 19 },
+        { min: 16.5, max: 17.4, spielvorgabe: 20 },{ min: 17.5, max: 18.3, spielvorgabe: 21 },
+        { min: 18.4, max: 19.2, spielvorgabe: 22 },{ min: 19.3, max: 20.1, spielvorgabe: 23 },
+        { min: 20.2, max: 21.0, spielvorgabe: 24 },{ min: 21.1, max: 21.9, spielvorgabe: 25 },
+        { min: 22.0, max: 22.8, spielvorgabe: 26 },{ min: 22.9, max: 23.7, spielvorgabe: 27 },
+        { min: 23.8, max: 24.6, spielvorgabe: 28 },{ min: 24.7, max: 25.6, spielvorgabe: 29 },
+        { min: 25.7, max: 26.5, spielvorgabe: 30 },{ min: 26.6, max: 27.4, spielvorgabe: 31 },
+        { min: 27.5, max: 28.3, spielvorgabe: 32 },{ min: 28.4, max: 29.2, spielvorgabe: 33 },
+        { min: 29.3, max: 30.1, spielvorgabe: 34 },{ min: 30.2, max: 31.0, spielvorgabe: 35 },
+        { min: 31.1, max: 31.9, spielvorgabe: 36 },{ min: 32.0, max: 32.8, spielvorgabe: 37 },
+        { min: 32.9, max: 33.8, spielvorgabe: 38 },{ min: 33.9, max: 34.7, spielvorgabe: 39 },
+        { min: 34.8, max: 35.6, spielvorgabe: 40 },{ min: 35.7, max: 36.0, spielvorgabe: 41 },
+      ],
+    },
+  },
   simple("GC St. Pölten (Schloss Goldegg)","Niederösterreich",71.5, 125, 72),
   simple("Golfclub Schwechat",             "Niederösterreich",70.5, 121, 72),
   {
@@ -245,6 +400,35 @@ function makeHoles(totalPar, numHoles) {
 
 const sumPar     = hs => hs.reduce((s,h) => s + h.par, 0);
 const calcPH     = (idx, slope, cr, par) => Math.round(idx * (slope/113) + (cr - par));
+
+// Look up course handicap from an official ÖGV conversion table.
+// Table format: [{ min, max, spielvorgabe }, ...] where min/max are decimal handicap ranges.
+// Returns the spielvorgabe (integer) or null if HCP is outside the table range.
+// Note: For normal HCP ranges (0-36), this usually matches the WHS formula exactly.
+// The table is useful for edge cases (Plus-players, HCPs over 36 with Clubvorgaben, etc.)
+function lookupCourseHcp(hcp, table) {
+  if (!table || !Array.isArray(table) || table.length === 0) return null;
+  if (typeof hcp !== "number" || isNaN(hcp)) return null;
+  // Find row where hcp falls between min and max (inclusive, small tolerance for rounding)
+  for (const row of table) {
+    if (hcp >= row.min - 0.05 && hcp <= row.max + 0.05) {
+      return row.spielvorgabe;
+    }
+  }
+  return null; // outside table range — fall back to formula
+}
+
+// Preferred lookup chain:
+// 1. Manual override (player-specific) — user knows best
+// 2. Conversion table (if available for this tee)
+// 3. WHS formula — mathematical baseline
+// Returns { ph, source: "manual" | "table" | "formula" }
+function calcCourseHcp(hcp, slope, cr, par, conversionTable) {
+  const tableResult = lookupCourseHcp(hcp, conversionTable);
+  if (tableResult !== null) return { ph: tableResult, source: "table" };
+  return { ph: calcPH(hcp, slope, cr, par), source: "formula" };
+}
+
 const holeHS     = (ph, si, n) => Math.floor(Math.abs(ph)/n) + (si <= Math.abs(ph)%n ? 1 : 0);
 const isStrich   = v => v === null;
 const isValid    = v => typeof v === "number" && v > 0;
@@ -283,24 +467,42 @@ const fmtDate = d => {
   } catch { return d; }
 };
 
-// Resolve a player's tee data (supports old format with cfg.cr/cfg.slope fallback)
+// Resolve a player's tee data (supports old format with cfg.cr/cfg.slope fallback).
+// If the club has a `conversionTables` block for the tee, it is attached.
 function playerTee(player, cfg, club) {
+  // Find the tee name we're working with
+  const teeName = player.teeName || cfg.defaultTeeName || null;
+  const conversionTable = (club?.conversionTables && teeName) ? club.conversionTables[teeName] : null;
+
   if (typeof player.cr === "number" && typeof player.slope === "number") {
-    return { cr: player.cr, slope: player.slope, par: player.par, teeName: player.teeName };
+    return { cr: player.cr, slope: player.slope, par: player.par, teeName: player.teeName, conversionTable };
   }
   if (club && player.teeName && club.tees?.[player.teeName]) {
     const t = club.tees[player.teeName];
-    return { cr: t.cr, slope: t.slope, par: t.par, teeName: player.teeName };
+    return { cr: t.cr, slope: t.slope, par: t.par, teeName: player.teeName, conversionTable };
   }
   if (club && cfg.defaultTeeName && club.tees?.[cfg.defaultTeeName]) {
     const t = club.tees[cfg.defaultTeeName];
-    return { cr: t.cr, slope: t.slope, par: t.par, teeName: cfg.defaultTeeName };
+    return { cr: t.cr, slope: t.slope, par: t.par, teeName: cfg.defaultTeeName, conversionTable };
   }
   // Legacy fallback: cfg.cr/cfg.slope from old rounds
   if (typeof cfg.cr === "number") {
-    return { cr: cfg.cr, slope: cfg.slope, par: cfg.par || sumPar, teeName: cfg.teeName || "Standard" };
+    return { cr: cfg.cr, slope: cfg.slope, par: cfg.par || sumPar, teeName: cfg.teeName || "Standard", conversionTable: null };
   }
   return null;
+}
+
+// Resolve a player's effective course handicap, honoring manual override first,
+// then the club's conversion table, then WHS formula as a fallback.
+// Returns { ph, source: "manual" | "table" | "formula" }
+function resolvePlayerPH(player, cfg, club, par) {
+  // Manual override takes precedence
+  if (typeof player.phOverride === "number") {
+    return { ph: player.phOverride, source: "manual" };
+  }
+  const tee = playerTee(player, cfg, club);
+  if (!tee) return { ph: 0, source: "formula" };
+  return calcCourseHcp(player.hcp, tee.slope, tee.cr, tee.par || par, tee.conversionTable);
 }
 
 function validateClub(c) {
@@ -342,12 +544,12 @@ function uschiAdjustedStrokes(players, cfg, club, holes) {
   const is9 = numHoles === 9;
   const par = sumPar(holes);
 
-  // Compute Kurs-HC for each player
+  // Compute Kurs-HC for each player, respecting manual override
   const withCH = players.map(p => {
     const tee = playerTee(p, cfg, club);
     if (!tee) return { playerId: p.id, ch: p.hcp || 0 };
-    const ch = calcPH(p.hcp, tee.slope, tee.cr, tee.par || par);
-    return { playerId: p.id, ch };
+    const { ph } = resolvePlayerPH(p, cfg, club, par);
+    return { playerId: p.id, ch: ph };
   });
   if (withCH.length === 0) return [];
 
@@ -648,6 +850,7 @@ export default function GolfApp() {
   const [importErrors, setImportErrors] = useState([]);
   const [padOpen, setPadOpen] = useState(null); // { playerId, holeIdx } | null
   const [teePickerFor, setTeePickerFor] = useState(null); // playerId to change tee for
+  const [phEditingFor, setPhEditingFor] = useState(null); // playerId whose PH is being edited manually
   const [loadedRoundId, setLoadedRoundId] = useState(null); // track which round is being viewed/edited
   // Scoring mode
   const [scoringMode, setScoringMode] = useState("batch"); // batch | live
@@ -910,11 +1113,11 @@ export default function GolfApp() {
     }
   };
 
-  // ── Stats (uses per-player tee data)
+  // ── Stats (uses per-player tee data + any manual PH override)
   const getStats = (player) => {
     const tee = playerTee(player, cfg, selectedClub);
-    if (!tee) return { ph: 0, hr: [], bT: 0, nT: 0, sfNT: 0, sfBT: 0 };
-    const ph = calcPH(player.hcp, tee.slope, tee.cr, tee.par || par);
+    if (!tee) return { ph: 0, hr: [], bT: 0, nT: 0, sfNT: 0, sfBT: 0, phSource: "formula" };
+    const { ph, source: phSource } = resolvePlayerPH(player, cfg, selectedClub, par);
     const hr = holes.map((h, i) => {
       const g = scores[player.id]?.[i];
       const hs = holeHS(ph, h.si, cfg.numHoles);
@@ -923,7 +1126,7 @@ export default function GolfApp() {
     const played = hr.filter(h => isValid(h.g));
     const bT = played.reduce((s, h) => s + h.g, 0);
     return {
-      ph, hr, bT, tee,
+      ph, hr, bT, tee, phSource,
       nT: played.length ? bT - ph : 0,
       sfNT: hr.reduce((s, h) => s + (h.sfN || 0), 0),
       sfBT: hr.reduce((s, h) => s + (h.sfB || 0), 0),
@@ -1670,19 +1873,35 @@ export default function GolfApp() {
             ? <EmptyState icon="👤" title="Noch keine Spieler" sub="Füge Freunde hinzu oder tippe unten einen Namen ein." />
             : players.map(p => {
                 const tee = playerTee(p, cfg, selectedClub);
-                const ph = tee ? calcPH(p.hcp, tee.slope, tee.cr, tee.par || par) : "—";
+                const phResult = tee ? resolvePlayerPH(p, cfg, selectedClub, par) : { ph: "—", source: "formula" };
+                const ph = phResult.ph;
+                const phSource = phResult.source;
                 const isFriend = !!friends.find(f => f.name === p.name);
                 const teeCount = selectedClub ? Object.keys(selectedClub.tees).length : 0;
+                const isEditing = phEditingFor === p.id;
                 return (
                   <div key={p.id} style={{ background: T.surface2, border: `1px solid ${T.line}`, borderRadius: "12px", padding: "12px 14px", marginBottom: "8px" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
                       <div style={{ width: "32px", height: "32px", borderRadius: "50%", background: `${T.gold}20`, border: `1px solid ${T.gold}40`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "13px", fontWeight: 700, color: T.gold }}>
                         {p.name.charAt(0).toUpperCase()}
                       </div>
-                      <div style={{ flex: 1 }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontWeight: 600, fontSize: "14px", color: T.text }}>{p.name}</div>
-                        <div style={{ fontSize: "11px", color: T.textSoft, marginTop: "1px" }}>
-                          HCP <span className="mono">{p.hcp}</span> · Vorgabe <span className="mono" style={{ color: T.gold, fontWeight: 700 }}>{ph}</span>
+                        <div style={{ fontSize: "11px", color: T.textSoft, marginTop: "1px", display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                          <span>HCP <span className="mono">{p.hcp}</span></span>
+                          <span>·</span>
+                          <span>Vorgabe <span className="mono" style={{ color: T.gold, fontWeight: 700 }}>{ph}</span></span>
+                          {phSource === "manual" && (
+                            <span style={{ fontSize: "9px", color: T.gold, background: `${T.gold}15`, padding: "1px 5px", borderRadius: "3px", fontWeight: 600, letterSpacing: "0.04em" }}>MANUELL</span>
+                          )}
+                          {phSource === "table" && (
+                            <span style={{ fontSize: "9px", color: T.sage, background: `${T.sage}15`, padding: "1px 5px", borderRadius: "3px", fontWeight: 600, letterSpacing: "0.04em" }}>OFFIZIELL</span>
+                          )}
+                          <button onClick={() => setPhEditingFor(isEditing ? null : p.id)}
+                            title="Vorgabe manuell anpassen"
+                            style={{ background: "transparent", border: "none", color: T.textDim, fontSize: "11px", padding: "1px 3px", cursor: "pointer" }}>
+                            ✏️
+                          </button>
                         </div>
                       </div>
                       {!isFriend && (
@@ -1692,6 +1911,50 @@ export default function GolfApp() {
                       <button onClick={() => setPlayers(pl => pl.filter(x => x.id !== p.id))}
                         style={{ background: "transparent", border: "none", color: T.double, fontSize: "18px", padding: "4px 8px", opacity: 0.7 }}>×</button>
                     </div>
+
+                    {/* Manual PH override editor */}
+                    {isEditing && (
+                      <div className="fade-in" style={{ marginTop: "10px", paddingTop: "10px", borderTop: `1px solid ${T.line}` }}>
+                        <div style={{ fontSize: "10px", color: T.textDim, marginBottom: "6px", letterSpacing: "0.06em", fontWeight: 600 }}>VORGABE ANPASSEN</div>
+                        <div style={{ fontSize: "11px", color: T.textSoft, marginBottom: "8px", lineHeight: 1.4 }}>
+                          {tee && (
+                            <>Berechnung: <span className="mono">{p.hcp} × {tee.slope}/113 + ({tee.cr} − {tee.par || par}) = {calcPH(p.hcp, tee.slope, tee.cr, tee.par || par)}</span></>
+                          )}
+                        </div>
+                        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                          <input type="number"
+                            defaultValue={ph}
+                            id={`ph-override-${p.id}`}
+                            style={{ ...S.input, width: "80px", textAlign: "center", padding: "8px 10px" }}
+                            autoFocus/>
+                          <button onClick={() => {
+                              const input = document.getElementById(`ph-override-${p.id}`);
+                              const val = parseInt(input?.value);
+                              if (!isNaN(val)) {
+                                setPlayers(pl => pl.map(x => x.id === p.id ? { ...x, phOverride: val } : x));
+                              }
+                              setPhEditingFor(null);
+                            }}
+                            className="gold-hover"
+                            style={{ ...S.btnPrimary, padding: "8px 14px", fontSize: "12px" }}>
+                            Speichern
+                          </button>
+                          {typeof p.phOverride === "number" && (
+                            <button onClick={() => {
+                                setPlayers(pl => pl.map(x => {
+                                  if (x.id !== p.id) return x;
+                                  const { phOverride, ...rest } = x;
+                                  return rest;
+                                }));
+                                setPhEditingFor(null);
+                              }}
+                              style={{ ...S.btnGhost, padding: "8px 12px", fontSize: "11px", color: T.textSoft }}>
+                              Reset
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
 
                     {/* Tee selector — only if club has multiple tees */}
                     {teeCount > 1 && (
@@ -1954,7 +2217,7 @@ export default function GolfApp() {
                 {players.map(p => {
                   const g = scores[p.id]?.[i];
                   const tee = playerTee(p, cfg, selectedClub);
-                  const ph = tee ? calcPH(p.hcp, tee.slope, tee.cr, tee.par || par) : 0;
+                  const ph = tee ? resolvePlayerPH(p, cfg, selectedClub, par).ph : 0;
                   const hs = holeHS(ph, hole.si, cfg.numHoles);
                   const col = scoreColor(g, hole.par);
                   const isEmpty = g === undefined;
@@ -2033,7 +2296,7 @@ export default function GolfApp() {
           {players.map(p => {
             const g = scores[p.id]?.[currentHole];
             const tee = playerTee(p, cfg, selectedClub);
-            const ph = tee ? calcPH(p.hcp, tee.slope, tee.cr, tee.par || par) : 0;
+            const ph = tee ? resolvePlayerPH(p, cfg, selectedClub, par).ph : 0;
             const hs = holeHS(ph, hole.si, cfg.numHoles);
             const personalPar = hole.par + hs;
             const col = scoreColor(g, hole.par);
@@ -2206,6 +2469,236 @@ export default function GolfApp() {
   };
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // SHARE IMAGE (PNG generation via Canvas for WhatsApp etc.)
+  // ═══════════════════════════════════════════════════════════════════════════
+  const generateShareImage = async () => {
+    const all = players.map(p => ({ p, ...getStats(p) }));
+    const ranked = [...all].sort((a, b) => b.sfNT - a.sfNT);
+    const isUschi = gameMode !== "stableford";
+
+    // Calculate dimensions — tall portrait like a story post
+    const W = 1080;
+    const rowH = 130;
+    const headerH = 320;
+    const footerH = 100;
+    const H = headerH + rowH * players.length + footerH + (isUschi ? 140 : 0);
+
+    const canvas = document.createElement("canvas");
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext("2d");
+
+    // Background gradient
+    const bg = ctx.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, "#0a1410");
+    bg.addColorStop(0.5, "#101e16");
+    bg.addColorStop(1, "#0a1410");
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    // Gold accent line at top
+    ctx.fillStyle = "#c9a85c";
+    ctx.fillRect(0, 0, W, 6);
+
+    // Logo mark (simple golf flag)
+    ctx.save();
+    ctx.translate(70, 80);
+    ctx.strokeStyle = "#c9a85c";
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(30, 30, 24, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = "#c9a85c";
+    ctx.beginPath(); ctx.arc(30, 30, 8, 0, Math.PI * 2); ctx.fill();
+    ctx.fillRect(28, 6, 4, 18);
+    ctx.beginPath(); ctx.moveTo(32, 6); ctx.lineTo(48, 10); ctx.lineTo(32, 14); ctx.closePath(); ctx.fill();
+    ctx.restore();
+
+    // "FAIRWAY" wordmark
+    ctx.fillStyle = "#f0e9d3";
+    ctx.font = "italic 56px 'Instrument Serif', Georgia, serif";
+    ctx.fillText("Fairway", 150, 95);
+
+    // Club & date
+    ctx.fillStyle = "#a2bfa2";
+    ctx.font = "500 32px 'Inter', sans-serif";
+    const title = cfg.clubName || cfg.name || "Runde";
+    ctx.fillText(title, 70, 170);
+
+    ctx.fillStyle = "#7a9281";
+    ctx.font = "400 24px 'Inter', sans-serif";
+    ctx.fillText(`${fmtDate(cfg.date)} · ${cfg.numHoles} Loch · Par ${par}`, 70, 210);
+
+    // Mode badge
+    if (isUschi) {
+      ctx.fillStyle = "rgba(201, 168, 92, 0.15)";
+      ctx.fillRect(70, 240, 280, 44);
+      ctx.fillStyle = "#c9a85c";
+      ctx.font = "600 20px 'Inter', sans-serif";
+      const badge = gameMode === "uschi-team" ? "🎯 Uschi 2 vs 2" : "🎯 Uschi-Modus";
+      ctx.fillText(badge, 88, 270);
+    }
+
+    // Separator
+    ctx.strokeStyle = "#213629";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(70, headerH - 10); ctx.lineTo(W - 70, headerH - 10); ctx.stroke();
+
+    // Player rows
+    const medals = ["🥇", "🥈", "🥉"];
+    let y = headerH + 20;
+
+    // Rank header
+    ctx.fillStyle = "#5d6e63";
+    ctx.font = "600 18px 'Inter', sans-serif";
+    ctx.fillText("RANG", 70, y);
+    ctx.fillText("SPIELER", 200, y);
+    ctx.textAlign = "right";
+    ctx.fillText("SF NETTO", W - 70, y);
+    ctx.textAlign = "left";
+    y += 35;
+
+    // For uschi mode, also get uschi ranking
+    const uschiRanked = isUschi && uschiResult
+      ? players.map(p => ({
+          p,
+          total: uschiResult.totals[p.id]?.total || 0,
+        })).sort((a, b) => b.total - a.total)
+      : null;
+
+    const rankingData = uschiRanked || ranked.map(s => ({ p: s.p, total: s.sfNT }));
+
+    rankingData.forEach((item, i) => {
+      const s = all.find(a => a.p.id === item.p.id);
+      const isWinner = i === 0;
+
+      // Row background for winner
+      if (isWinner) {
+        ctx.fillStyle = "rgba(201, 168, 92, 0.08)";
+        ctx.fillRect(60, y - 10, W - 120, rowH - 10);
+      }
+
+      // Medal / rank number
+      ctx.font = "bold 48px sans-serif";
+      if (medals[i]) {
+        ctx.fillText(medals[i], 70, y + 50);
+      } else {
+        ctx.fillStyle = "#7a9281";
+        ctx.font = "700 42px 'Inter', sans-serif";
+        ctx.fillText(`${i + 1}.`, 80, y + 45);
+      }
+
+      // Player avatar circle
+      ctx.fillStyle = "rgba(201, 168, 92, 0.18)";
+      ctx.beginPath(); ctx.arc(225, y + 40, 30, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "rgba(201, 168, 92, 0.4)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.fillStyle = "#c9a85c";
+      ctx.font = "700 28px 'Inter', sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(item.p.name.charAt(0).toUpperCase(), 225, y + 50);
+      ctx.textAlign = "left";
+
+      // Name
+      ctx.fillStyle = "#f0e9d3";
+      ctx.font = "600 32px 'Inter', sans-serif";
+      ctx.fillText(item.p.name, 275, y + 35);
+
+      // HCP / Vorgabe / Brutto
+      ctx.fillStyle = "#7a9281";
+      ctx.font = "400 20px 'Inter', sans-serif";
+      const teeName = s.tee?.teeName ? ` · ${s.tee.teeName.split(" ")[0]}` : "";
+      ctx.fillText(`HCP ${s.p.hcp} · Vorgabe ${s.ph}${teeName}`, 275, y + 62);
+
+      if (s.bT) {
+        ctx.fillText(`Brutto ${s.bT} · SF Brutto ${s.sfBT}`, 275, y + 86);
+      }
+
+      // Points (big, gold)
+      ctx.textAlign = "right";
+      ctx.fillStyle = isWinner ? "#ddb970" : "#c9a85c";
+      ctx.font = "bold 64px 'Instrument Serif', Georgia, serif";
+      const mainScore = isUschi ? (item.total > 0 ? `+${item.total}` : `${item.total}`) : `${s.sfNT}`;
+      ctx.fillText(mainScore, W - 70, y + 55);
+      ctx.fillStyle = "#5d6e63";
+      ctx.font = "500 16px 'Inter', sans-serif";
+      ctx.fillText(isUschi ? "PUNKTE" : "PUNKTE", W - 70, y + 85);
+      ctx.textAlign = "left";
+
+      y += rowH;
+    });
+
+    // If Uschi mode, also show SF Netto as secondary
+    if (isUschi) {
+      ctx.fillStyle = "#213629";
+      ctx.fillRect(70, y + 10, W - 140, 1);
+      y += 30;
+      ctx.fillStyle = "#a2bfa2";
+      ctx.font = "600 18px 'Inter', sans-serif";
+      ctx.fillText("STABLEFORD NETTO (NEBENWERTUNG)", 70, y);
+      y += 40;
+      ranked.forEach((s, i) => {
+        ctx.fillStyle = "#7a9281";
+        ctx.font = "500 22px 'Inter', sans-serif";
+        ctx.fillText(`${i + 1}. ${s.p.name}`, 70, y);
+        ctx.textAlign = "right";
+        ctx.fillStyle = "#c9a85c";
+        ctx.fillText(`${s.sfNT}`, W - 70, y);
+        ctx.textAlign = "left";
+        y += 32;
+      });
+    }
+
+    // Footer
+    ctx.fillStyle = "#5d6e63";
+    ctx.font = "italic 22px 'Instrument Serif', Georgia, serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Fairway · Golf Scorecard", W / 2, H - 40);
+    ctx.textAlign = "left";
+
+    // Gold bottom line
+    ctx.fillStyle = "#c9a85c";
+    ctx.fillRect(0, H - 6, W, 6);
+
+    return new Promise(resolve => {
+      canvas.toBlob(blob => resolve(blob), "image/png", 0.95);
+    });
+  };
+
+  const shareResults = async () => {
+    try {
+      const blob = await generateShareImage();
+      if (!blob) { alert("Bild konnte nicht erstellt werden."); return; }
+      const file = new File([blob], `fairway-${cfg.clubName || "runde"}-${cfg.date}.png`, { type: "image/png" });
+
+      // Try Web Share API first (iOS/Android modern browsers)
+      if (navigator.share && navigator.canShare?.({ files: [file] })) {
+        try {
+          await navigator.share({
+            files: [file],
+            title: `${cfg.clubName || "Runde"} · ${fmtDate(cfg.date)}`,
+          });
+          return;
+        } catch (err) {
+          // User cancelled or share failed — fall through to download
+          if (err.name === "AbortError") return;
+        }
+      }
+
+      // Fallback: download
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = file.name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      console.error("Share failed:", err);
+      alert("Teilen hat nicht geklappt. Bitte nochmal versuchen.");
+    }
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // RESULTS
   // ═══════════════════════════════════════════════════════════════════════════
   const renderResults = () => {
@@ -2218,7 +2711,21 @@ export default function GolfApp() {
       <div className="fade-in">
         {renderProgressBar()}
         <div style={S.page}>
-          <h2 className="serif" style={{ fontSize: "28px", margin: "0 0 6px", color: T.text }}>Auswertung</h2>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", marginBottom: "6px" }}>
+            <h2 className="serif" style={{ fontSize: "28px", margin: 0, color: T.text }}>Auswertung</h2>
+            <button onClick={shareResults} className="gold-hover"
+              style={{
+                background: T.gold, color: T.canvas,
+                border: "none", borderRadius: "10px",
+                padding: "10px 14px",
+                fontSize: "13px", fontWeight: 700,
+                fontFamily: "Inter, sans-serif",
+                display: "flex", alignItems: "center", gap: "6px",
+                whiteSpace: "nowrap",
+              }}>
+              📸 Teilen
+            </button>
+          </div>
           <div style={{ fontSize: "12px", color: T.textSoft, marginBottom: "20px" }}>
             {cfg.clubName || cfg.name || "Runde"} · {fmtDate(cfg.date)} · Par {par}
             {isUschi && <span style={{ color: T.gold, marginLeft: "6px" }}>· 🎯 Uschi-Modus{gameMode === "uschi-team" ? " (2v2)" : ""}</span>}
@@ -2597,7 +3104,7 @@ export default function GolfApp() {
     if (!player || !hole) return null;
     const currentScore = scores[padOpen.playerId]?.[padOpen.holeIdx];
     const tee = playerTee(player, cfg, selectedClub);
-    const ph = tee ? calcPH(player.hcp, tee.slope, tee.cr, tee.par || par) : 0;
+    const ph = tee ? resolvePlayerPH(player, cfg, selectedClub, par).ph : 0;
     const hs = holeHS(ph, hole.si, cfg.numHoles);
 
     return (
