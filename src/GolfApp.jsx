@@ -851,6 +851,7 @@ export default function GolfApp() {
   const [padOpen, setPadOpen] = useState(null); // { playerId, holeIdx } | null
   const [teePickerFor, setTeePickerFor] = useState(null); // playerId to change tee for
   const [phEditingFor, setPhEditingFor] = useState(null); // playerId whose PH is being edited manually
+  const [sharePreview, setSharePreview] = useState(null); // { blob, url } when share preview is open
   const [loadedRoundId, setLoadedRoundId] = useState(null); // track which round is being viewed/edited
   // Scoring mode
   const [scoringMode, setScoringMode] = useState("batch"); // batch | live
@@ -2576,12 +2577,21 @@ export default function GolfApp() {
     ));
     const isInProgress = holesPlayed > 0 && holesPlayed < holes.length;
 
+    // Team mode data (only relevant in uschi-team)
+    const isTeamMode = gameMode === "uschi-team" && teamResult && teams?.A?.length === 2 && teams?.B?.length === 2;
+    const teamMap = {}; // playerId -> "A" or "B"
+    if (isTeamMode) {
+      (teams.A || []).forEach(pid => { teamMap[pid] = "A"; });
+      (teams.B || []).forEach(pid => { teamMap[pid] = "B"; });
+    }
+
     // Calculate dimensions — tall portrait like a story post
     const W = 1080;
     const rowH = 130;
     const headerH = 320;
     const footerH = 100;
-    const H = headerH + rowH * players.length + footerH + (isUschi ? 140 : 0);
+    const teamBlockH = isTeamMode ? 260 : 0; // extra space for team ranking at top
+    const H = headerH + teamBlockH + rowH * players.length + footerH + (isUschi ? 140 : 0);
 
     const canvas = document.createElement("canvas");
     canvas.width = W; canvas.height = H;
@@ -2650,17 +2660,79 @@ export default function GolfApp() {
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(70, headerH - 10); ctx.lineTo(W - 70, headerH - 10); ctx.stroke();
 
-    // Player rows
-    const medals = ["🥇", "🥈", "🥉"];
     let y = headerH + 20;
+    const medals = ["🥇", "🥈", "🥉"];
 
+    // === TEAM RANKING BLOCK (only for uschi-team) ===
+    if (isTeamMode) {
+      // Heading
+      ctx.fillStyle = "#c9a85c";
+      ctx.font = "700 22px 'Inter', sans-serif";
+      ctx.fillText("🏆 TEAM-WERTUNG", 70, y);
+      y += 40;
+
+      const teamData = [
+        { k: "A", color: "#c9a85c", total: teamResult.teamTotals.A, members: teams.A },
+        { k: "B", color: "#7ea88a", total: teamResult.teamTotals.B, members: teams.B },
+      ].sort((a, b) => b.total - a.total);
+
+      teamData.forEach((t, i) => {
+        const memberNames = t.members.map(pid => players.find(p => p.id === pid)?.name || "?").join(" + ");
+        const isLead = i === 0 && teamData[0].total !== teamData[1].total;
+
+        // Background for winning team
+        if (isLead) {
+          ctx.fillStyle = "rgba(201, 168, 92, 0.10)";
+          ctx.fillRect(60, y - 10, W - 120, 90);
+        }
+
+        // Medal or position
+        ctx.font = "bold 42px sans-serif";
+        if (medals[i]) ctx.fillText(medals[i], 70, y + 40);
+
+        // Team label (A/B colored dot)
+        ctx.fillStyle = t.color;
+        ctx.beginPath(); ctx.arc(170, y + 35, 18, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#0a1410";
+        ctx.font = "bold 22px 'Inter', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(t.k, 170, y + 43);
+        ctx.textAlign = "left";
+
+        // Team members
+        ctx.fillStyle = "#f0e9d3";
+        ctx.font = "600 28px 'Inter', sans-serif";
+        ctx.fillText(memberNames, 210, y + 25);
+
+        ctx.fillStyle = "#7a9281";
+        ctx.font = "500 18px 'Inter', sans-serif";
+        ctx.fillText(`Team ${t.k}`, 210, y + 52);
+
+        // Points (big)
+        ctx.textAlign = "right";
+        ctx.fillStyle = t.total >= 0 ? "#c9a85c" : "#d67a5c";
+        ctx.font = "bold 72px 'Instrument Serif', Georgia, serif";
+        const sign = t.total > 0 ? "+" : "";
+        ctx.fillText(`${sign}${t.total}`, W - 70, y + 55);
+        ctx.textAlign = "left";
+
+        y += 100;
+      });
+      y += 20; // gap before individual ranking
+    }
+
+    // === INDIVIDUAL RANKING ===
     // Rank header
     ctx.fillStyle = "#5d6e63";
     ctx.font = "600 18px 'Inter', sans-serif";
-    ctx.fillText("RANG", 70, y);
-    ctx.fillText("SPIELER", 200, y);
+    if (isTeamMode) {
+      ctx.fillText("EINZELPUNKTE", 70, y);
+    } else {
+      ctx.fillText("RANG", 70, y);
+      ctx.fillText("SPIELER", 200, y);
+    }
     ctx.textAlign = "right";
-    ctx.fillText("SF NETTO", W - 70, y);
+    ctx.fillText(isUschi ? "USCHI" : "SF NETTO", W - 70, y);
     ctx.textAlign = "left";
     y += 35;
 
@@ -2676,7 +2748,9 @@ export default function GolfApp() {
 
     rankingData.forEach((item, i) => {
       const s = all.find(a => a.p.id === item.p.id);
-      const isWinner = i === 0;
+      const isWinner = i === 0 && !isTeamMode; // in team mode, don't highlight individual winner
+      const teamLetter = isTeamMode ? teamMap[item.p.id] : null;
+      const teamColor = teamLetter === "A" ? "#c9a85c" : teamLetter === "B" ? "#7ea88a" : null;
 
       // Row background for winner
       if (isWinner) {
@@ -2684,14 +2758,25 @@ export default function GolfApp() {
         ctx.fillRect(60, y - 10, W - 120, rowH - 10);
       }
 
-      // Medal / rank number
-      ctx.font = "bold 48px sans-serif";
-      if (medals[i]) {
-        ctx.fillText(medals[i], 70, y + 50);
+      // Medal / rank number / or in team mode: team letter badge
+      if (isTeamMode && teamColor) {
+        // Team color dot with letter
+        ctx.fillStyle = teamColor;
+        ctx.beginPath(); ctx.arc(110, y + 40, 22, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#0a1410";
+        ctx.font = "bold 24px 'Inter', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(teamLetter, 110, y + 49);
+        ctx.textAlign = "left";
       } else {
-        ctx.fillStyle = "#7a9281";
-        ctx.font = "700 42px 'Inter', sans-serif";
-        ctx.fillText(`${i + 1}.`, 80, y + 45);
+        ctx.font = "bold 48px sans-serif";
+        if (medals[i]) {
+          ctx.fillText(medals[i], 70, y + 50);
+        } else {
+          ctx.fillStyle = "#7a9281";
+          ctx.font = "700 42px 'Inter', sans-serif";
+          ctx.fillText(`${i + 1}.`, 80, y + 45);
+        }
       }
 
       // Player avatar circle
@@ -2773,12 +2858,26 @@ export default function GolfApp() {
     });
   };
 
+  // Share flow: 1) generate image, 2) show preview modal, 3) user confirms -> share
   const shareResults = async () => {
     try {
       const blob = await generateShareImage();
       if (!blob) { alert("Bild konnte nicht erstellt werden."); return; }
-      const file = new File([blob], `fairway-${cfg.clubName || "runde"}-${cfg.date}.png`, { type: "image/png" });
+      const url = URL.createObjectURL(blob);
+      setSharePreview({ blob, url });
+    } catch (err) {
+      console.error("Share failed:", err);
+      alert("Bild konnte nicht erstellt werden. Bitte nochmal versuchen.");
+    }
+  };
 
+  // Called from preview modal's "Teilen" button
+  const confirmShare = async () => {
+    if (!sharePreview?.blob) return;
+    const { blob } = sharePreview;
+    const file = new File([blob], `fairway-${cfg.clubName || "runde"}-${cfg.date}.png`, { type: "image/png" });
+
+    try {
       // Try Web Share API first (iOS/Android modern browsers)
       if (navigator.share && navigator.canShare?.({ files: [file] })) {
         try {
@@ -2786,26 +2885,31 @@ export default function GolfApp() {
             files: [file],
             title: `${cfg.clubName || "Runde"} · ${fmtDate(cfg.date)}`,
           });
+          closeSharePreview();
           return;
         } catch (err) {
-          // User cancelled or share failed — fall through to download
-          if (err.name === "AbortError") return;
+          if (err.name === "AbortError") return; // user cancelled share sheet, keep preview open
         }
       }
-
       // Fallback: download
-      const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url;
+      a.href = sharePreview.url;
       a.download = file.name;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      closeSharePreview();
     } catch (err) {
       console.error("Share failed:", err);
       alert("Teilen hat nicht geklappt. Bitte nochmal versuchen.");
     }
+  };
+
+  const closeSharePreview = () => {
+    if (sharePreview?.url) {
+      setTimeout(() => URL.revokeObjectURL(sharePreview.url), 100);
+    }
+    setSharePreview(null);
   };
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -3346,6 +3450,62 @@ export default function GolfApp() {
   const [syncInput, setSyncInput] = useState("");
   useEffect(() => { if (showSyncModal) setSyncInput(""); }, [showSyncModal]);
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SHARE PREVIEW MODAL
+  // ═══════════════════════════════════════════════════════════════════════════
+  const renderSharePreview = () => {
+    if (!sharePreview) return null;
+    return (
+      <div onClick={closeSharePreview}
+        style={{ position: "fixed", inset: 0, background: "#000000ee", zIndex: 1200, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end" }}>
+        <div onClick={e => e.stopPropagation()} className="slide-up"
+          style={{
+            width: "100%", maxWidth: "520px",
+            background: T.surface1,
+            borderTopLeftRadius: "24px", borderTopRightRadius: "24px",
+            border: `1px solid ${T.line}`,
+            padding: "16px 16px 20px",
+            maxHeight: "92vh",
+            display: "flex", flexDirection: "column",
+          }}>
+          <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 14px" }}/>
+
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px" }}>
+            <div>
+              <div className="serif" style={{ fontSize: "22px", color: T.text, lineHeight: 1.1 }}>
+                Vorschau
+              </div>
+              <div style={{ fontSize: "11px", color: T.textSoft, marginTop: "3px" }}>
+                So sieht das Bild für WhatsApp aus
+              </div>
+            </div>
+            <button onClick={closeSharePreview}
+              style={{ background: "transparent", border: "none", color: T.textDim, fontSize: "22px", padding: "6px 10px", cursor: "pointer" }}>
+              ✕
+            </button>
+          </div>
+
+          {/* Scrollable image preview */}
+          <div style={{ flex: 1, overflowY: "auto", background: T.surface2, borderRadius: "12px", padding: "10px", marginBottom: "12px", border: `1px solid ${T.line}` }}>
+            <img src={sharePreview.url} alt="Share Preview"
+              style={{ width: "100%", display: "block", borderRadius: "6px" }}/>
+          </div>
+
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button onClick={closeSharePreview}
+              style={{ ...S.btnSecondary, flex: 1 }}>
+              Abbrechen
+            </button>
+            <button onClick={confirmShare} className="gold-hover"
+              style={{ ...S.btnPrimary, flex: 2, display: "flex", alignItems: "center", justifyContent: "center", gap: "6px" }}>
+              📸 Teilen
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderSyncModal = () => {
     if (!showSyncModal) return null;
     return (
@@ -3463,6 +3623,7 @@ export default function GolfApp() {
       {renderSyncModal()}
       {renderUschiPar3Dialog()}
       {renderUschiReview()}
+      {renderSharePreview()}
     </div>
   );
 }
