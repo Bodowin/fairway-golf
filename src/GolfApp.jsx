@@ -96,6 +96,87 @@ async function cloudPull(syncCode) {
   } catch (e) { console.error("Cloud pull failed", e); return null; }
 }
 
+// ─── Live Ticker ─────────────────────────────────────────────────────────────
+// Stores a snapshot of the current round in the `live_rounds` table.
+// Each live round has a unique short code; the code maps to a public URL.
+// Anyone with the URL can view (read-only) the round data.
+// Auto-expires after 48h (DB-side via DEFAULT and optional cron cleanup).
+
+// Create a new live ticker. Returns the generated code, or null on failure.
+async function liveCreate(data) {
+  if (!SYNC_ENABLED) return null;
+  const code = genSyncCode(); // reuse same alphabet, 8 chars
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/live_rounds`, {
+      method: "POST",
+      headers: {
+        "apikey": SUPABASE_KEY,
+        "Authorization": `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+      },
+      body: JSON.stringify({
+        code,
+        data,
+        updated_at: new Date().toISOString(),
+      }),
+    });
+    return res.ok ? code : null;
+  } catch (e) { console.error("Live create failed", e); return null; }
+}
+
+// Push an update to an existing live ticker.
+async function liveUpdate(code, data) {
+  if (!SYNC_ENABLED || !code) return false;
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/live_rounds?code=eq.${encodeURIComponent(code)}`,
+      {
+        method: "PATCH",
+        headers: {
+          "apikey": SUPABASE_KEY,
+          "Authorization": `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          data,
+          updated_at: new Date().toISOString(),
+        }),
+      }
+    );
+    return res.ok;
+  } catch (e) { console.error("Live update failed", e); return false; }
+}
+
+// Pull the current snapshot of a live ticker (used by the viewer page).
+async function liveRead(code) {
+  if (!SYNC_ENABLED || !code) return null;
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/live_rounds?code=eq.${encodeURIComponent(code)}&select=*`,
+      { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
+    );
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return rows[0] || null;
+  } catch (e) { console.error("Live read failed", e); return null; }
+}
+
+// Delete a live ticker (when the scorer wants to end the live share).
+async function liveDelete(code) {
+  if (!SYNC_ENABLED || !code) return false;
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/live_rounds?code=eq.${encodeURIComponent(code)}`,
+      {
+        method: "DELETE",
+        headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` },
+      }
+    );
+    return res.ok;
+  } catch (e) { console.error("Live delete failed", e); return false; }
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // CLUB DATABASE
 // ═════════════════════════════════════════════════════════════════════════════
@@ -376,6 +457,111 @@ const BUILT_IN_CLUBS = [
   simple("GC Bad Waltersdorf",             "Burgenland",      70.0, 120, 72),
   simple("GC Bregenzerwald",               "Vorarlberg",      70.0, 121, 72),
   simple("GC Montfort Rankweil",           "Vorarlberg",      70.5, 122, 72),
+  // ─── International ─────────────────────────────────────────────────────────
+  {
+    name: "Penati Golf Resort (Heritage)",
+    region: "Slowakei",
+    numHoles: 18,
+    tees: {
+      "Championship (Herren)": { cr: 73.7, slope: 140, par: 72 },
+      "Gelb (Herren)":         { cr: 72.0, slope: 139, par: 72 },
+      "Blau (Herren)":         { cr: 70.3, slope: 135, par: 72 },
+      "Gelb (Damen)":          { cr: 73.8, slope: 137, par: 72 },
+      "Rot (Damen)":           { cr: 70.0, slope: 123, par: 72 },
+    },
+    holes: [
+      { par:4, si:11 }, { par:4, si:17 }, { par:5, si:5  }, { par:3, si:13 },
+      { par:4, si:3  }, { par:4, si:9  }, { par:3, si:15 }, { par:4, si:1  },
+      { par:5, si:7  }, { par:4, si:14 }, { par:5, si:4  }, { par:3, si:18 },
+      { par:4, si:16 }, { par:3, si:10 }, { par:4, si:6  }, { par:4, si:8  },
+      { par:5, si:2  }, { par:4, si:12 },
+    ],
+  },
+  {
+    name: "Penati Golf Resort (Legend)",
+    region: "Slowakei",
+    numHoles: 18,
+    tees: {
+      "Championship (Herren)": { cr: 76.4, slope: 154, par: 73 },
+      "Gelb (Herren)":         { cr: 73.7, slope: 151, par: 73 },
+      "Blau (Herren)":         { cr: 71.2, slope: 145, par: 73 },
+      "Gelb (Damen)":          { cr: 74.7, slope: 142, par: 73 },
+      "Blau (Damen)":          { cr: 71.6, slope: 134, par: 73 },
+      "Rot (Junior)":          { cr: 69.5, slope: 129, par: 73 },
+    },
+    holes: [
+      { par:4, si:8  }, { par:5, si:15 }, { par:3, si:13 }, { par:4, si:3  },
+      { par:4, si:16 }, { par:5, si:10 }, { par:4, si:5  }, { par:3, si:4  },
+      { par:4, si:11 }, { par:4, si:1  }, { par:5, si:17 }, { par:3, si:7  },
+      { par:4, si:2  }, { par:4, si:14 }, { par:6, si:12 }, { par:3, si:18 },
+      { par:4, si:9  }, { par:4, si:6  },
+    ],
+  },
+  // ─── Zypern ────────────────────────────────────────────────────────────────
+  {
+    name: "Aphrodite Hills Golf Club (Cyprus)",
+    region: "Zypern",
+    numHoles: 18,
+    tees: {
+      "Black (Herren)":  { cr: 73.4, slope: 135, par: 71 },
+      "White (Herren)":  { cr: 70.4, slope: 129, par: 71 },
+      "Yellow (Herren)": { cr: 68.8, slope: 126, par: 71 },
+      "Blue (Damen)":    { cr: 70.9, slope: 123, par: 71 },
+      "Red (Damen)":     { cr: 68.8, slope: 121, par: 71 },
+    },
+    holes: [
+      { par:4, si:10 }, { par:4, si:6  }, { par:5, si:14 }, { par:4, si:4  },
+      { par:3, si:18 }, { par:5, si:8  }, { par:3, si:16 }, { par:4, si:2  },
+      { par:4, si:12 }, { par:5, si:9  }, { par:4, si:1  }, { par:3, si:15 },
+      { par:4, si:3  }, { par:4, si:13 }, { par:3, si:11 }, { par:4, si:5  },
+      { par:3, si:17 }, { par:5, si:7  },
+    ],
+  },
+  {
+    name: "Secret Valley Golf Resort (Cyprus)",
+    region: "Zypern",
+    numHoles: 18,
+    tees: {
+      "Black (Herren)":  { cr: 70.6, slope: 138, par: 71 },
+      "White (Herren)":  { cr: 68.9, slope: 134, par: 71 },
+      "Yellow (Herren)": { cr: 67.1, slope: 126, par: 71 },
+      "Yellow (Damen)":  { cr: 71.3, slope: 129, par: 71 },
+      "Blue (Mixed)":    { cr: 69.8, slope: 126, par: 71 },
+      "Red (Damen)":     { cr: 67.7, slope: 120, par: 71 },
+    },
+    holes: [
+      { par:4, si:17 }, { par:5, si:5  }, { par:4, si:13 }, { par:3, si:9  },
+      { par:4, si:3  }, { par:3, si:15 }, { par:4, si:11 }, { par:4, si:7  },
+      { par:5, si:1  }, { par:3, si:14 }, { par:4, si:2  }, { par:4, si:8  },
+      { par:5, si:6  }, { par:3, si:18 }, { par:4, si:12 }, { par:3, si:16 },
+      { par:4, si:4  }, { par:5, si:10 },
+    ],
+  },
+  {
+    name: "Minthis Golf Club (Cyprus)",
+    region: "Zypern",
+    numHoles: 18,
+    tees: {
+      "Black (Herren)":  { cr: 72.1, slope: 134, par: 72 },
+      "Yellow (Herren)": { cr: 69.8, slope: 130, par: 72 },
+    },
+    // Loch-Daten nicht online verfügbar — werden vor Ort aus der Scorekarte ergänzt
+  },
+  {
+    name: "Eléa Golf Club (Cyprus)",
+    region: "Zypern",
+    numHoles: 18,
+    tees: {
+      "Black (Herren)":  { cr: 73.6, slope: 142, par: 71 },
+      "White (Herren)":  { cr: 71.3, slope: 138, par: 71 },
+      "Yellow (Herren)": { cr: 68.0, slope: 127, par: 71 },
+      "Yellow (Damen)":  { cr: 74.0, slope: 134, par: 71 },
+      "Red (Damen)":     { cr: 70.6, slope: 127, par: 71 },
+    },
+    // Loch-Daten nicht online verfügbar — werden vor Ort aus der Scorekarte ergänzt
+  },
+  // Limassol Greens noch ohne CR/Slope (eröffnet 2025, noch nicht offiziell bewertet).
+  // Bei Interesse vor Ort nachfragen oder manuell in der App anlegen.
 ];
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -855,6 +1041,10 @@ export default function GolfApp() {
   const [showAddClub, setShowAddClub] = useState(false); // "Add new club" modal
   const [addClubMode, setAddClubMode] = useState("choose"); // "choose" | "quick" | "manual" | "paste"
   const [quickClubForm, setQuickClubForm] = useState({ name: "", cr: "", slope: "", par: "", numHoles: 18, teeName: "Gelb (Herren)" });
+  // Live ticker
+  const [liveCode, setLiveCode] = useState(null); // current live ticker code, if active
+  const [liveStatus, setLiveStatus] = useState("idle"); // "idle" | "creating" | "active" | "error"
+  const [showLiveModal, setShowLiveModal] = useState(false); // controls the Live-Share modal
   const [loadedRoundId, setLoadedRoundId] = useState(null); // track which round is being viewed/edited
   // Scoring mode
   const [scoringMode, setScoringMode] = useState("batch"); // batch | live
@@ -867,6 +1057,7 @@ export default function GolfApp() {
   const [showUschiReview, setShowUschiReview] = useState(false); // Uschi protocol review screen
   const touchStartX = useRef(null);
   const syncTimerRef = useRef(null);
+  const livePushTimerRef = useRef(null);
 
   const allClubs = useMemo(() => [...customClubs, ...BUILT_IN_CLUBS], [customClubs]);
   const selectedClub = useMemo(() => allClubs.find(c => c.name === cfg.clubName), [allClubs, cfg.clubName]);
@@ -916,6 +1107,34 @@ export default function GolfApp() {
     }, 2000);
     return () => clearTimeout(syncTimerRef.current);
   }, [rounds, friends, customClubs, syncCode, loaded]);
+
+  // ── Live ticker auto-push (debounced) ─────────────────────────────────────
+  // When a live ticker is active, push current round state to Supabase on any change.
+  useEffect(() => {
+    if (!liveCode || !SYNC_ENABLED || liveStatus !== "active") return;
+    clearTimeout(livePushTimerRef.current);
+    livePushTimerRef.current = setTimeout(async () => {
+      const payload = {
+        cfg,
+        holes,
+        players,
+        scores,
+        gameMode,
+        teams,
+        par3Data,
+        clubName: cfg.clubName,
+        selectedClubSnapshot: selectedClub ? {
+          name: selectedClub.name,
+          region: selectedClub.region,
+          numHoles: selectedClub.numHoles,
+          tees: selectedClub.tees,
+          holes: selectedClub.holes,
+        } : null,
+      };
+      await liveUpdate(liveCode, payload);
+    }, 2500);
+    return () => clearTimeout(livePushTimerRef.current);
+  }, [liveCode, liveStatus, cfg, holes, players, scores, gameMode, teams, par3Data, selectedClub]);
 
   // ── Stable callbacks (prevent remounts) ───────────────────────────────────
   const onClubQ   = useCallback(e => { setClubQ(e.target.value); setShowDD(true); }, []);
@@ -2164,12 +2383,12 @@ export default function GolfApp() {
             ))}
           </div>
 
-          {/* Action buttons: Uschi protocol + Share */}
-          <div style={{ display: "flex", gap: "8px", marginBottom: "14px" }}>
+          {/* Action buttons: Uschi protocol + Share + Live */}
+          <div style={{ display: "flex", gap: "8px", marginBottom: "14px", flexWrap: "wrap" }}>
             {gameMode !== "stableford" && (
               <button onClick={() => setShowUschiReview(true)}
                 style={{
-                  flex: 1,
+                  flex: "1 1 140px",
                   background: `${T.gold}12`,
                   color: T.gold,
                   border: `1px solid ${T.gold}40`,
@@ -2184,7 +2403,7 @@ export default function GolfApp() {
             )}
             <button onClick={shareResults}
               style={{
-                flex: 1,
+                flex: "1 1 140px",
                 background: `${T.sage}15`,
                 color: T.sage,
                 border: `1px solid ${T.sage}40`,
@@ -2195,6 +2414,27 @@ export default function GolfApp() {
                 display: "flex", alignItems: "center", justifyContent: "center", gap: "6px",
               }}>
               📸 Zwischenstand teilen
+            </button>
+            <button onClick={() => setShowLiveModal(true)}
+              style={{
+                flex: "1 1 140px",
+                background: liveCode ? `${T.gold}20` : "transparent",
+                color: liveCode ? T.gold : T.textSoft,
+                border: `1px solid ${liveCode ? T.gold + "60" : T.line}`,
+                borderRadius: "10px",
+                padding: "10px 12px",
+                fontSize: "13px", fontWeight: 600,
+                fontFamily: "Inter, sans-serif",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: "6px",
+              }}>
+              {liveCode ? (
+                <>
+                  <span style={{ width: "7px", height: "7px", borderRadius: "50%", background: T.gold, display: "inline-block", boxShadow: `0 0 6px ${T.gold}` }}/>
+                  Live aktiv
+                </>
+              ) : (
+                <>📡 Live-Ticker</>
+              )}
             </button>
           </div>
 
@@ -3588,6 +3828,166 @@ WICHTIG:
     alert(`✓ ${newClub.name} gespeichert! Du kannst die Löcher im nächsten Schritt anpassen.`);
   };
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LIVE TICKER — share round live via URL
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const liveStart = async () => {
+    if (!SYNC_ENABLED) {
+      alert("Live-Ticker benötigt Cloud-Sync. Bitte in den Einstellungen aktivieren.");
+      return;
+    }
+    setLiveStatus("creating");
+    const payload = {
+      cfg,
+      holes,
+      players,
+      scores,
+      gameMode,
+      teams,
+      par3Data,
+      clubName: cfg.clubName,
+      selectedClubSnapshot: selectedClub ? {
+        name: selectedClub.name,
+        region: selectedClub.region,
+        numHoles: selectedClub.numHoles,
+        tees: selectedClub.tees,
+        holes: selectedClub.holes,
+      } : null,
+    };
+    const code = await liveCreate(payload);
+    if (code) {
+      setLiveCode(code);
+      setLiveStatus("active");
+    } else {
+      setLiveStatus("error");
+      alert("Live-Ticker konnte nicht gestartet werden. Bitte nochmal versuchen.");
+    }
+  };
+
+  const liveEnd = async () => {
+    if (!liveCode) return;
+    if (!confirm("Live-Ticker wirklich beenden? Die geteilte URL wird sofort ungültig.")) return;
+    await liveDelete(liveCode);
+    setLiveCode(null);
+    setLiveStatus("idle");
+    setShowLiveModal(false);
+  };
+
+  const liveUrl = () => {
+    if (!liveCode) return "";
+    // Hash-based routing so no Vercel rewrites needed
+    const base = typeof window !== "undefined" ? window.location.origin : "";
+    return `${base}/live.html#${liveCode}`;
+  };
+
+  const copyLiveUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(liveUrl());
+      alert("✓ Live-Link kopiert!");
+    } catch (err) {
+      alert("Kopieren fehlgeschlagen. Bitte manuell kopieren:\n\n" + liveUrl());
+    }
+  };
+
+  const shareLiveUrl = async () => {
+    const url = liveUrl();
+    if (!url) return;
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: `Fairway · ${cfg.clubName || "Runde"} live`,
+          text: `Schau meiner Runde live zu auf ${cfg.clubName || "dem Platz"}:`,
+          url,
+        });
+      } catch (err) {
+        if (err.name !== "AbortError") copyLiveUrl();
+      }
+    } else {
+      copyLiveUrl();
+    }
+  };
+
+  const renderLiveModal = () => {
+    if (!showLiveModal) return null;
+    const active = liveStatus === "active" && liveCode;
+    const url = liveUrl();
+    return (
+      <div onClick={() => setShowLiveModal(false)}
+        style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1160, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+        <div onClick={e => e.stopPropagation()} className="slide-up"
+          style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
+          <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 18px" }}/>
+
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "10px" }}>
+            <h3 className="serif" style={{ fontSize: "22px", margin: 0, color: T.text }}>
+              📡 Live-Ticker
+            </h3>
+            <button onClick={() => setShowLiveModal(false)}
+              style={{ background: "transparent", border: "none", color: T.textDim, fontSize: "22px", padding: "4px 8px", cursor: "pointer" }}>✕</button>
+          </div>
+
+          {!SYNC_ENABLED && (
+            <div style={{ padding: "12px", background: `${T.bogey}15`, border: `1px solid ${T.bogey}40`, borderRadius: "10px", fontSize: "13px", color: T.bogey, lineHeight: 1.5 }}>
+              Live-Ticker benötigt Supabase Cloud-Sync. Bitte zuerst einrichten.
+            </div>
+          )}
+
+          {SYNC_ENABLED && !active && (
+            <>
+              <p style={{ fontSize: "13px", color: T.textSoft, lineHeight: 1.6, marginTop: 0 }}>
+                Teile deine Runde live mit Freunden. Sie sehen automatisch deinen aktuellen Stand — Scores, Brutto, Uschi-Punkte — ohne App oder Login.
+              </p>
+              <ul style={{ fontSize: "12px", color: T.textSoft, lineHeight: 1.7, paddingLeft: "18px", marginBottom: "18px" }}>
+                <li>Link in die WhatsApp-Gruppe → Freunde klicken → sehen den Live-Stand</li>
+                <li>Aktualisiert sich automatisch alle 15 Sekunden</li>
+                <li>Läuft nach 48 Stunden ab — danach wird die URL ungültig</li>
+              </ul>
+              <button onClick={liveStart} disabled={liveStatus === "creating"} className="gold-hover"
+                style={{ ...S.btnPrimary, width: "100%", opacity: liveStatus === "creating" ? 0.5 : 1 }}>
+                {liveStatus === "creating" ? "Wird erstellt…" : "📡 Live-Ticker starten"}
+              </button>
+            </>
+          )}
+
+          {SYNC_ENABLED && active && (
+            <>
+              <div style={{ padding: "12px 14px", background: `${T.sage}15`, border: `1px solid ${T.sage}40`, borderRadius: "10px", marginBottom: "14px", fontSize: "12px", color: T.sage, display: "flex", alignItems: "center", gap: "8px" }}>
+                <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: T.sage, display: "inline-block" }}/>
+                <span><b>Aktiv</b> — Freunde können live zuschauen</span>
+              </div>
+
+              <div style={{ background: T.surface2, border: `1px solid ${T.gold}40`, borderRadius: "12px", padding: "14px", marginBottom: "12px" }}>
+                <div style={{ ...S.eyebrow, color: T.gold, marginBottom: "8px" }}>LIVE-URL</div>
+                <div style={{ fontSize: "12px", color: T.text, fontFamily: "JetBrains Mono, monospace", wordBreak: "break-all", lineHeight: 1.4 }}>
+                  {url}
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: "8px", marginBottom: "10px" }}>
+                <button onClick={copyLiveUrl} style={{ ...S.btnSecondary, flex: 1 }}>
+                  📋 Kopieren
+                </button>
+                <button onClick={shareLiveUrl} className="gold-hover" style={{ ...S.btnPrimary, flex: 1 }}>
+                  📤 Teilen
+                </button>
+              </div>
+
+              <button onClick={liveEnd}
+                style={{ ...S.btnGhost, width: "100%", color: T.bogey, borderColor: `${T.bogey}40`, marginTop: "14px" }}>
+                Live-Ticker beenden
+              </button>
+
+              <div style={{ fontSize: "11px", color: T.textDim, marginTop: "10px", textAlign: "center", lineHeight: 1.5 }}>
+                💡 Änderungen an Scores werden automatisch hochgeladen.<br/>Läuft nach 48 Stunden ab.
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   const renderAddClub = () => {
     if (!showAddClub) return null;
     return (
@@ -3943,6 +4343,7 @@ WICHTIG:
       {renderUschiReview()}
       {renderSharePreview()}
       {renderAddClub()}
+      {renderLiveModal()}
     </div>
   );
 }
