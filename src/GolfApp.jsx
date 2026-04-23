@@ -852,6 +852,9 @@ export default function GolfApp() {
   const [teePickerFor, setTeePickerFor] = useState(null); // playerId to change tee for
   const [phEditingFor, setPhEditingFor] = useState(null); // playerId whose PH is being edited manually
   const [sharePreview, setSharePreview] = useState(null); // { blob, url } when share preview is open
+  const [showAddClub, setShowAddClub] = useState(false); // "Add new club" modal
+  const [addClubMode, setAddClubMode] = useState("choose"); // "choose" | "quick" | "manual" | "paste"
+  const [quickClubForm, setQuickClubForm] = useState({ name: "", cr: "", slope: "", par: "", numHoles: 18, teeName: "Gelb (Herren)" });
   const [loadedRoundId, setLoadedRoundId] = useState(null); // track which round is being viewed/edited
   // Scoring mode
   const [scoringMode, setScoringMode] = useState("batch"); // batch | live
@@ -1347,7 +1350,7 @@ export default function GolfApp() {
             Schönes <em style={{ color: T.gold, fontStyle: "italic" }}>Spiel.</em>
           </h1>
           <p style={{ color: T.textSoft, margin: "0 0 24px", fontSize: "15px", lineHeight: 1.5 }}>
-            WHS Handicap · Stableford · alle österreichischen Clubs
+            WHS Handicap · Stableford · Uschi 2v2
           </p>
           <button onClick={newRound} className="gold-hover"
             style={{ ...S.btnPrimary, width: "100%", padding: "18px", fontSize: "16px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -1763,6 +1766,33 @@ export default function GolfApp() {
             </div>
           )}
 
+          {/* No results hint + Add new club */}
+          {showDD && clubQ.length > 0 && filteredClubs.length === 0 && (
+            <div style={{ marginTop: "8px", padding: "14px", background: T.surface2, border: `1px solid ${T.line}`, borderRadius: "12px", textAlign: "center" }}>
+              <div style={{ fontSize: "13px", color: T.textSoft, marginBottom: "10px" }}>
+                Kein Club gefunden mit "{clubQ}"
+              </div>
+              <button onClick={() => setShowAddClub(true)} className="gold-hover"
+                style={{ ...S.btnPrimary, padding: "10px 16px", fontSize: "13px" }}>
+                ➕ Neuen Club hinzufügen
+              </button>
+            </div>
+          )}
+
+          {/* Always visible "+ Neuer Club" button when no club picked yet */}
+          {!pickedClub && !cfg.clubName && clubQ.length === 0 && (
+            <button onClick={() => setShowAddClub(true)}
+              style={{
+                marginTop: "10px", width: "100%",
+                background: "transparent", color: T.textSoft,
+                border: `1px dashed ${T.line}`, borderRadius: "10px",
+                padding: "10px", fontSize: "12px",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: "6px",
+              }}>
+              ➕ Neuen Club manuell hinzufügen
+            </button>
+          )}
+
           {/* Tee picker when club selected but no default tee */}
           {pickedClub && (
             <div className="fade-in" style={{ marginTop: "14px", padding: "14px", background: `${T.gold}10`, border: `1px solid ${T.gold}40`, borderRadius: "12px" }}>
@@ -2016,6 +2046,15 @@ export default function GolfApp() {
   // ═══════════════════════════════════════════════════════════════════════════
   const renderHoles = () => {
     const verified = !!selectedClub?.holes;
+    // Validation
+    const sis = holes.map(h => h.si);
+    const duplicateSis = sis.filter((si, i) => sis.indexOf(si) !== i);
+    const missingSis = [];
+    for (let i = 1; i <= cfg.numHoles; i++) if (!sis.includes(i)) missingSis.push(i);
+    const teePar = playerTee(players[0] || {}, cfg, selectedClub)?.par;
+    const parMismatch = teePar && par !== teePar;
+    const hasWarnings = duplicateSis.length > 0 || missingSis.length > 0 || parMismatch;
+
     return (
       <div className="fade-in">
         {renderProgressBar()}
@@ -2027,6 +2066,15 @@ export default function GolfApp() {
             <span style={{ fontSize: "14px" }}>{verified ? "✓" : "⚠️"}</span>
             <span>{verified ? "Loch-Daten aus offizieller Scorekarte" : "Loch-Pars automatisch generiert – bitte mit Scorekarte vergleichen"}</span>
           </div>
+
+          {hasWarnings && (
+            <div style={{ padding: "10px 14px", background: `${T.bogey}15`, border: `1px solid ${T.bogey}40`, borderRadius: "12px", marginBottom: "14px", fontSize: "12px", color: T.bogey, lineHeight: 1.5 }}>
+              <div style={{ fontWeight: 700, marginBottom: "4px" }}>⚠️ Achtung:</div>
+              {duplicateSis.length > 0 && <div>• Vorgabenwerte doppelt: {[...new Set(duplicateSis)].join(", ")}</div>}
+              {missingSis.length > 0 && <div>• Vorgabenwerte fehlen: {missingSis.join(", ")}</div>}
+              {parMismatch && <div>• Par-Summe ({par}) passt nicht zum Tee-Par ({teePar})</div>}
+            </div>
+          )}
 
           <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -3453,6 +3501,276 @@ export default function GolfApp() {
   // ═══════════════════════════════════════════════════════════════════════════
   // SHARE PREVIEW MODAL
   // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ADD CLUB MODAL — quick way to add new clubs in <2 min
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // The prompt that users copy, paste into a new Claude chat with a scorecard photo
+  const QUICK_CLUB_PROMPT = `Du bist ein Datenextraktions-Assistent für Golf-Scorecards.
+
+Ich schicke dir ein Foto einer Golfplatz-Scorecard. Extrahiere die grundlegenden Daten in JSON-Format.
+
+ERFORDERLICH:
+- Clubname
+- Anzahl Löcher (üblich 18)
+- Mindestens 1 Tee mit: teeName (z.B. "Gelb (Herren)"), cr, slope, par
+- Alle Löcher mit: par, si (Stroke Index 1-18)
+
+OPTIONAL (nice to have):
+- Weitere Tees (Weiss/Blau/Rot/Gelb für Herren/Damen)
+- Region (Bundesland/Land)
+
+AUSGABE-FORMAT (nur JSON, kein Text davor/danach):
+
+\`\`\`json
+{
+  "name": "CLUB NAME",
+  "region": "Land/Region",
+  "numHoles": 18,
+  "tees": {
+    "Gelb (Herren)": { "cr": 71.5, "slope": 125, "par": 72 }
+  },
+  "holes": [
+    { "par": 4, "si": 7 },
+    { "par": 5, "si": 1 }
+  ]
+}
+\`\`\`
+
+WICHTIG:
+- Par-Summe der Löcher muss zum Tee-Par passen
+- SI 1-18 muss komplett und unique sein
+- Bei Unsicherheit: setze das Feld auf null statt zu raten
+- Nur gültiges JSON, keine Prosa, keine Kommentare`;
+
+  const copyPromptToClipboard = async () => {
+    try {
+      await navigator.clipboard.writeText(QUICK_CLUB_PROMPT);
+      alert("✓ Prompt kopiert! Öffne einen neuen Claude-Chat, füge den Prompt ein und hänge dein Scorecard-Foto dran.");
+    } catch (err) {
+      alert("Kopieren hat nicht geklappt. Bitte manuell kopieren:\n\n" + QUICK_CLUB_PROMPT.slice(0, 100) + "...");
+    }
+  };
+
+  const saveQuickClub = async () => {
+    const { name, cr, slope, par, numHoles, teeName } = quickClubForm;
+    const errors = [];
+    if (!name.trim()) errors.push("Clubname fehlt");
+    if (!cr || isNaN(parseFloat(cr))) errors.push("CR fehlt oder ungültig");
+    if (!slope || isNaN(parseInt(slope))) errors.push("Slope fehlt oder ungültig");
+    if (!par || isNaN(parseInt(par))) errors.push("Par fehlt oder ungültig");
+    if (!teeName.trim()) errors.push("Tee-Name fehlt");
+    if (errors.length > 0) {
+      alert("Bitte korrigieren:\n" + errors.map(e => "• " + e).join("\n"));
+      return;
+    }
+    const newClub = {
+      name: name.trim(),
+      region: "—",
+      numHoles: parseInt(numHoles) || 18,
+      tees: {
+        [teeName.trim()]: {
+          cr: parseFloat(cr),
+          slope: parseInt(slope),
+          par: parseInt(par),
+        }
+      }
+    };
+    const u = [newClub, ...customClubs];
+    setCustomClubs(u);
+    try { await window.storage.set("golf-clubs", JSON.stringify(u)); } catch {}
+    // Pre-select this club
+    setCfg(c => ({ ...c, clubName: newClub.name, defaultTeeName: teeName.trim(), numHoles: newClub.numHoles }));
+    setHoles(makeHoles(parseInt(par), parseInt(numHoles) || 18));
+    setShowAddClub(false);
+    setAddClubMode("choose");
+    setQuickClubForm({ name: "", cr: "", slope: "", par: "", numHoles: 18, teeName: "Gelb (Herren)" });
+    alert(`✓ ${newClub.name} gespeichert! Du kannst die Löcher im nächsten Schritt anpassen.`);
+  };
+
+  const renderAddClub = () => {
+    if (!showAddClub) return null;
+    return (
+      <div onClick={() => { setShowAddClub(false); setAddClubMode("choose"); }}
+        style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1150, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+        <div onClick={e => e.stopPropagation()} className="slide-up"
+          style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
+          <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 18px" }}/>
+
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "14px" }}>
+            <h3 className="serif" style={{ fontSize: "22px", margin: 0, color: T.text }}>
+              {addClubMode === "choose" && "➕ Neuer Club"}
+              {addClubMode === "quick" && "📸 Foto-Import"}
+              {addClubMode === "manual" && "⌨️ Manuell eintippen"}
+              {addClubMode === "paste" && "📋 JSON einfügen"}
+            </h3>
+            {addClubMode !== "choose" ? (
+              <button onClick={() => setAddClubMode("choose")}
+                style={{ ...S.btnGhost, fontSize: "11px" }}>← Zurück</button>
+            ) : (
+              <button onClick={() => setShowAddClub(false)}
+                style={{ background: "transparent", border: "none", color: T.textDim, fontSize: "22px", padding: "4px 8px", cursor: "pointer" }}>✕</button>
+            )}
+          </div>
+
+          {/* === CHOOSE MODE === */}
+          {addClubMode === "choose" && (
+            <>
+              <p style={{ fontSize: "13px", color: T.textSoft, lineHeight: 1.5, marginTop: 0, marginBottom: "16px" }}>
+                Neuen Platz in die App aufnehmen — wähle den Weg der für dich am schnellsten geht.
+              </p>
+              <div style={{ display: "grid", gap: "10px" }}>
+                <button onClick={() => setAddClubMode("quick")} className="card-hover"
+                  style={{ padding: "16px", background: T.surface2, border: `1px solid ${T.gold}40`, borderRadius: "12px", textAlign: "left", cursor: "pointer" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "6px" }}>
+                    <span style={{ fontSize: "24px" }}>📸</span>
+                    <span style={{ fontSize: "15px", fontWeight: 700, color: T.gold }}>Foto-Import (empfohlen)</span>
+                  </div>
+                  <div style={{ fontSize: "12px", color: T.textSoft, lineHeight: 1.4 }}>
+                    Prompt kopieren → in neuem Claude-Chat einfügen → Scorecard-Foto dranhängen → JSON zurück in die App
+                  </div>
+                </button>
+
+                <button onClick={() => setAddClubMode("manual")} className="card-hover"
+                  style={{ padding: "16px", background: T.surface2, border: `1px solid ${T.line}`, borderRadius: "12px", textAlign: "left", cursor: "pointer" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "6px" }}>
+                    <span style={{ fontSize: "24px" }}>⌨️</span>
+                    <span style={{ fontSize: "15px", fontWeight: 700, color: T.text }}>Manuell eintippen</span>
+                  </div>
+                  <div style={{ fontSize: "12px", color: T.textSoft, lineHeight: 1.4 }}>
+                    Schnell-Formular: nur das Nötigste (Name, CR, Slope, Par). Loch-Details im nächsten Schritt.
+                  </div>
+                </button>
+
+                <button onClick={() => setAddClubMode("paste")} className="card-hover"
+                  style={{ padding: "16px", background: T.surface2, border: `1px solid ${T.line}`, borderRadius: "12px", textAlign: "left", cursor: "pointer" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "6px" }}>
+                    <span style={{ fontSize: "24px" }}>📋</span>
+                    <span style={{ fontSize: "15px", fontWeight: 700, color: T.text }}>JSON einfügen</span>
+                  </div>
+                  <div style={{ fontSize: "12px", color: T.textSoft, lineHeight: 1.4 }}>
+                    Du hast schon ein fertiges Club-JSON (z.B. aus einem früheren Claude-Chat)? Hier einfügen.
+                  </div>
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* === QUICK/PHOTO MODE === */}
+          {addClubMode === "quick" && (
+            <>
+              <p style={{ fontSize: "13px", color: T.textSoft, lineHeight: 1.5, marginTop: 0, marginBottom: "14px" }}>
+                So geht's in 3 Schritten:
+              </p>
+              <ol style={{ fontSize: "13px", color: T.text, paddingLeft: "20px", lineHeight: 1.7, marginBottom: "14px" }}>
+                <li>Prompt unten kopieren</li>
+                <li>Neuen <b>Claude-Chat</b> öffnen (App oder claude.ai) → Prompt einfügen → <b>Scorecard-Foto</b> anhängen → senden</li>
+                <li>JSON kopieren → hier auf "📋 JSON einfügen" → fertig</li>
+              </ol>
+
+              <div style={{ padding: "12px", background: T.surface2, border: `1px solid ${T.line}`, borderRadius: "10px", marginBottom: "12px", fontSize: "11px", color: T.textSoft, fontFamily: "JetBrains Mono, monospace", maxHeight: "140px", overflowY: "auto", lineHeight: 1.4 }}>
+                {QUICK_CLUB_PROMPT.slice(0, 200)}...
+              </div>
+
+              <button onClick={copyPromptToClipboard} className="gold-hover"
+                style={{ ...S.btnPrimary, width: "100%", marginBottom: "10px" }}>
+                📋 Prompt kopieren
+              </button>
+
+              <button onClick={() => setAddClubMode("paste")}
+                style={{ ...S.btnSecondary, width: "100%" }}>
+                Weiter zu "JSON einfügen" →
+              </button>
+            </>
+          )}
+
+          {/* === MANUAL MODE === */}
+          {addClubMode === "manual" && (
+            <>
+              <p style={{ fontSize: "13px", color: T.textSoft, lineHeight: 1.5, marginTop: 0, marginBottom: "16px" }}>
+                Schnell-Formular. Den Stroke-Index und Loch-Par kannst du im nächsten Schritt anpassen.
+              </p>
+              <div style={{ display: "grid", gap: "10px", marginBottom: "16px" }}>
+                <div>
+                  <label style={{ fontSize: "11px", color: T.textDim, fontWeight: 600, display: "block", marginBottom: "4px" }}>CLUB-NAME</label>
+                  <input type="text" value={quickClubForm.name}
+                    onChange={e => setQuickClubForm(f => ({ ...f, name: e.target.value }))}
+                    placeholder="z.B. GC Schloss Schönborn"
+                    style={{ ...S.input }}/>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+                  <div>
+                    <label style={{ fontSize: "11px", color: T.textDim, fontWeight: 600, display: "block", marginBottom: "4px" }}>ANZAHL LÖCHER</label>
+                    <select value={quickClubForm.numHoles}
+                      onChange={e => setQuickClubForm(f => ({ ...f, numHoles: parseInt(e.target.value) }))}
+                      style={{ ...S.input }}>
+                      <option value={18}>18</option>
+                      <option value={9}>9</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{ fontSize: "11px", color: T.textDim, fontWeight: 600, display: "block", marginBottom: "4px" }}>TEE-NAME</label>
+                    <input type="text" value={quickClubForm.teeName}
+                      onChange={e => setQuickClubForm(f => ({ ...f, teeName: e.target.value }))}
+                      placeholder="Gelb (Herren)"
+                      style={{ ...S.input }}/>
+                  </div>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px" }}>
+                  <div>
+                    <label style={{ fontSize: "11px", color: T.textDim, fontWeight: 600, display: "block", marginBottom: "4px" }}>CR</label>
+                    <input type="number" step="0.1" value={quickClubForm.cr}
+                      onChange={e => setQuickClubForm(f => ({ ...f, cr: e.target.value }))}
+                      placeholder="71.5"
+                      style={{ ...S.input, textAlign: "center" }}/>
+                  </div>
+                  <div>
+                    <label style={{ fontSize: "11px", color: T.textDim, fontWeight: 600, display: "block", marginBottom: "4px" }}>SLOPE</label>
+                    <input type="number" value={quickClubForm.slope}
+                      onChange={e => setQuickClubForm(f => ({ ...f, slope: e.target.value }))}
+                      placeholder="125"
+                      style={{ ...S.input, textAlign: "center" }}/>
+                  </div>
+                  <div>
+                    <label style={{ fontSize: "11px", color: T.textDim, fontWeight: 600, display: "block", marginBottom: "4px" }}>PAR</label>
+                    <input type="number" value={quickClubForm.par}
+                      onChange={e => setQuickClubForm(f => ({ ...f, par: e.target.value }))}
+                      placeholder="72"
+                      style={{ ...S.input, textAlign: "center" }}/>
+                  </div>
+                </div>
+              </div>
+              <button onClick={saveQuickClub} className="gold-hover"
+                style={{ ...S.btnPrimary, width: "100%" }}>
+                ✓ Club speichern & auswählen
+              </button>
+              <div style={{ fontSize: "11px", color: T.textDim, marginTop: "10px", textAlign: "center", lineHeight: 1.4 }}>
+                💡 Alle Werte findest du auf der offiziellen Scorekarte des Clubs.
+              </div>
+            </>
+          )}
+
+          {/* === PASTE MODE === */}
+          {addClubMode === "paste" && (
+            <>
+              <p style={{ fontSize: "13px", color: T.textSoft, lineHeight: 1.5, marginTop: 0, marginBottom: "14px" }}>
+                Füge hier das komplette JSON deines Clubs ein — kommt aus einem Claude-Chat oder einem früheren Export.
+              </p>
+              <button onClick={() => { setShowAddClub(false); setShowImport(true); setAddClubMode("choose"); }}
+                className="gold-hover"
+                style={{ ...S.btnPrimary, width: "100%" }}>
+                📋 Import-Dialog öffnen
+              </button>
+              <div style={{ fontSize: "11px", color: T.textDim, marginTop: "10px", textAlign: "center", lineHeight: 1.4 }}>
+                Im Import-Dialog kannst du das JSON einfügen und validieren.
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   const renderSharePreview = () => {
     if (!sharePreview) return null;
     return (
@@ -3624,6 +3942,7 @@ export default function GolfApp() {
       {renderUschiPar3Dialog()}
       {renderUschiReview()}
       {renderSharePreview()}
+      {renderAddClub()}
     </div>
   );
 }
