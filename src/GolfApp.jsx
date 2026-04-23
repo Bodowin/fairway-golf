@@ -102,9 +102,9 @@ async function cloudPull(syncCode) {
 // Anyone with the URL can view (read-only) the round data.
 // Auto-expires after 48h (DB-side via DEFAULT and optional cron cleanup).
 
-// Create a new live ticker. Returns the generated code, or null on failure.
+// Create a new live ticker. Returns { code } on success, or { error } on failure.
 async function liveCreate(data) {
-  if (!SYNC_ENABLED) return null;
+  if (!SYNC_ENABLED) return { error: "sync-disabled" };
   const code = genSyncCode(); // reuse same alphabet, 8 chars
   try {
     const res = await fetch(`${SUPABASE_URL}/rest/v1/live_rounds`, {
@@ -121,8 +121,18 @@ async function liveCreate(data) {
         updated_at: new Date().toISOString(),
       }),
     });
-    return res.ok ? code : null;
-  } catch (e) { console.error("Live create failed", e); return null; }
+    if (res.ok) return { code };
+    // Try to extract useful error info
+    let detail = "";
+    try {
+      const body = await res.text();
+      detail = body.slice(0, 200);
+    } catch {}
+    return { error: `http-${res.status}`, status: res.status, detail };
+  } catch (e) {
+    console.error("Live create failed", e);
+    return { error: "network", detail: String(e.message || e) };
+  }
 }
 
 // Push an update to an existing live ticker.
@@ -3855,13 +3865,22 @@ WICHTIG:
         holes: selectedClub.holes,
       } : null,
     };
-    const code = await liveCreate(payload);
-    if (code) {
-      setLiveCode(code);
+    const result = await liveCreate(payload);
+    if (result.code) {
+      setLiveCode(result.code);
       setLiveStatus("active");
     } else {
       setLiveStatus("error");
-      alert("Live-Ticker konnte nicht gestartet werden. Bitte nochmal versuchen.");
+      // Helpful error messages based on error type
+      if (result.status === 404 || result.detail?.includes("does not exist")) {
+        alert("Live-Ticker-Tabelle existiert noch nicht in Supabase.\n\nBitte das SQL aus SUPABASE-LIVE-TICKER-SQL.md im Supabase Dashboard ausführen.");
+      } else if (result.status === 401 || result.status === 403) {
+        alert("Keine Berechtigung für Live-Ticker.\n\nBitte prüfen ob die RLS-Policies in Supabase angelegt sind (siehe SUPABASE-LIVE-TICKER-SQL.md).");
+      } else if (result.error === "network") {
+        alert("Netzwerk-Fehler. Bist du online?");
+      } else {
+        alert("Live-Ticker konnte nicht gestartet werden.\n\nFehler: " + (result.detail || result.error || "unbekannt"));
+      }
     }
   };
 
