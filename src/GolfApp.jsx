@@ -2115,23 +2115,39 @@ export default function GolfApp() {
             ))}
           </div>
 
-          {/* Uschi protocol button */}
-          {gameMode !== "stableford" && (
-            <button onClick={() => setShowUschiReview(true)}
+          {/* Action buttons: Uschi protocol + Share */}
+          <div style={{ display: "flex", gap: "8px", marginBottom: "14px" }}>
+            {gameMode !== "stableford" && (
+              <button onClick={() => setShowUschiReview(true)}
+                style={{
+                  flex: 1,
+                  background: `${T.gold}12`,
+                  color: T.gold,
+                  border: `1px solid ${T.gold}40`,
+                  borderRadius: "10px",
+                  padding: "10px 12px",
+                  fontSize: "13px", fontWeight: 600,
+                  fontFamily: "Inter, sans-serif",
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: "6px",
+                }}>
+                🎯 Uschi-Protokoll
+              </button>
+            )}
+            <button onClick={shareResults}
               style={{
-                width: "100%", marginBottom: "14px",
-                background: `${T.gold}12`,
-                color: T.gold,
-                border: `1px solid ${T.gold}40`,
+                flex: 1,
+                background: `${T.sage}15`,
+                color: T.sage,
+                border: `1px solid ${T.sage}40`,
                 borderRadius: "10px",
-                padding: "10px 14px",
+                padding: "10px 12px",
                 fontSize: "13px", fontWeight: 600,
                 fontFamily: "Inter, sans-serif",
-                display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: "6px",
               }}>
-              🎯 Uschi-Protokoll öffnen
+              📸 Zwischenstand teilen
             </button>
-          )}
+          </div>
 
           {scoringMode === "batch" ? renderBatchMode() : renderLiveMode()}
 
@@ -2370,6 +2386,28 @@ export default function GolfApp() {
                     <div style={{ fontWeight: 600, fontSize: "15px", color: T.text, display: "flex", alignItems: "center", gap: "6px" }}>
                       {p.name}
                       {p.teeName && <TeeDot name={p.teeName} size={9} />}
+                      {/* Uschi stroke advantage badge inline next to name */}
+                      {gameMode !== "stableford" && (() => {
+                        const playerStrokes = uschiStrokes.find(s => s.playerId === p.id);
+                        if (!playerStrokes) return null;
+                        const strokesOnThisHole = playerStrokes.perHole[currentHole] || 0;
+                        const maxOnHole = Math.max(0, ...uschiStrokes.map(s => s.perHole[currentHole] || 0));
+                        const isMaxOnHole = strokesOnThisHole === maxOnHole && strokesOnThisHole > 0;
+                        const isBestOverall = playerStrokes.strokes === Math.min(...uschiStrokes.map(s => s.strokes));
+                        if (isBestOverall && strokesOnThisHole === 0) {
+                          return (
+                            <span style={{ fontSize: "9px", color: T.sage, background: `${T.sage}15`, padding: "2px 5px", borderRadius: "3px", fontWeight: 700, letterSpacing: "0.04em" }}>🎯 MASSSTAB</span>
+                          );
+                        }
+                        if (strokesOnThisHole > 0) {
+                          return (
+                            <span style={{ fontSize: "10px", color: isMaxOnHole ? T.gold : T.sage, background: isMaxOnHole ? `${T.gold}20` : `${T.sage}15`, padding: "2px 6px", borderRadius: "4px", fontWeight: 700 }}>
+                              🎯 {strokesOnThisHole === 1 ? "1 vor" : `${strokesOnThisHole} vor`}
+                            </span>
+                          );
+                        }
+                        return null;
+                      })()}
                     </div>
                     <div style={{ fontSize: "11px", color: T.textSoft, marginTop: "2px" }}>
                       HCP <span className="mono">{p.hcp}</span>
@@ -2528,6 +2566,16 @@ export default function GolfApp() {
     const ranked = [...all].sort((a, b) => b.sfNT - a.sfNT);
     const isUschi = gameMode !== "stableford";
 
+    // Detect if this is an in-progress round (not all holes scored by all players)
+    // Count maximum holes played by any player
+    const holesPlayed = Math.max(0, ...all.map(s =>
+      holes.filter((_, i) => {
+        const g = scores[s.p.id]?.[i];
+        return isValid(g) || isStrich(g);
+      }).length
+    ));
+    const isInProgress = holesPlayed > 0 && holesPlayed < holes.length;
+
     // Calculate dimensions — tall portrait like a story post
     const W = 1080;
     const rowH = 130;
@@ -2567,6 +2615,15 @@ export default function GolfApp() {
     ctx.fillStyle = "#f0e9d3";
     ctx.font = "italic 56px 'Instrument Serif', Georgia, serif";
     ctx.fillText("Fairway", 150, 95);
+
+    // Live indicator if in-progress
+    if (isInProgress) {
+      ctx.fillStyle = "rgba(201, 168, 92, 0.18)";
+      ctx.fillRect(310, 55, 230, 50);
+      ctx.fillStyle = "#c9a85c";
+      ctx.font = "700 22px 'Inter', sans-serif";
+      ctx.fillText(`● LIVE · Loch ${holesPlayed}/${holes.length}`, 330, 88);
+    }
 
     // Club & date
     ctx.fillStyle = "#a2bfa2";
@@ -3194,6 +3251,38 @@ export default function GolfApp() {
               <div className="serif" style={{ fontSize: "24px", color: T.text, marginTop: "2px" }}>
                 Loch <span style={{ color: T.gold }}>{padOpen.holeIdx + 1}</span>
               </div>
+              {/* Uschi stroke advantage indicator (only in Uschi mode) */}
+              {gameMode !== "stableford" && (() => {
+                const playerStrokes = uschiStrokes.find(s => s.playerId === player.id);
+                if (!playerStrokes) return null;
+                const strokesOnThisHole = playerStrokes.perHole[padOpen.holeIdx] || 0;
+                const maxStrokesOnHole = Math.max(0, ...uschiStrokes.map(s => s.perHole[padOpen.holeIdx] || 0));
+                const isBest = playerStrokes.strokes === Math.min(...uschiStrokes.map(s => s.strokes));
+                if (strokesOnThisHole === 0 && !isBest) {
+                  // Player has no strokes on this hole but is not the best — level playing field
+                  return (
+                    <div style={{ fontSize: "10px", color: T.textDim, marginTop: "4px", fontWeight: 500 }}>
+                      🎯 kein Vorsprung
+                    </div>
+                  );
+                }
+                if (isBest && strokesOnThisHole === 0) {
+                  // This player IS the best reference — no strokes, shown separately
+                  return (
+                    <div style={{ fontSize: "10px", color: T.sage, marginTop: "4px", fontWeight: 600 }}>
+                      🎯 Maßstab
+                    </div>
+                  );
+                }
+                // Player has strokes on this hole
+                const isMax = strokesOnThisHole === maxStrokesOnHole && strokesOnThisHole > 0;
+                return (
+                  <div style={{ fontSize: "10px", color: isMax ? T.gold : T.sage, marginTop: "4px", fontWeight: 700, display: "inline-flex", alignItems: "center", gap: "4px", background: isMax ? `${T.gold}20` : `${T.sage}15`, padding: "2px 6px", borderRadius: "4px" }}>
+                    🎯 {strokesOnThisHole === 1 ? "1 vor" : `${strokesOnThisHole} vor`}
+                    {isMax && <span style={{ fontSize: "9px", letterSpacing: "0.04em" }}>· BEST</span>}
+                  </div>
+                );
+              })()}
             </div>
             <div style={{ textAlign: "right" }}>
               <div style={{ fontSize: "10px", color: T.textDim, letterSpacing: "0.06em" }}>PAR · SI</div>
