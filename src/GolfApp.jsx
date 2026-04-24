@@ -818,8 +818,17 @@ function aggregateClubStats(clubName, allRounds) {
         const isValid_ = typeof g === "number" && g > 0;
         if (!isValid_ && !isStrich_) return;
 
-        // Effective gross: strikes treated as par+3 (worst realistic score)
-        const effectiveGross = isStrich_ ? h.par + 3 : g;
+        // Strokes this player gets on this hole based on Course HCP
+        const strokesOnHole = Math.floor(Math.abs(ph) / rHoles.length) + (h.si <= Math.abs(ph) % rHoles.length ? 1 : 0);
+        // Personal par = hole par + strokes the player gets
+        const personalPar = h.par + strokesOnHole;
+
+        // Effective gross for stats:
+        // - Real score: the actual value
+        // - Strich (picked up): personal par + 2 (minimum to lose all SF Netto points)
+        //   This reflects the actual rule: a Stableford player picks up exactly when
+        //   they can no longer score any Netto points — which is at personal par + 2.
+        const effectiveGross = isStrich_ ? personalPar + 2 : g;
 
         // Birdie/par/bogey/double tallies (only from real scores, not strikes)
         if (isValid_) {
@@ -832,7 +841,6 @@ function aggregateClubStats(clubName, allRounds) {
         if (isStrich_) pm.strichCount++;
 
         // Stableford netto (strike = 0 points)
-        const strokesOnHole = Math.floor(Math.abs(ph) / rHoles.length) + (h.si <= Math.abs(ph) % rHoles.length ? 1 : 0);
         const netto = effectiveGross - strokesOnHole;
         const sf = isStrich_ ? 0 : Math.max(0, h.par - netto + 2);
         roundSF += sf;
@@ -2456,8 +2464,8 @@ export default function GolfApp() {
               </div>
               <div style={{ fontSize: "10px", color: T.textDim, marginBottom: "10px", lineHeight: 1.4 }}>
                 {focusPlayerName
-                  ? "Persönlicher Durchschnitt. Striche werden als Par+3 gezählt (besonders schlechte Löcher)."
-                  : "Durchschnitt aller Spieler. Striche werden als Par+3 gewertet."}
+                  ? "Persönlicher Durchschnitt. Striche zählen als persönliches Netto-Doppelbogey (die Regel: man hebt auf sobald keine SF-Punkte mehr möglich sind)."
+                  : "Durchschnitt aller Spieler. Striche werden als persönliches Netto-Doppelbogey gewertet — fair für jeden Handicap-Spieler."}
               </div>
               <div style={{ overflow: "hidden", borderRadius: "8px", border: `1px solid ${T.line}` }}>
                 <div style={{ display: "grid", gridTemplateColumns: "24px 22px 1fr 54px", gap: "6px", padding: "7px 10px", background: T.surface2, fontSize: "9px", color: T.textDim, fontWeight: 600, letterSpacing: "0.04em" }}>
