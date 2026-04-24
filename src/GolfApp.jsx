@@ -995,6 +995,402 @@ const fmtDate = d => {
   } catch { return d; }
 };
 
+// ─── Round Analysis: stats for a single round ───────────────────────────────
+/**
+ * Analyzes a completed or ongoing round and returns insights for the "Round Analysis" view.
+ * Returns null if no players or no data.
+ *
+ * Output shape:
+ * {
+ *   completeness: { played, total, percent },
+ *   hallOfFame: {
+ *     bestNettoScore: { playerName, score, holeIdx }, // best single-hole netto
+ *     bestSFRound: { playerName, sf },
+ *     birdieStreak: { playerName, length, startHole, endHole } | null,
+ *     biggestUschi: { playerName, carry, holeIdx } | null,
+ *     worstGroupHole: { idx, groupAvgVsPar, strichCount },
+ *     comebackKing: { playerName, f9, b9, delta } | null,
+ *   },
+ *   f9b9: [{ playerName, f9, b9, delta }],
+ *   hardestHoles: [{ idx, par, avgVsPar, strichCount }],
+ *   easiestHoles: [{ idx, par, avgVsPar }],
+ *   playerHighlights: [{ playerName, lines: [string] }],
+ *   uschiTrend: { labels, series: [{ name, points: [number] }] } | null,
+ * }
+ */
+function analyzeRound(round) {
+  if (!round || !round.players || !round.holes) return null;
+  const players = round.players;
+  const holes = round.holes;
+  const scores = round.scores || {};
+  const par3Data = round.par3Data || {};
+  const gameMode = round.gameMode || "stableford";
+  const isUschi = gameMode === "uschi-single" || gameMode === "uschi-team";
+
+  if (players.length === 0 || holes.length === 0) return null;
+
+  // Compute player setup data we'll reuse
+  const playerMeta = players.map(p => {
+    const tee = playerTee(p, round.cfg, round.selectedClubSnapshot);
+    const { ph } = resolvePlayerPH(p, round.cfg, round.selectedClubSnapshot, holes.reduce((s, h) => s + h.par, 0));
+    return { player: p, tee, ph };
+  });
+
+  // Helper: strokes this player gets on hole i
+  const strokesOn = (pm, hIdx) => {
+    const numHoles = holes.length;
+    const h = holes[hIdx];
+    return Math.floor(Math.abs(pm.ph) / numHoles) + (h.si <= Math.abs(pm.ph) % numHoles ? 1 : 0);
+  };
+
+  // Completeness
+  let played = 0, total = players.length * holes.length;
+  players.forEach(p => {
+    for (let i = 0; i < holes.length; i++) {
+      const v = scores[p.id]?.[i];
+      if ((typeof v === "number" && v > 0) || v === null) played++;
+    }
+  });
+
+  // Per-hole per-player data
+  const perPlayerHoleData = {}; // { pid: [{ gross, netto, sf, isStrich, diffVsPar }] }
+  players.forEach(p => {
+    const pm = playerMeta.find(x => x.player.id === p.id);
+    perPlayerHoleData[p.id] = holes.map((h, i) => {
+      const g = scores[p.id]?.[i];
+      const isStrich = g === null;
+      const isValid = typeof g === "number" && g > 0;
+      if (!isValid && !isStrich) return null;
+      const strokes = strokesOn(pm, i);
+      const personalPar = h.par + strokes;
+      const effectiveGross = isStrich ? personalPar + 2 : g;
+      const netto = effectiveGross - strokes;
+      const sf = isStrich ? 0 : Math.max(0, h.par - netto + 2);
+      return {
+        gross: g, effectiveGross, netto, sf, strokes,
+        isStrich, diffVsPar: isStrich ? null : (g - h.par),
+        holeIdx: i, par: h.par,
+      };
+    });
+  });
+
+  // Best single-hole netto (lowest netto across all players/holes)
+  let bestNettoScore = null;
+  players.forEach(p => {
+    perPlayerHoleData[p.id].forEach((d, i) => {
+      if (!d || d.isStrich) return;
+      if (!bestNettoScore || d.netto < bestNettoScore.netto) {
+        bestNettoScore = { playerName: p.name, score: d.gross, netto: d.netto, holeIdx: i, diffVsPar: d.diffVsPar };
+      }
+    });
+  });
+
+  // SF Round totals
+  const sfRound = {};
+  players.forEach(p => {
+    sfRound[p.id] = perPlayerHoleData[p.id].reduce((s, d) => s + (d?.sf || 0), 0);
+  });
+  let bestSFRound = null;
+  players.forEach(p => {
+    if (!bestSFRound || sfRound[p.id] > bestSFRound.sf) {
+      bestSFRound = { playerName: p.name, sf: sfRound[p.id] };
+    }
+  });
+
+  // Birdie streak: longest streak of par-or-better per player (netto, since mixed HCs)
+  let birdieStreak = null;
+  players.forEach(p => {
+    let currentStreakLen = 0, currentStart = -1;
+    let maxLen = 0, maxStart = -1, maxEnd = -1;
+    perPlayerHoleData[p.id].forEach((d, i) => {
+      if (d && !d.isStrich && d.sf >= 2) {
+        // sf >= 2 means netto par or better
+        if (currentStreakLen === 0) currentStart = i;
+        currentStreakLen++;
+        if (currentStreakLen > maxLen) {
+          maxLen = currentStreakLen;
+          maxStart = currentStart;
+          maxEnd = i;
+        }
+      } else {
+        currentStreakLen = 0;
+      }
+    });
+    if (maxLen >= 2 && (!birdieStreak || maxLen > birdieStreak.length)) {
+      birdieStreak = { playerName: p.name, length: maxLen, startHole: maxStart, endHole: maxEnd };
+    }
+  });
+
+  // F9/B9 split (only if 18-hole round)
+  let f9b9 = null;
+  if (holes.length === 18) {
+    f9b9 = players.map(p => {
+      const data = perPlayerHoleData[p.id];
+      const f9 = data.slice(0, 9).reduce((s, d) => s + (d?.sf || 0), 0);
+      const b9 = data.slice(9).reduce((s, d) => s + (d?.sf || 0), 0);
+      const f9Valid = data.slice(0, 9).some(d => d !== null);
+      const b9Valid = data.slice(9).some(d => d !== null);
+      return { playerName: p.name, f9, b9, delta: b9 - f9, f9Valid, b9Valid };
+    });
+  }
+
+  // Comeback king: biggest improvement F9→B9
+  let comebackKing = null;
+  if (f9b9) {
+    f9b9.forEach(x => {
+      if (x.f9Valid && x.b9Valid && x.delta > 2 && (!comebackKing || x.delta > comebackKing.delta)) {
+        comebackKing = { playerName: x.playerName, f9: x.f9, b9: x.b9, delta: x.delta };
+      }
+    });
+  }
+
+  // Hole difficulty ranking (group-wide)
+  const holeDifficulty = holes.map((h, i) => {
+    const diffs = [];
+    let strichCount = 0;
+    players.forEach(p => {
+      const d = perPlayerHoleData[p.id][i];
+      if (!d) return;
+      if (d.isStrich) {
+        strichCount++;
+        // Use personal par+2 as "effective" diff vs par for group ranking
+        diffs.push((d.effectiveGross - h.par));
+      } else {
+        diffs.push(d.diffVsPar);
+      }
+    });
+    const avgVsPar = diffs.length ? diffs.reduce((s, v) => s + v, 0) / diffs.length : 0;
+    return { idx: i, par: h.par, si: h.si, avgVsPar, strichCount, playedCount: diffs.length };
+  }).filter(h => h.playedCount > 0);
+
+  const hardest = [...holeDifficulty].sort((a, b) => b.avgVsPar - a.avgVsPar).slice(0, 3);
+  const easiest = [...holeDifficulty].sort((a, b) => a.avgVsPar - b.avgVsPar).slice(0, 3);
+  const worstGroupHole = hardest[0] || null;
+
+  // Biggest Uschi moment: highest carry (par3Data with closest that won)
+  let biggestUschi = null;
+  if (isUschi) {
+    // Walk through par-3 holes in order, tracking carry
+    let carry = 1;
+    for (let i = 0; i < holes.length; i++) {
+      if (holes[i].par !== 3) continue;
+      const data = par3Data[i];
+      if (!data) continue;
+      const greenHits = data.greenHits || [];
+      const closest = data.closest;
+      if (greenHits.length === 0) {
+        carry += 1;
+      } else if (closest && greenHits.includes(closest)) {
+        const cGross = scores[closest]?.[i];
+        if (typeof cGross === "number" && cGross > 0 && cGross <= holes[i].par) {
+          // Won
+          const winnerName = players.find(pl => pl.id === closest)?.name || "?";
+          if (!biggestUschi || carry > biggestUschi.carry) {
+            biggestUschi = { playerName: winnerName, carry, holeIdx: i };
+          }
+          carry = 1;
+        } else {
+          carry = 1;
+        }
+      }
+    }
+  }
+
+  // Player highlights: 1-3 lines per player
+  const playerHighlights = players.map(p => {
+    const data = perPlayerHoleData[p.id];
+    const lines = [];
+    const birdies = data.filter(d => d && !d.isStrich && d.diffVsPar <= -1);
+    const strikes = data.filter(d => d && d.isStrich);
+    const realScores = data.filter(d => d && !d.isStrich);
+    // Best hole (lowest diff vs par for a real score)
+    let bestHole = null;
+    realScores.forEach(d => {
+      if (!bestHole || d.diffVsPar < bestHole.diffVsPar) bestHole = d;
+    });
+    // Worst hole (highest diff vs par for a real score)
+    let worstHole = null;
+    realScores.forEach(d => {
+      if (!worstHole || d.diffVsPar > worstHole.diffVsPar) worstHole = d;
+    });
+
+    if (birdies.length > 0) {
+      const holeList = birdies.map(b => b.holeIdx + 1).join(", ");
+      const label = birdies.length === 1 ? "Birdie" : `${birdies.length} Birdies`;
+      lines.push(`🎯 ${label} auf Loch ${holeList}`);
+    }
+    if (strikes.length > 0) {
+      const holeList = strikes.map(s => s.holeIdx + 1).join(", ");
+      lines.push(`✗ Aufgeben auf Loch ${holeList}`);
+    }
+    if (bestHole && bestHole.diffVsPar >= 0) {
+      // Only mention "bestes Loch" if no birdies were played (otherwise redundant)
+      if (birdies.length === 0) {
+        lines.push(`🏆 Bestes Loch: ${bestHole.holeIdx + 1} (${bestHole.diffVsPar === 0 ? "Par" : "+" + bestHole.diffVsPar})`);
+      }
+    }
+    if (worstHole && worstHole.diffVsPar >= 2 && strikes.length === 0) {
+      lines.push(`💀 Schlimmstes: Loch ${worstHole.holeIdx + 1} (+${worstHole.diffVsPar})`);
+    }
+    return { playerName: p.name, lines };
+  });
+
+  // Uschi trend: cumulative points per player per hole
+  let uschiTrend = null;
+  if (isUschi && round.uschiResult?.perHole) {
+    const perHole = round.uschiResult.perHole;
+    const labels = holes.map((_, i) => i + 1);
+    const series = players.map(p => {
+      const points = [];
+      let cum = 0;
+      for (let i = 0; i < holes.length; i++) {
+        const ph = perHole.find(x => x.holeIdx === i);
+        if (ph && ph.holePoints && ph.holePoints[p.id] !== undefined) {
+          cum += ph.holePoints[p.id];
+        }
+        points.push(cum);
+      }
+      return { name: p.name, points };
+    });
+    uschiTrend = { labels, series };
+  }
+
+  return {
+    completeness: { played, total, percent: Math.round((played / total) * 100) },
+    hallOfFame: {
+      bestNettoScore,
+      bestSFRound,
+      birdieStreak,
+      biggestUschi,
+      worstGroupHole,
+      comebackKing,
+    },
+    f9b9,
+    hardestHoles: hardest,
+    easiestHoles: easiest,
+    playerHighlights,
+    uschiTrend,
+  };
+}
+
+// ─── Uschi Live Standing: current state + what's achievable ─────────────────
+/**
+ * For an in-progress round, calculates each player's current standing +
+ * what they could theoretically still achieve (max) and lose (min).
+ *
+ * For Uschi:
+ *  - Per remaining hole: max gain = +1 (best) + +1 (birdie) = +2
+ *    For Par-3 holes not yet played, the current carry adds on top
+ *  - Per remaining hole: min gain = -1 (worst)
+ *
+ * For Stableford/Uschi other metrics we keep it simple.
+ *
+ * Returns:
+ * {
+ *   players: [{ name, current, max, min, securedRank: 1|null }],
+ *   remaining: { holes, par3WithoutData, currentCarry },
+ *   decided: boolean,  // true if all ranks are mathematically locked
+ *   leader: { name, current } | null,
+ * }
+ */
+function computeUschiLiveStanding(round) {
+  if (!round || !round.players || !round.holes) return null;
+  const gameMode = round.gameMode || "stableford";
+  const isUschi = gameMode === "uschi-single" || gameMode === "uschi-team";
+  if (!isUschi) return null;
+  if (!round.uschiResult?.totals) return null;
+
+  const players = round.players;
+  const holes = round.holes;
+  const scores = round.scores || {};
+  const par3Data = round.par3Data || {};
+
+  // Which holes are "completed" (all players entered score or strich)?
+  const remainingHoleIdxs = [];
+  for (let i = 0; i < holes.length; i++) {
+    const allHave = players.every(p => {
+      const v = scores[p.id]?.[i];
+      return (typeof v === "number" && v > 0) || v === null;
+    });
+    if (!allHave) remainingHoleIdxs.push(i);
+  }
+
+  // Count remaining par-3 holes (for potential carry wins)
+  const remainingPar3s = remainingHoleIdxs.filter(i => holes[i].par === 3);
+
+  // Current carry estimate: walk through completed par-3 in order, same rule as computeUschi
+  let currentCarry = 1;
+  for (let i = 0; i < holes.length; i++) {
+    if (holes[i].par !== 3) continue;
+    if (remainingHoleIdxs.includes(i)) break; // stop at first unplayed
+    const data = par3Data[i];
+    if (!data) continue;
+    const greenHits = data.greenHits || [];
+    const closest = data.closest;
+    if (greenHits.length === 0) {
+      currentCarry += 1;
+    } else if (closest && greenHits.includes(closest)) {
+      const cGross = scores[closest]?.[i];
+      if (typeof cGross === "number" && cGross > 0 && cGross <= holes[i].par) {
+        currentCarry = 1;
+      } else {
+        currentCarry = 1;
+      }
+    }
+  }
+
+  // Per-player current/max/min
+  const playerStandings = players.map(p => {
+    const current = round.uschiResult.totals[p.id]?.total || 0;
+
+    // Max gain per remaining hole: +2 (best netto + birdie)
+    // Plus: theoretical carry on one of remaining par-3s, if any
+    let maxGain = remainingHoleIdxs.length * 2;
+    if (remainingPar3s.length > 0) {
+      // Assume the player could win ONE par-3 uschi — the remaining carries would accumulate
+      // Conservative: at least the current carry could be won on any remaining par-3
+      maxGain += currentCarry;
+      // Plus any future carry increases (if no-green on each remaining par-3)
+      maxGain += remainingPar3s.length - 1; // each missed adds 1 carry, so last player gets extra
+    }
+
+    // Min: -1 per remaining hole (worst netto, assumed always)
+    const minGain = -remainingHoleIdxs.length;
+
+    return {
+      id: p.id,
+      name: p.name,
+      current,
+      max: current + maxGain,
+      min: current + minGain,
+    };
+  });
+
+  // Check if rank is secured: for each pair, player A is ahead if A.min >= B.max
+  // A player is "secured rank 1" if their min >= every other player's max
+  const sortedByCurrent = [...playerStandings].sort((a, b) => b.current - a.current);
+  const leader = sortedByCurrent[0] || null;
+
+  // Determine if the overall leader is mathematically secure
+  let decided = false;
+  if (leader && sortedByCurrent.length >= 2) {
+    const othersMaxes = sortedByCurrent.slice(1).map(p => p.max);
+    const maxOfOthers = Math.max(...othersMaxes);
+    if (leader.min > maxOfOthers) decided = true;
+  }
+
+  return {
+    players: sortedByCurrent,
+    remaining: {
+      holes: remainingHoleIdxs.length,
+      par3Count: remainingPar3s.length,
+      currentCarry,
+    },
+    decided,
+    leader: leader ? { name: leader.name, current: leader.current } : null,
+  };
+}
+
 // Resolve a player's tee data (supports old format with cfg.cr/cfg.slope fallback).
 // If the club has a `conversionTables` block for the tee, it is attached.
 function playerTee(player, cfg, club) {
@@ -1366,6 +1762,8 @@ export default function GolfApp() {
   const [showStatsImport, setShowStatsImport] = useState(false);
   const [statsImportInput, setStatsImportInput] = useState("");
   const [statsImportLoading, setStatsImportLoading] = useState(false);
+  // Round analysis modal — holds the round ID being analyzed (null = closed)
+  const [roundAnalysisId, setRoundAnalysisId] = useState(null);
   // Round config
   const [cfg, setCfg] = useState({ name: "", date: toDay(), numHoles: 18, clubName: "", defaultTeeName: "" });
   const [holes, setHoles] = useState(makeHoles(72, 18));
@@ -2895,6 +3293,22 @@ export default function GolfApp() {
             ))}
           </div>
         )}
+        <button
+          onClick={e => { e.stopPropagation(); setRoundAnalysisId(r.id); }}
+          aria-label="Runden-Analyse"
+          title="Runden-Analyse öffnen"
+          style={{
+            position: "absolute", top: "8px", right: "48px",
+            width: "32px", height: "32px",
+            background: T.surface2,
+            border: `1px solid ${T.line}`,
+            borderRadius: "8px",
+            color: T.gold,
+            fontSize: "14px",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            lineHeight: 1,
+            padding: 0,
+          }}>📖</button>
         <button
           onClick={e => { e.stopPropagation(); if (confirm("Runde löschen?")) deleteRound(r.id); }}
           aria-label="Runde löschen"
@@ -4532,6 +4946,28 @@ export default function GolfApp() {
               🗑 Diese Runde löschen
             </button>
           )}
+
+          {/* Runden-Analyse Button — only show if round has data */}
+          {loadedRoundId && (
+            <button
+              onClick={() => setRoundAnalysisId(loadedRoundId)}
+              className="gold-hover"
+              style={{
+                width: "100%", marginTop: "10px",
+                background: `${T.gold}10`,
+                color: T.gold,
+                border: `1px solid ${T.gold}40`,
+                borderRadius: "12px",
+                padding: "14px",
+                fontSize: "13px",
+                fontWeight: 600,
+                fontFamily: "Inter, sans-serif",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+              }}>
+              <span>📖</span>
+              <span>Runden-Analyse anzeigen</span>
+            </button>
+          )}
         </div>
       </div>
     );
@@ -4693,6 +5129,14 @@ export default function GolfApp() {
     if (!showUschiReview) return null;
     const par3Indices = holes.map((h, i) => ({ h, i })).filter(x => x.h.par === 3);
 
+    // Build a live-round object to feed to computeUschiLiveStanding
+    const liveRound = {
+      players, holes, scores, par3Data,
+      gameMode,
+      uschiResult: uschiResult || null,
+    };
+    const liveStanding = computeUschiLiveStanding(liveRound);
+
     return (
       <div onClick={() => setShowUschiReview(false)}
         style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1050, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
@@ -4706,6 +5150,79 @@ export default function GolfApp() {
           <p style={{ fontSize: "12px", color: T.textSoft, marginBottom: "14px" }}>
             Alle Löcher und wer welche Punkte gemacht hat.
           </p>
+
+          {/* Live Standing block */}
+          {liveStanding && liveStanding.players.length > 0 && (
+            <div style={{ ...S.card, padding: "12px 14px", marginBottom: "14px", border: `1px solid ${liveStanding.decided ? T.gold + "80" : T.line}` }}>
+              <div style={{ ...S.eyebrow, marginBottom: "10px", color: T.gold, display: "flex", alignItems: "center", gap: "6px" }}>
+                <span>📊 Live-Stand</span>
+                {liveStanding.remaining.holes > 0 && (
+                  <span style={{ fontSize: "10px", color: T.textDim, textTransform: "none", letterSpacing: 0, fontWeight: 400, marginLeft: "auto" }}>
+                    Noch {liveStanding.remaining.holes} Loch{liveStanding.remaining.holes === 1 ? "" : "er"}
+                    {liveStanding.remaining.par3Count > 0 && ` · ${liveStanding.remaining.par3Count}× Par-3`}
+                  </span>
+                )}
+              </div>
+
+              {liveStanding.players.map((p, i) => {
+                const isLeader = i === 0;
+                const pointsColor = p.current > 0 ? T.gold : p.current < 0 ? T.double : T.textSoft;
+                // How much can they still gain/lose?
+                const gainRange = p.max - p.current;
+                const lossRange = p.current - p.min;
+                // Is this player's rank fully secured vs next player?
+                const isFullySecured = liveStanding.decided && isLeader;
+                return (
+                  <div key={p.id} style={{
+                    padding: "10px 12px", marginBottom: "6px",
+                    background: isFullySecured ? `${T.gold}15` : T.surface2,
+                    border: `1px solid ${isFullySecured ? T.gold + "60" : T.line}`,
+                    borderRadius: "8px",
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "4px" }}>
+                      <span style={{ fontSize: "16px", width: "20px" }}>{isLeader ? "🏆" : `${i + 1}.`}</span>
+                      <span style={{ color: T.text, fontSize: "13px", fontWeight: 600, flex: 1 }}>{p.name}</span>
+                      <span className="mono" style={{ color: pointsColor, fontSize: "16px", fontWeight: 700 }}>
+                        {p.current > 0 ? "+" : ""}{p.current}
+                      </span>
+                    </div>
+                    {liveStanding.remaining.holes > 0 && (
+                      <div style={{ fontSize: "10px", color: T.textDim, display: "flex", gap: "12px", marginLeft: "30px" }}>
+                        <span>📈 max möglich: <span style={{ color: T.text, fontWeight: 600 }}>{p.max > 0 ? "+" : ""}{p.max}</span></span>
+                        <span>📉 min möglich: <span style={{ color: T.text, fontWeight: 600 }}>{p.min > 0 ? "+" : ""}{p.min}</span></span>
+                      </div>
+                    )}
+                    {isFullySecured && (
+                      <div style={{ fontSize: "11px", color: T.gold, marginLeft: "30px", marginTop: "4px", fontWeight: 600 }}>
+                        ✓ Sieg mathematisch sicher
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {/* Overall status */}
+              {liveStanding.remaining.holes === 0 ? (
+                <div style={{ fontSize: "11px", color: T.gold, textAlign: "center", marginTop: "4px", padding: "6px", background: `${T.gold}10`, borderRadius: "6px", fontWeight: 600 }}>
+                  🏁 Runde abgeschlossen!
+                </div>
+              ) : liveStanding.decided ? (
+                <div style={{ fontSize: "11px", color: T.gold, textAlign: "center", marginTop: "4px", fontStyle: "italic" }}>
+                  Sieg für {liveStanding.leader.name} steht bereits fest.
+                </div>
+              ) : (
+                <div style={{ fontSize: "11px", color: T.textSoft, textAlign: "center", marginTop: "4px", fontStyle: "italic" }}>
+                  ⚠️ Noch offen — Platzierungen können sich ändern.
+                </div>
+              )}
+
+              {liveStanding.remaining.currentCarry > 1 && liveStanding.remaining.par3Count > 0 && (
+                <div style={{ fontSize: "11px", color: T.sage, textAlign: "center", marginTop: "6px", padding: "4px 8px", background: `${T.sage}10`, borderRadius: "6px" }}>
+                  💧 Aktueller Carry: <b>{liveStanding.remaining.currentCarry}×</b>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Par-3 quick access (tap to edit Uschi data) */}
           {par3Indices.length > 0 && (
@@ -5461,6 +5978,261 @@ WICHTIG:
     );
   };
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ROUND ANALYSIS MODAL — post-round deep-dive into a single round
+  // ═══════════════════════════════════════════════════════════════════════════
+  const renderRoundAnalysis = () => {
+    if (!roundAnalysisId) return null;
+    const round = rounds.find(r => r.id === roundAnalysisId) || statsImportedRounds.find(r => r.id === roundAnalysisId);
+    if (!round) return null;
+
+    const analysis = analyzeRound(round);
+    if (!analysis) {
+      return (
+        <div onClick={() => setRoundAnalysisId(null)}
+          style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+          <div onClick={e => e.stopPropagation()} className="slide-up"
+            style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px" }}>
+            <EmptyState icon="📖" title="Noch keine Daten" sub="Spiele ein paar Löcher, dann erscheint hier die Runden-Analyse." />
+            <button onClick={() => setRoundAnalysisId(null)} style={{ ...S.btnSecondary, width: "100%", marginTop: "14px" }}>Schließen</button>
+          </div>
+        </div>
+      );
+    }
+
+    const hof = analysis.hallOfFame;
+
+    return (
+      <div onClick={() => setRoundAnalysisId(null)}
+        style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+        <div onClick={e => e.stopPropagation()} className="slide-up"
+          style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
+          <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 18px" }}/>
+
+          <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>
+            📖 Runden-Analyse
+          </h3>
+          <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "16px" }}>
+            {round.cfg?.clubName || "Runde"} · {fmtDate(round.cfg?.date)}
+            {analysis.completeness.percent < 100 && (
+              <span style={{ color: T.gold, marginLeft: "8px" }}>
+                · ⏳ {analysis.completeness.percent}% gespielt
+              </span>
+            )}
+          </p>
+
+          {/* 🏆 Hall of Fame */}
+          <div style={{ ...S.card, padding: "12px 14px", marginBottom: "14px" }}>
+            <div style={{ ...S.eyebrow, marginBottom: "10px", color: T.gold }}>🏆 Tages-Hall-of-Fame</div>
+
+            {hof.bestSFRound && (
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "12px", marginBottom: "8px" }}>
+                <span style={{ fontSize: "16px" }}>🏆</span>
+                <span style={{ color: T.textSoft }}>Bester SF-Score:</span>
+                <span style={{ color: T.text, fontWeight: 600 }}>{hof.bestSFRound.playerName}</span>
+                <span className="mono" style={{ color: T.gold, fontSize: "12px", marginLeft: "auto" }}>{hof.bestSFRound.sf} Pkt</span>
+              </div>
+            )}
+
+            {hof.bestNettoScore && (
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "12px", marginBottom: "8px" }}>
+                <span style={{ fontSize: "16px" }}>🎯</span>
+                <span style={{ color: T.textSoft }}>Bestes Einzelloch:</span>
+                <span style={{ color: T.text, fontWeight: 600 }}>{hof.bestNettoScore.playerName}</span>
+                <span className="mono" style={{ color: T.gold, fontSize: "11px", marginLeft: "auto" }}>
+                  Loch {hof.bestNettoScore.holeIdx + 1} · {hof.bestNettoScore.diffVsPar <= -2 ? "Eagle" : hof.bestNettoScore.diffVsPar === -1 ? "Birdie" : "Par"}
+                </span>
+              </div>
+            )}
+
+            {hof.birdieStreak && (
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "12px", marginBottom: "8px" }}>
+                <span style={{ fontSize: "16px" }}>🔥</span>
+                <span style={{ color: T.textSoft }}>Längster Netto-Par-Streak:</span>
+                <span style={{ color: T.text, fontWeight: 600 }}>{hof.birdieStreak.playerName}</span>
+                <span className="mono" style={{ color: T.gold, fontSize: "11px", marginLeft: "auto" }}>
+                  {hof.birdieStreak.length}× (L{hof.birdieStreak.startHole + 1}–{hof.birdieStreak.endHole + 1})
+                </span>
+              </div>
+            )}
+
+            {hof.biggestUschi && (
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "12px", marginBottom: "8px" }}>
+                <span style={{ fontSize: "16px" }}>💧</span>
+                <span style={{ color: T.textSoft }}>Größter Uschi:</span>
+                <span style={{ color: T.text, fontWeight: 600 }}>{hof.biggestUschi.playerName}</span>
+                <span className="mono" style={{ color: T.gold, fontSize: "11px", marginLeft: "auto" }}>
+                  Loch {hof.biggestUschi.holeIdx + 1} · {hof.biggestUschi.carry}× Carry
+                </span>
+              </div>
+            )}
+
+            {hof.comebackKing && (
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "12px", marginBottom: "8px" }}>
+                <span style={{ fontSize: "16px" }}>📈</span>
+                <span style={{ color: T.textSoft }}>Comeback-König:</span>
+                <span style={{ color: T.text, fontWeight: 600 }}>{hof.comebackKing.playerName}</span>
+                <span className="mono" style={{ color: T.gold, fontSize: "11px", marginLeft: "auto" }}>
+                  F9 {hof.comebackKing.f9} → B9 {hof.comebackKing.b9} (+{hof.comebackKing.delta})
+                </span>
+              </div>
+            )}
+
+            {hof.worstGroupHole && (
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "12px" }}>
+                <span style={{ fontSize: "16px" }}>💀</span>
+                <span style={{ color: T.textSoft }}>Schlimmstes Gruppen-Loch:</span>
+                <span style={{ color: T.text, fontWeight: 600 }}>Loch {hof.worstGroupHole.idx + 1}</span>
+                <span className="mono" style={{ color: T.double, fontSize: "11px", marginLeft: "auto" }}>
+                  {hof.worstGroupHole.avgVsPar > 0 ? "+" : ""}{hof.worstGroupHole.avgVsPar.toFixed(1)}
+                  {hof.worstGroupHole.strichCount > 0 && ` · ${hof.worstGroupHole.strichCount}✗`}
+                </span>
+              </div>
+            )}
+          </div>
+
+          {/* 📊 F9/B9 */}
+          {analysis.f9b9 && (
+            <div style={{ ...S.card, padding: "12px 14px", marginBottom: "14px" }}>
+              <div style={{ ...S.eyebrow, marginBottom: "10px" }}>📊 Front 9 vs Back 9</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 40px 40px 60px", gap: "6px", padding: "4px 8px", fontSize: "9px", color: T.textDim, fontWeight: 600, letterSpacing: "0.04em" }}>
+                <div>SPIELER</div>
+                <div style={{ textAlign: "center" }}>F9</div>
+                <div style={{ textAlign: "center" }}>B9</div>
+                <div style={{ textAlign: "right" }}>Δ</div>
+              </div>
+              {analysis.f9b9.map(x => {
+                const trendIcon = x.delta > 2 ? "📈" : x.delta < -2 ? "📉" : "≈";
+                const color = x.delta > 2 ? T.gold : x.delta < -2 ? T.double : T.textSoft;
+                return (
+                  <div key={x.playerName} style={{ display: "grid", gridTemplateColumns: "1fr 40px 40px 60px", gap: "6px", padding: "6px 8px", alignItems: "center", borderTop: `1px solid ${T.line}` }}>
+                    <div style={{ fontSize: "12px", color: T.text, fontWeight: 600 }}>{x.playerName}</div>
+                    <div className="mono" style={{ fontSize: "12px", textAlign: "center", color: T.text }}>{x.f9}</div>
+                    <div className="mono" style={{ fontSize: "12px", textAlign: "center", color: T.text }}>{x.b9}</div>
+                    <div style={{ fontSize: "11px", textAlign: "right", color }}>
+                      {trendIcon} {x.delta > 0 ? "+" : ""}{x.delta}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* 🗺️ Hole difficulty */}
+          {analysis.hardestHoles.length > 0 && (
+            <div style={{ ...S.card, padding: "12px 14px", marginBottom: "14px" }}>
+              <div style={{ ...S.eyebrow, marginBottom: "10px" }}>🗺️ Loch-Ranking des Tages</div>
+
+              <div style={{ fontSize: "10px", color: T.textDim, marginBottom: "6px", letterSpacing: "0.04em", fontWeight: 600 }}>🔴 SCHWERSTE 3</div>
+              {analysis.hardestHoles.map(h => (
+                <div key={h.idx} style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "12px", padding: "4px 0" }}>
+                  <span className="mono" style={{ fontSize: "13px", color: T.gold, fontWeight: 700, minWidth: "22px" }}>{h.idx + 1}</span>
+                  <span style={{ color: T.textSoft, fontSize: "10px" }}>Par {h.par}</span>
+                  <span style={{ color: T.textDim, fontSize: "10px", marginLeft: "auto" }}>
+                    {h.strichCount > 0 && <span style={{ color: T.double, marginRight: "6px" }}>{h.strichCount}×✗</span>}
+                  </span>
+                  <span className="mono" style={{ fontSize: "12px", color: T.double, fontWeight: 600, minWidth: "40px", textAlign: "right" }}>
+                    {h.avgVsPar > 0 ? "+" : ""}{h.avgVsPar.toFixed(1)}
+                  </span>
+                </div>
+              ))}
+
+              <div style={{ fontSize: "10px", color: T.textDim, marginTop: "10px", marginBottom: "6px", letterSpacing: "0.04em", fontWeight: 600 }}>🟢 LEICHTESTE 3</div>
+              {analysis.easiestHoles.map(h => (
+                <div key={h.idx} style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "12px", padding: "4px 0" }}>
+                  <span className="mono" style={{ fontSize: "13px", color: T.gold, fontWeight: 700, minWidth: "22px" }}>{h.idx + 1}</span>
+                  <span style={{ color: T.textSoft, fontSize: "10px" }}>Par {h.par}</span>
+                  <span className="mono" style={{ fontSize: "12px", color: T.gold, fontWeight: 600, minWidth: "40px", textAlign: "right", marginLeft: "auto" }}>
+                    {h.avgVsPar > 0 ? "+" : ""}{h.avgVsPar.toFixed(1)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 📖 Player highlights */}
+          {analysis.playerHighlights.length > 0 && (
+            <div style={{ ...S.card, padding: "12px 14px", marginBottom: "14px" }}>
+              <div style={{ ...S.eyebrow, marginBottom: "10px" }}>📖 Spieler-Highlights</div>
+              {analysis.playerHighlights.map((ph, i) => (
+                <div key={ph.playerName} style={{ paddingTop: i > 0 ? "8px" : 0, borderTop: i > 0 ? `1px solid ${T.line}` : "none" }}>
+                  <div style={{ fontSize: "13px", color: T.text, fontWeight: 600, marginBottom: "4px" }}>{ph.playerName}</div>
+                  {ph.lines.length === 0 ? (
+                    <div style={{ fontSize: "11px", color: T.textDim, fontStyle: "italic", paddingBottom: "6px" }}>Solide Runde, keine Auffälligkeiten.</div>
+                  ) : (
+                    ph.lines.map((line, j) => (
+                      <div key={j} style={{ fontSize: "11px", color: T.textSoft, lineHeight: 1.5, paddingBottom: j === ph.lines.length - 1 ? "6px" : 0 }}>{line}</div>
+                    ))
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 📈 Uschi trend */}
+          {analysis.uschiTrend && (
+            <div style={{ ...S.card, padding: "12px 14px", marginBottom: "14px" }}>
+              <div style={{ ...S.eyebrow, marginBottom: "10px", color: T.gold }}>📈 Uschi-Verlauf</div>
+              {(() => {
+                const { labels, series } = analysis.uschiTrend;
+                const allValues = series.flatMap(s => s.points);
+                const minY = Math.min(0, ...allValues);
+                const maxY = Math.max(0, ...allValues);
+                const range = maxY - minY || 1;
+                const W = 300, H = 120;
+                const paddingX = 8, paddingY = 14;
+                const chartW = W - paddingX * 2;
+                const chartH = H - paddingY * 2;
+                const step = chartW / Math.max(1, labels.length - 1);
+                const yOf = v => paddingY + chartH - ((v - minY) / range) * chartH;
+                const colors = [T.gold, T.sage, "#c97a5c", "#8ba8c9"]; // up to 4 players
+                return (
+                  <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ overflow: "visible" }}>
+                    {/* Zero line */}
+                    {minY <= 0 && maxY >= 0 && (
+                      <line x1={paddingX} y1={yOf(0)} x2={W - paddingX} y2={yOf(0)} stroke={T.line} strokeDasharray="2,2" strokeWidth="1" />
+                    )}
+                    {/* Player lines */}
+                    {series.map((s, i) => {
+                      const color = colors[i % colors.length];
+                      const path = s.points.map((v, idx) => `${idx === 0 ? "M" : "L"}${(paddingX + idx * step).toFixed(1)},${yOf(v).toFixed(1)}`).join(" ");
+                      const last = s.points[s.points.length - 1];
+                      return (
+                        <g key={s.name}>
+                          <path d={path} stroke={color} strokeWidth="2" fill="none" strokeLinejoin="round" strokeLinecap="round" />
+                          <circle cx={paddingX + (s.points.length - 1) * step} cy={yOf(last)} r="3" fill={color} />
+                        </g>
+                      );
+                    })}
+                  </svg>
+                );
+              })()}
+              {/* Legend */}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "10px", marginTop: "8px", fontSize: "11px" }}>
+                {analysis.uschiTrend.series.map((s, i) => {
+                  const colors = [T.gold, T.sage, "#c97a5c", "#8ba8c9"];
+                  const last = s.points[s.points.length - 1];
+                  return (
+                    <div key={s.name} style={{ display: "flex", alignItems: "center", gap: "5px" }}>
+                      <span style={{ width: "10px", height: "3px", background: colors[i % colors.length], borderRadius: "2px" }} />
+                      <span style={{ color: T.textSoft }}>{s.name}</span>
+                      <span className="mono" style={{ color: T.textDim, fontSize: "10px" }}>({last > 0 ? "+" : ""}{last})</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <button onClick={() => setRoundAnalysisId(null)}
+            style={{ ...S.btnSecondary, width: "100%", marginTop: "8px" }}>
+            Schließen
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   const renderUndoToast = () => {
     if (!undoAction) return null;
     return (
@@ -6188,6 +6960,7 @@ WICHTIG:
       {renderStatsPlayerDetail()}
       {renderStatsHoleDetail()}
       {renderStatsImportModal()}
+      {renderRoundAnalysis()}
       {renderUndoToast()}
     </div>
   );
