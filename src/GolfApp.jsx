@@ -59,8 +59,22 @@ const SYNC_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const genSyncCode = () => Array.from({ length: 8 }, () =>
   SYNC_CHARS[Math.floor(Math.random() * SYNC_CHARS.length)]
 ).join("");
-const formatSync = c => c ? `${c.slice(0,4)}-${c.slice(4)}` : "";
-const cleanSync  = c => (c || "").replace(/[^A-Z0-9]/gi, "").toUpperCase().slice(0, 8);
+// Format: insert a dash after the 4th char if input has exactly 8 chars, else leave as-is
+const formatSync = c => {
+  if (!c) return "";
+  // If user entered a custom code with a dash, keep it
+  if (c.includes("-")) return c;
+  // Classic 8-char: insert dash in middle for readability
+  if (c.length === 8) return `${c.slice(0,4)}-${c.slice(4)}`;
+  return c;
+};
+// cleanSync: allow A-Z, 0-9, and dash. Uppercase. Up to 20 chars for custom codes.
+const cleanSync  = c => (c || "").replace(/[^A-Z0-9-]/gi, "").toUpperCase().slice(0, 20);
+// Validation: at least 4 chars of actual content (excluding dashes)
+const isValidSyncCode = c => {
+  const cleaned = (c || "").replace(/-/g, "");
+  return cleaned.length >= 4 && cleaned.length <= 20;
+};
 
 async function cloudPush(syncCode, data) {
   if (!SYNC_ENABLED || !syncCode) return null;
@@ -194,6 +208,68 @@ const simple = (name, region, cr, slope, par, numHoles = 18) => ({
   name, region, numHoles,
   tees: { "Standard": { cr, slope, par } },
 });
+
+// ─── Club GPS-Koordinaten für Sortierung nach Distanz zu Wien ────────────────
+// Wien Zentrum: 48.2082, 16.3738
+// Key = genauer Club-Name (wie im BUILT_IN_CLUBS Array)
+const VIENNA_LAT = 48.2082;
+const VIENNA_LNG = 16.3738;
+const CLUB_COORDS = {
+  // Wien & Niederösterreich — Stammregion
+  "GC GolfRange Bockfließ":             [48.3683, 16.6583],
+  "GC Adamstal Championship":           [47.8583, 15.6717],
+  "GCC Brunn":                          [48.1050, 16.2783],
+  "GC Frühling Götzendorf (DayCourse)": [48.0033, 16.7283],
+  "GC Fontana":                         [48.0267, 16.2950],
+  "GC Schloss Schönborn":               [48.4833, 16.0500],
+  "GC Wien-Süßenbrunn":                 [48.3167, 16.4683],
+  "C&C Wienerberg":                     [48.1550, 16.3700],
+  "GC Lengenfeld-Kamptal":              [48.5300, 15.7667],
+  "GC Lengenfeld-Donauland":            [48.5350, 15.7700],
+  "GC Himberg":                         [48.0850, 16.4383],
+  "GC Spillern":                        [48.3883, 16.2733],
+  "GC St. Pölten":                      [48.2050, 15.6167],
+  "GC Enzesfeld":                       [47.9233, 16.2083],
+  "GC Atzenbrugg":                      [48.3000, 15.9333],
+  "GC Maria Taferl":                    [48.2217, 15.1717],
+  "GC Semmering":                       [47.6417, 15.8283],
+  "GC Schloss Hainfeld":                [48.0383, 15.7783],
+  "GC Wiener Neustadt":                 [47.8150, 16.2433],
+  "GC Gut Altentann":                   [47.8833, 13.1667],
+  "GC Gösting":                         [47.0833, 15.4167],
+  "GC Murhof":                          [47.2583, 15.0333],
+  "GC Murstätten":                      [46.9683, 15.5350],
+  "GC Kitzbühel Schwarzsee-Reith":      [47.4500, 12.3667],
+  // Burgenland / Süd
+  "GC Neusiedlersee-Donnerskirchen":    [47.8967, 16.6500],
+  "GC Bad Waltersdorf":                 [47.1767, 15.9533],
+  // Westösterreich
+  "GC Bregenzerwald":                   [47.4750, 9.8817],
+  "GC Montfort Rankweil":               [47.2717, 9.6533],
+  // International
+  "Penati Golf Resort (Heritage)":      [48.6917, 17.2400],
+  "Penati Golf Resort (Legend)":        [48.6917, 17.2400],
+  "Aphrodite Hills Golf Club (Cyprus)": [34.7167, 32.5667],
+  "Secret Valley Golf Resort (Cyprus)": [34.7300, 32.5833],
+  "Minthis Golf Club (Cyprus)":         [34.8333, 32.5000],
+  "Eléa Golf Club (Cyprus)":            [34.7833, 32.4833],
+};
+
+// Haversine-Formel: Distanz zwischen zwei GPS-Punkten in km
+function geoDistance(lat1, lng1, lat2, lng2) {
+  const R = 6371; // Erdradius km
+  const toRad = (deg) => deg * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function clubDistanceFromVienna(clubName) {
+  const coords = CLUB_COORDS[clubName];
+  if (!coords) return null; // unknown → will sort last
+  return geoDistance(VIENNA_LAT, VIENNA_LNG, coords[0], coords[1]);
+}
 
 const BUILT_IN_CLUBS = [
   {
@@ -1037,9 +1113,15 @@ export default function GolfApp() {
   const [customClubs, setCustomClubs] = useState([]);
   // Loaded flag - prevents sync-loop on initial data load
   const [loaded, setLoaded] = useState(false);
+  const [showWelcome, setShowWelcome] = useState(false);
+  const [welcomeSlide, setWelcomeSlide] = useState(0);
+  // Undo toast for destructive actions
+  const [undoAction, setUndoAction] = useState(null); // { message, undo: () => void }
+  const undoTimerRef = useRef(null);
   // Sync
   const [syncCode, setSyncCode] = useState(null);
   const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | error
+  const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
   const [showSyncModal, setShowSyncModal] = useState(false);
   // UI state
   const [clubQ, setClubQ] = useState("");
@@ -1078,6 +1160,18 @@ export default function GolfApp() {
   const allClubs = useMemo(() => [...customClubs, ...BUILT_IN_CLUBS], [customClubs]);
   const selectedClub = useMemo(() => allClubs.find(c => c.name === cfg.clubName), [allClubs, cfg.clubName]);
 
+  // ── Online / offline detection ────────────────────────────────────────────
+  useEffect(() => {
+    const onOnline = () => setIsOnline(true);
+    const onOffline = () => setIsOnline(false);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, []);
+
   // ── Initial load ──────────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
@@ -1105,6 +1199,11 @@ export default function GolfApp() {
           }
         }
       } catch (e) { console.warn("Initial pull failed", e); }
+      // Check if welcome has been seen before
+      try {
+        const seenWelcome = await window.storage.get("golf-welcome-seen");
+        if (!seenWelcome?.value) setShowWelcome(true);
+      } catch {}
       setLoaded(true);
     })();
   }, []);
@@ -1159,9 +1258,33 @@ export default function GolfApp() {
   const onNewName = useCallback(e => setNewP(p => ({ ...p, name: e.target.value })), []);
   const onNewHcp  = useCallback(e => setNewP(p => ({ ...p, hcp: e.target.value })), []);
 
+  // Sort clubs: (1) custom clubs first, (2) verified with holes-data next, (3) others last
+  // Within each tier, sort by distance from Vienna (closest first).
+  const sortedClubs = useMemo(() => {
+    const withMeta = allClubs.map(c => ({
+      club: c,
+      isCustom: customClubs.includes(c),
+      isVerified: !!c.holes,
+      distance: clubDistanceFromVienna(c.name),
+    }));
+    withMeta.sort((a, b) => {
+      // Tier 1: custom clubs first
+      if (a.isCustom !== b.isCustom) return a.isCustom ? -1 : 1;
+      // Tier 2: verified before non-verified
+      if (a.isVerified !== b.isVerified) return a.isVerified ? -1 : 1;
+      // Tier 3: by distance — clubs with known distance before unknowns
+      if (a.distance === null && b.distance !== null) return 1;
+      if (a.distance !== null && b.distance === null) return -1;
+      if (a.distance !== null && b.distance !== null) return a.distance - b.distance;
+      // Fallback: alphabetical
+      return a.club.name.localeCompare(b.club.name);
+    });
+    return withMeta.map(x => x.club);
+  }, [allClubs, customClubs]);
+
   const filteredClubs = clubQ.length > 0
-    ? allClubs.filter(c => c.name.toLowerCase().includes(clubQ.toLowerCase()) || c.region.toLowerCase().includes(clubQ.toLowerCase()))
-    : allClubs.slice(0, 8);
+    ? sortedClubs.filter(c => c.name.toLowerCase().includes(clubQ.toLowerCase()) || c.region.toLowerCase().includes(clubQ.toLowerCase()))
+    : sortedClubs.slice(0, 8);
 
   // ── Club + tee selection ──────────────────────────────────────────────────
   const pickClub = useCallback(club => {
@@ -1231,9 +1354,18 @@ export default function GolfApp() {
     try { await window.storage.set("golf-friends", JSON.stringify(updated)); } catch {}
   };
   const deleteFriend = async (name) => {
+    const deletedFriend = friends.find(f => f.name === name);
     const updated = friends.filter(f => f.name !== name);
     setFriends(updated);
     try { await window.storage.set("golf-friends", JSON.stringify(updated)); } catch {}
+    if (deletedFriend) {
+      showUndoToast(`${name} entfernt`, async () => {
+        const restored = [...updated, deletedFriend];
+        setFriends(restored);
+        try { await window.storage.set("golf-friends", JSON.stringify(restored)); } catch {}
+        setUndoAction(null);
+      });
+    }
   };
   const updateFriendHcp = async (name, hcp) => {
     const updated = friends.map(f => f.name === name ? { ...f, hcp: parseFloat(hcp) || 0 } : f);
@@ -1364,7 +1496,7 @@ export default function GolfApp() {
   };
 
   // ── Stats (uses per-player tee data + any manual PH override)
-  const getStats = (player) => {
+  const computeStats = (player) => {
     const tee = playerTee(player, cfg, selectedClub);
     if (!tee) return { ph: 0, hr: [], bT: 0, nT: 0, sfNT: 0, sfBT: 0, phSource: "formula", strichCount: 0 };
     const { ph, source: phSource } = resolvePlayerPH(player, cfg, selectedClub, par);
@@ -1383,6 +1515,17 @@ export default function GolfApp() {
       sfBT: hr.reduce((s, h) => s + (h.sfB || 0), 0),
     };
   };
+
+  // Memoize all player stats — single computation per render cycle, cached by dependencies.
+  // This avoids redundant recomputation when the same stats are read from multiple places
+  // (scoring screen, results, share image, uschi review). Major perf win on mobile Safari.
+  const allStats = useMemo(() => {
+    const map = {};
+    players.forEach(p => { map[p.id] = computeStats(p); });
+    return map;
+  }, [players, cfg, selectedClub, holes, scores, par]);
+
+  const getStats = (player) => allStats[player.id] || computeStats(player);
 
   // ── Uschi mode: adjusted strokes + point calculation (memoized)
   const uschiStrokes = useMemo(() => {
@@ -1425,11 +1568,29 @@ export default function GolfApp() {
     setCurrentHole(0); setScoringMode("batch");
     setView("results");
   };
+  // Show undo toast — fires an action that can be reverted within N seconds.
+  const showUndoToast = (message, undoFn) => {
+    clearTimeout(undoTimerRef.current);
+    setUndoAction({ message, undo: undoFn });
+    undoTimerRef.current = setTimeout(() => setUndoAction(null), 6000);
+  };
+
   const deleteRound = async (id) => {
+    const deletedRound = rounds.find(r => r.id === id);
     const updated = rounds.filter(r => r.id !== id);
     setRounds(updated);
     if (id === loadedRoundId) setLoadedRoundId(null);
     try { await window.storage.set("golf-rounds", JSON.stringify(updated)); } catch {}
+
+    // Show undo toast
+    if (deletedRound) {
+      showUndoToast(`Runde "${deletedRound.cfg?.clubName || "Runde"}" gelöscht`, async () => {
+        const restored = [deletedRound, ...updated].slice(0, 50);
+        setRounds(restored);
+        try { await window.storage.set("golf-rounds", JSON.stringify(restored)); } catch {}
+        setUndoAction(null);
+      });
+    }
   };
 
   const newRound = () => {
@@ -4027,6 +4188,204 @@ WICHTIG:
     }
   };
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // WELCOME MODAL — shown once on first launch, explains Uschi rules + features
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════════════
+  // UNDO TOAST — bottom banner shown for ~6 seconds after destructive action
+  // ═══════════════════════════════════════════════════════════════════════════
+  const renderUndoToast = () => {
+    if (!undoAction) return null;
+    return (
+      <div
+        style={{
+          position: "fixed",
+          bottom: "16px",
+          left: "50%",
+          transform: "translateX(-50%)",
+          zIndex: 1400,
+          background: T.surface1,
+          border: `1px solid ${T.gold}60`,
+          borderRadius: "10px",
+          padding: "10px 14px",
+          boxShadow: "0 10px 30px #000000aa",
+          display: "flex",
+          alignItems: "center",
+          gap: "14px",
+          minWidth: "240px",
+          maxWidth: "92vw",
+        }}
+        className="fade-in"
+      >
+        <span style={{ fontSize: "16px" }}>✓</span>
+        <span style={{ flex: 1, fontSize: "13px", color: T.text }}>{undoAction.message}</span>
+        <button
+          onClick={() => {
+            clearTimeout(undoTimerRef.current);
+            undoAction.undo();
+          }}
+          style={{
+            background: "transparent",
+            border: "none",
+            color: T.gold,
+            fontSize: "13px",
+            fontWeight: 700,
+            padding: "4px 10px",
+            cursor: "pointer",
+            textTransform: "uppercase",
+            letterSpacing: "0.05em",
+          }}
+        >
+          Rückgängig
+        </button>
+      </div>
+    );
+  };
+
+  const renderWelcome = () => {
+    if (!showWelcome) return null;
+
+    const dismissWelcome = async () => {
+      try { await window.storage.set("golf-welcome-seen", "1"); } catch {}
+      setShowWelcome(false);
+      setWelcomeSlide(0);
+    };
+
+    const slides = [
+      {
+        icon: "⛳",
+        title: "Willkommen bei Fairway",
+        body: (
+          <>
+            <p style={{ fontSize: "14px", color: T.textSoft, lineHeight: 1.6, margin: "0 0 12px" }}>
+              Fairway ist ein digitaler Scorecard für deine Golfrunden. Mit drei Besonderheiten:
+            </p>
+            <ul style={{ fontSize: "13px", color: T.text, lineHeight: 1.8, paddingLeft: "20px", margin: 0 }}>
+              <li><b>WHS-Handicap</b> — automatische Kurs-HCP-Berechnung für jeden Platz und Tee</li>
+              <li><b>Stableford</b> — klassische Punktewertung Netto und Brutto</li>
+              <li><b>Uschi-Modus</b> — unser einzigartiges Spiel unter Freunden (nächste Slide)</li>
+            </ul>
+          </>
+        ),
+      },
+      {
+        icon: "🎯",
+        title: "So funktioniert Uschi",
+        body: (
+          <>
+            <p style={{ fontSize: "13px", color: T.textSoft, lineHeight: 1.6, margin: "0 0 10px" }}>
+              Pro Loch gibt's Punkte nach fairem Kurs-HCP-Ausgleich:
+            </p>
+            <div style={{ fontSize: "13px", color: T.text, lineHeight: 1.8, marginBottom: "12px" }}>
+              <div>🏆 <b>+1</b> bester Netto-Score</div>
+              <div>🔻 <b>−1</b> schlechtester Netto-Score</div>
+              <div>🎯 <b>+1</b> pro Birdie (oder besser)</div>
+              <div>💧 <b>+Carry</b> bei Par-3 Uschi-Dialog</div>
+            </div>
+            <p style={{ fontSize: "12px", color: T.textSoft, lineHeight: 1.5, margin: "0 0 6px" }}>
+              <b>Par-3 Uschi</b>: Wer auf Par-3 mit Closest-to-Pin das Grün trifft und Par macht, holt den Carry.
+              Trifft niemand das Grün, wandert der Carry zum nächsten Par-3 (1× → 2× → 3× …).
+            </p>
+            <p style={{ fontSize: "12px", color: T.textDim, lineHeight: 1.5, margin: 0, fontStyle: "italic" }}>
+              Bei Uschi 2v2 werden die Einzelpunkte der Teammitglieder summiert.
+            </p>
+          </>
+        ),
+      },
+      {
+        icon: "🚀",
+        title: "Zum Loslegen",
+        body: (
+          <>
+            <div style={{ fontSize: "13px", color: T.text, lineHeight: 1.8, marginBottom: "14px" }}>
+              <div style={{ marginBottom: "10px" }}>
+                <b style={{ color: T.gold }}>1.</b> Neue Runde starten, Club + Tee wählen
+              </div>
+              <div style={{ marginBottom: "10px" }}>
+                <b style={{ color: T.gold }}>2.</b> Spieler mit HCP hinzufügen, ggf. Uschi-Modus aktivieren
+              </div>
+              <div style={{ marginBottom: "10px" }}>
+                <b style={{ color: T.gold }}>3.</b> Während der Runde Scores eingeben — Live oder Batch
+              </div>
+              <div style={{ marginBottom: "10px" }}>
+                <b style={{ color: T.gold }}>4.</b> <b>📸 Zwischenstand teilen</b> für WhatsApp-Bild, <b>📡 Live-Ticker</b> für Live-URL
+              </div>
+              <div>
+                <b style={{ color: T.gold }}>5.</b> Mit Cloud-Sync über alle deine Geräte synchronisieren
+              </div>
+            </div>
+            <p style={{ fontSize: "11px", color: T.textDim, textAlign: "center", margin: 0, fontStyle: "italic" }}>
+              Viel Spaß auf dem Platz! ⛳
+            </p>
+          </>
+        ),
+      },
+    ];
+
+    const s = slides[welcomeSlide];
+    const isLast = welcomeSlide === slides.length - 1;
+
+    return (
+      <div style={{ position: "fixed", inset: 0, background: "#000000dd", zIndex: 1300, display: "flex", alignItems: "center", justifyContent: "center", padding: "20px" }}>
+        <div className="fade-in" style={{
+          width: "100%", maxWidth: "480px",
+          background: T.surface1,
+          borderRadius: "20px",
+          border: `1px solid ${T.line}`,
+          padding: "28px 22px 22px",
+          maxHeight: "88vh", overflowY: "auto",
+          boxShadow: "0 20px 60px #000000bb",
+        }}>
+          {/* Icon */}
+          <div style={{ fontSize: "44px", textAlign: "center", marginBottom: "14px" }}>{s.icon}</div>
+
+          {/* Title */}
+          <h2 className="serif" style={{ fontSize: "26px", textAlign: "center", color: T.text, margin: "0 0 14px" }}>
+            {s.title}
+          </h2>
+
+          {/* Body */}
+          <div>{s.body}</div>
+
+          {/* Slide dots */}
+          <div style={{ display: "flex", justifyContent: "center", gap: "6px", margin: "20px 0 14px" }}>
+            {slides.map((_, i) => (
+              <div key={i} style={{
+                width: i === welcomeSlide ? "20px" : "6px",
+                height: "6px",
+                borderRadius: "3px",
+                background: i === welcomeSlide ? T.gold : T.lineStrong,
+                transition: "width 0.2s",
+              }}/>
+            ))}
+          </div>
+
+          {/* Buttons */}
+          <div style={{ display: "flex", gap: "8px" }}>
+            {welcomeSlide > 0 && (
+              <button onClick={() => setWelcomeSlide(welcomeSlide - 1)}
+                style={{ ...S.btnSecondary, flex: 1 }}>
+                ← Zurück
+              </button>
+            )}
+            <button onClick={() => isLast ? dismissWelcome() : setWelcomeSlide(welcomeSlide + 1)} className="gold-hover"
+              style={{ ...S.btnPrimary, flex: welcomeSlide > 0 ? 2 : 1 }}>
+              {isLast ? "Loslegen ⛳" : "Weiter →"}
+            </button>
+          </div>
+
+          {/* Skip link */}
+          {!isLast && (
+            <button onClick={dismissWelcome}
+              style={{ background: "transparent", border: "none", color: T.textDim, fontSize: "11px", marginTop: "10px", width: "100%", padding: "6px", cursor: "pointer" }}>
+              Überspringen
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   const renderLiveModal = () => {
     if (!showLiveModal) return null;
     const active = liveStatus === "active" && liveCode;
@@ -4396,12 +4755,15 @@ WICHTIG:
               <div style={{ ...S.eyebrow, marginBottom: "8px" }}>Vorhandenen Code eingeben</div>
               <input value={syncInput}
                 onChange={e => setSyncInput(cleanSync(e.target.value))}
-                placeholder="z.B. KF7M2XRB"
-                maxLength={8}
+                placeholder="z.B. BODO-TKTR oder KF7M2XRB"
+                maxLength={20}
                 style={{ ...S.input, textTransform: "uppercase", letterSpacing: "0.1em", fontFamily: "JetBrains Mono, monospace" }}/>
+              <div style={{ fontSize: "10px", color: T.textDim, marginTop: "4px", lineHeight: 1.4 }}>
+                💡 Du kannst einen eigenen Code wählen (min. 4 Zeichen, Buchstaben/Zahlen/Bindestrich)
+              </div>
               <button onClick={async () => await setupSync(syncInput)}
-                disabled={cleanSync(syncInput).length !== 8}
-                style={{ ...S.btnSecondary, width: "100%", marginTop: "10px", opacity: cleanSync(syncInput).length !== 8 ? 0.4 : 1 }}>
+                disabled={!isValidSyncCode(syncInput)}
+                style={{ ...S.btnSecondary, width: "100%", marginTop: "10px", opacity: !isValidSyncCode(syncInput) ? 0.4 : 1 }}>
                 Verbinden & Daten laden
               </button>
             </>
@@ -4450,6 +4812,16 @@ WICHTIG:
     <div style={S.app}>
       <style>{GLOBAL_CSS}</style>
       {renderHeader()}
+      {!isOnline && (
+        <div style={{
+          padding: "8px 14px", background: `${T.gold}18`, borderBottom: `1px solid ${T.gold}40`,
+          color: T.gold, fontSize: "12px", fontWeight: 500, textAlign: "center",
+          display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+        }}>
+          <span>📡</span>
+          <span>Offline — deine Eingaben werden lokal gespeichert und später synchronisiert</span>
+        </div>
+      )}
       {view === "home"    && renderHome()}
       {view === "setup"   && renderSetup()}
       {view === "holes"   && renderHoles()}
@@ -4463,6 +4835,8 @@ WICHTIG:
       {renderSharePreview()}
       {renderAddClub()}
       {renderLiveModal()}
+      {renderWelcome()}
+      {renderUndoToast()}
     </div>
   );
 }
