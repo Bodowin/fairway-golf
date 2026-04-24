@@ -736,6 +736,142 @@ function getRoundProgress(round) {
   return { complete, notStarted, holesPlayed: maxHolesForAnyPlayer, totalHoles, playersCount: players.length };
 }
 
+/**
+ * Aggregate stats for a given club across all rounds.
+ * Returns null if no rounds exist for that club.
+ *
+ * Output shape:
+ * {
+ *   roundsCount: number,
+ *   playerStats: [{ name, roundsPlayed, bestSF, avgSF, worstSF, birdies, pars, bogeys, doubles }, ...],
+ *   holeStats: [{ holeIdx, par, si, avgGross, avgVsPar, birdieCount, parCount, bogeyCount, doubleCount, samplesSize }],
+ *   hallOfFame: { bestHole: {idx, avg}, worstHole: {idx, avg}, birdieKing: {name, count}, uschiMaster: {name, count} | null }
+ * }
+ */
+function aggregateClubStats(clubName, allRounds) {
+  const rounds = allRounds.filter(r => r.cfg?.clubName === clubName);
+  if (rounds.length === 0) return null;
+
+  // Build a union of holes config from the most-common holes setup
+  // (we assume holes don't change drastically for the same club)
+  const latestRound = rounds[0]; // most recent
+  const holes = latestRound.holes || [];
+  const totalHoles = holes.length;
+  if (totalHoles === 0) return null;
+
+  // Player stats: by name (so player ID changes across rounds don't matter)
+  const playerMap = {}; // name -> { roundsPlayed, sfList, birdies, pars, bogeys, doubles, uschiPoints }
+
+  // Hole stats: [idx] -> { grossList, birdieCount, parCount, bogeyCount, doubleCount }
+  const holeStats = holes.map(h => ({
+    holeIdx: 0, par: h.par, si: h.si,
+    grossList: [], birdieCount: 0, parCount: 0, bogeyCount: 0, doubleCount: 0,
+  }));
+  holeStats.forEach((hs, i) => { hs.holeIdx = i; });
+
+  rounds.forEach(r => {
+    const rHoles = r.holes || [];
+    const rPlayers = r.players || [];
+    const rScores = r.scores || {};
+    rPlayers.forEach(p => {
+      if (!playerMap[p.name]) {
+        playerMap[p.name] = { name: p.name, roundsPlayed: 0, sfList: [], birdies: 0, pars: 0, bogeys: 0, doubles: 0, uschiPoints: 0 };
+      }
+      const pm = playerMap[p.name];
+      pm.roundsPlayed++;
+
+      // Compute SF netto for this round (uses WHS)
+      const club = { name: clubName }; // minimal — tee info is per round
+      let roundSF = 0;
+      const rClub = r.selectedClubSnapshot || null;
+      const teeName = p.teeName || r.cfg?.defaultTeeName;
+      let tee = null;
+      if (rClub?.tees && teeName && rClub.tees[teeName]) tee = rClub.tees[teeName];
+
+      // Fall back: compute PH from HCP using a rough formula if tee info missing
+      let ph = 0;
+      if (tee) {
+        const parForTee = tee.par || rHoles.reduce((s, h) => s + h.par, 0);
+        ph = Math.round((p.hcp || 0) * (tee.slope / 113) + (tee.cr - parForTee));
+      } else {
+        ph = Math.round(p.hcp || 0);
+      }
+
+      rHoles.forEach((h, i) => {
+        const g = rScores[p.id]?.[i];
+        if (typeof g !== "number" || g <= 0) return;
+
+        // Birdie/par/bogey/double tallies
+        const diff = g - h.par;
+        if (diff <= -1) pm.birdies++;
+        else if (diff === 0) pm.pars++;
+        else if (diff === 1) pm.bogeys++;
+        else if (diff >= 2) pm.doubles++;
+
+        // Stableford netto
+        const strokesOnHole = Math.floor(Math.abs(ph) / rHoles.length) + (h.si <= Math.abs(ph) % rHoles.length ? 1 : 0);
+        const netto = g - strokesOnHole;
+        const sf = Math.max(0, h.par - netto + 2);
+        roundSF += sf;
+
+        // Hole stats (only add if holes config matches length — safe enough assumption)
+        if (i < holeStats.length && holeStats[i].par === h.par) {
+          holeStats[i].grossList.push(g);
+          if (diff <= -1) holeStats[i].birdieCount++;
+          else if (diff === 0) holeStats[i].parCount++;
+          else if (diff === 1) holeStats[i].bogeyCount++;
+          else holeStats[i].doubleCount++;
+        }
+      });
+      pm.sfList.push(roundSF);
+    });
+  });
+
+  const playerStats = Object.values(playerMap).map(pm => ({
+    name: pm.name,
+    roundsPlayed: pm.roundsPlayed,
+    bestSF: pm.sfList.length ? Math.max(...pm.sfList) : 0,
+    avgSF: pm.sfList.length ? Math.round(pm.sfList.reduce((s, v) => s + v, 0) / pm.sfList.length) : 0,
+    worstSF: pm.sfList.length ? Math.min(...pm.sfList) : 0,
+    birdies: pm.birdies,
+    pars: pm.pars,
+    bogeys: pm.bogeys,
+    doubles: pm.doubles,
+  })).sort((a, b) => b.avgSF - a.avgSF);
+
+  // Hole stats with averages
+  const holeStatsOut = holeStats.map(hs => ({
+    holeIdx: hs.holeIdx,
+    par: hs.par,
+    si: hs.si,
+    avgGross: hs.grossList.length ? (hs.grossList.reduce((s, v) => s + v, 0) / hs.grossList.length) : 0,
+    avgVsPar: hs.grossList.length ? ((hs.grossList.reduce((s, v) => s + v, 0) / hs.grossList.length) - hs.par) : 0,
+    birdieCount: hs.birdieCount,
+    parCount: hs.parCount,
+    bogeyCount: hs.bogeyCount,
+    doubleCount: hs.doubleCount,
+    samplesSize: hs.grossList.length,
+  }));
+
+  // Hall of Fame
+  const playedHoles = holeStatsOut.filter(h => h.samplesSize > 0);
+  const bestHole = playedHoles.length ? playedHoles.reduce((min, h) => h.avgVsPar < min.avgVsPar ? h : min, playedHoles[0]) : null;
+  const worstHole = playedHoles.length ? playedHoles.reduce((max, h) => h.avgVsPar > max.avgVsPar ? h : max, playedHoles[0]) : null;
+  const birdieKing = playerStats.length ? playerStats.reduce((max, p) => p.birdies > max.birdies ? p : max, playerStats[0]) : null;
+
+  return {
+    roundsCount: rounds.length,
+    playerStats,
+    holeStats: holeStatsOut,
+    hallOfFame: {
+      bestHole: bestHole ? { idx: bestHole.holeIdx, avg: bestHole.avgVsPar } : null,
+      worstHole: worstHole ? { idx: worstHole.holeIdx, avg: worstHole.avgVsPar } : null,
+      birdieKing: birdieKing && birdieKing.birdies > 0 ? { name: birdieKing.name, count: birdieKing.birdies } : null,
+    },
+  };
+}
+
+
 
 const scoreColor = (gross, par) => {
   if (isStrich(gross)) return T.strich;
@@ -1131,6 +1267,7 @@ export default function GolfApp() {
   // Navigation
   const [view, setView] = useState("home");
   const [tab, setTab] = useState("rounds");
+  const [statsClubName, setStatsClubName] = useState(null); // null = not yet chosen
   // Round config
   const [cfg, setCfg] = useState({ name: "", date: toDay(), numHoles: 18, clubName: "", defaultTeeName: "" });
   const [holes, setHoles] = useState(makeHoles(72, 18));
@@ -1952,6 +2089,193 @@ export default function GolfApp() {
   // ═══════════════════════════════════════════════════════════════════════════
   // HOME SCREEN
   // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STATS TAB — Club-level aggregations across all rounds
+  // ═══════════════════════════════════════════════════════════════════════════
+  const renderStatsTab = () => {
+    // Collect all unique clubs played
+    const clubsPlayed = Array.from(new Set(rounds.map(r => r.cfg?.clubName).filter(Boolean)));
+
+    if (clubsPlayed.length === 0) {
+      return <EmptyState icon="📊" title="Keine Daten" sub="Spiele ein paar Runden, dann erscheinen hier Statistiken pro Club." />;
+    }
+
+    // If no club is selected yet, pick the most-played one automatically
+    const activeClub = statsClubName && clubsPlayed.includes(statsClubName) ? statsClubName : clubsPlayed[0];
+    const stats = aggregateClubStats(activeClub, rounds);
+
+    return (
+      <div>
+        {/* Club selector */}
+        <div style={{ marginBottom: "14px" }}>
+          <div style={{ ...S.eyebrow, marginBottom: "6px" }}>Club wählen</div>
+          <select
+            value={activeClub}
+            onChange={(e) => setStatsClubName(e.target.value)}
+            style={{ ...S.input, padding: "10px 12px", fontSize: "13px", width: "100%" }}>
+            {clubsPlayed.map(name => {
+              const count = rounds.filter(r => r.cfg?.clubName === name).length;
+              return <option key={name} value={name}>{name} ({count} Runde{count === 1 ? "" : "n"})</option>;
+            })}
+          </select>
+        </div>
+
+        {!stats && (
+          <EmptyState icon="📊" title="Keine Daten für diesen Club" sub="Noch keine abgeschlossenen Runden." />
+        )}
+
+        {stats && (
+          <>
+            {/* Reliability warning if too few rounds */}
+            {stats.roundsCount < 3 && (
+              <div style={{
+                padding: "10px 12px", marginBottom: "14px",
+                background: `${T.gold}10`, border: `1px solid ${T.gold}40`,
+                borderRadius: "8px", fontSize: "11px", color: T.gold, lineHeight: 1.4,
+              }}>
+                ⚠️ Nur {stats.roundsCount} Runde{stats.roundsCount === 1 ? "" : "n"} — Stats werden erst ab 3 Runden aussagekräftig.
+              </div>
+            )}
+
+            {/* Hall of Fame */}
+            <div style={{ ...S.card, padding: "12px 14px", marginBottom: "14px" }}>
+              <div style={{ ...S.eyebrow, marginBottom: "10px", color: T.gold }}>🏆 Hall of Fame</div>
+
+              {stats.hallOfFame.bestHole && (
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "12px", marginBottom: "8px" }}>
+                  <span style={{ fontSize: "16px" }}>🟢</span>
+                  <span style={{ color: T.textSoft }}>Lieblingsloch:</span>
+                  <span style={{ color: T.text, fontWeight: 600 }}>
+                    Loch {stats.hallOfFame.bestHole.idx + 1}
+                  </span>
+                  <span className="mono" style={{ color: T.gold, fontSize: "11px", marginLeft: "auto" }}>
+                    {stats.hallOfFame.bestHole.avg > 0 ? "+" : ""}{stats.hallOfFame.bestHole.avg.toFixed(1)} ⌀
+                  </span>
+                </div>
+              )}
+
+              {stats.hallOfFame.worstHole && (
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "12px", marginBottom: "8px" }}>
+                  <span style={{ fontSize: "16px" }}>💀</span>
+                  <span style={{ color: T.textSoft }}>Angstloch:</span>
+                  <span style={{ color: T.text, fontWeight: 600 }}>
+                    Loch {stats.hallOfFame.worstHole.idx + 1}
+                  </span>
+                  <span className="mono" style={{ color: T.double, fontSize: "11px", marginLeft: "auto" }}>
+                    {stats.hallOfFame.worstHole.avg > 0 ? "+" : ""}{stats.hallOfFame.worstHole.avg.toFixed(1)} ⌀
+                  </span>
+                </div>
+              )}
+
+              {stats.hallOfFame.birdieKing && (
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "12px" }}>
+                  <span style={{ fontSize: "16px" }}>🎯</span>
+                  <span style={{ color: T.textSoft }}>Birdie-King:</span>
+                  <span style={{ color: T.text, fontWeight: 600 }}>{stats.hallOfFame.birdieKing.name}</span>
+                  <span className="mono" style={{ color: T.gold, fontSize: "11px", marginLeft: "auto" }}>
+                    {stats.hallOfFame.birdieKing.count} Birdies
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Player stats */}
+            <div style={{ ...S.card, padding: "12px 14px", marginBottom: "14px" }}>
+              <div style={{ ...S.eyebrow, marginBottom: "12px" }}>Spieler-Übersicht</div>
+              {stats.playerStats.map((p, i) => (
+                <div key={p.name} style={{
+                  paddingBottom: "10px", marginBottom: "10px",
+                  borderBottom: i < stats.playerStats.length - 1 ? `1px solid ${T.line}` : "none",
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", marginBottom: "6px" }}>
+                    <div style={{ fontWeight: 600, fontSize: "14px", color: T.text, flex: 1 }}>{p.name}</div>
+                    <div style={{ fontSize: "11px", color: T.textDim }}>
+                      {p.roundsPlayed} Runde{p.roundsPlayed === 1 ? "" : "n"}
+                    </div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px", marginBottom: "8px" }}>
+                    <div style={{ textAlign: "center", padding: "6px 4px", background: T.surface2, borderRadius: "6px" }}>
+                      <div className="mono" style={{ fontSize: "15px", fontWeight: 700, color: T.gold }}>{p.bestSF}</div>
+                      <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>BEST SF</div>
+                    </div>
+                    <div style={{ textAlign: "center", padding: "6px 4px", background: T.surface2, borderRadius: "6px" }}>
+                      <div className="mono" style={{ fontSize: "15px", fontWeight: 700, color: T.text }}>{p.avgSF}</div>
+                      <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>⌀ SF</div>
+                    </div>
+                    <div style={{ textAlign: "center", padding: "6px 4px", background: T.surface2, borderRadius: "6px" }}>
+                      <div className="mono" style={{ fontSize: "15px", fontWeight: 700, color: T.textDim }}>{p.worstSF}</div>
+                      <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>WORST SF</div>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: "12px", fontSize: "11px", color: T.textSoft, flexWrap: "wrap" }}>
+                    <span>🎯 {p.birdies} Birdies</span>
+                    <span>⛳ {p.pars} Pars</span>
+                    <span>⚠️ {p.bogeys} Bogeys</span>
+                    <span>💀 {p.doubles} Doubles+</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Per-hole breakdown */}
+            <div style={{ ...S.card, padding: "12px 14px", marginBottom: "14px" }}>
+              <div style={{ ...S.eyebrow, marginBottom: "10px" }}>Pro Loch</div>
+              <div style={{ fontSize: "10px", color: T.textDim, marginBottom: "10px", lineHeight: 1.4 }}>
+                Durchschnitts-Score aller Spieler über alle Runden auf diesem Club.
+              </div>
+              <div style={{ overflow: "hidden", borderRadius: "8px", border: `1px solid ${T.line}` }}>
+                <div style={{ display: "grid", gridTemplateColumns: "30px 26px 1fr 60px", gap: "8px", padding: "8px 10px", background: T.surface2, fontSize: "9px", color: T.textDim, fontWeight: 600, letterSpacing: "0.04em" }}>
+                  <div>L</div>
+                  <div style={{ textAlign: "center" }}>PAR</div>
+                  <div>VERT.</div>
+                  <div style={{ textAlign: "right" }}>⌀ vs Par</div>
+                </div>
+                {stats.holeStats.map((h, i) => {
+                  if (h.samplesSize === 0) {
+                    return (
+                      <div key={i} style={{ display: "grid", gridTemplateColumns: "30px 26px 1fr 60px", gap: "8px", padding: "8px 10px", borderTop: `1px solid ${T.line}`, alignItems: "center" }}>
+                        <div className="mono" style={{ fontSize: "11px", color: T.gold, fontWeight: 600 }}>{i + 1}</div>
+                        <div className="mono" style={{ fontSize: "10px", color: T.textSoft, textAlign: "center" }}>{h.par}</div>
+                        <div style={{ fontSize: "10px", color: T.textDim, fontStyle: "italic" }}>—</div>
+                        <div style={{ fontSize: "10px", color: T.textDim, textAlign: "right" }}>—</div>
+                      </div>
+                    );
+                  }
+                  const total = h.birdieCount + h.parCount + h.bogeyCount + h.doubleCount;
+                  const avgColor = h.avgVsPar <= 0 ? T.gold : h.avgVsPar < 1 ? T.text : h.avgVsPar < 2 ? T.bogey : T.double;
+                  return (
+                    <div key={i} style={{ display: "grid", gridTemplateColumns: "30px 26px 1fr 60px", gap: "8px", padding: "8px 10px", borderTop: `1px solid ${T.line}`, alignItems: "center" }}>
+                      <div className="mono" style={{ fontSize: "11px", color: T.gold, fontWeight: 700 }}>{i + 1}</div>
+                      <div className="mono" style={{ fontSize: "10px", color: T.textSoft, textAlign: "center" }}>{h.par}</div>
+                      <div style={{ display: "flex", height: "10px", borderRadius: "3px", overflow: "hidden", background: T.surface2 }}>
+                        {h.birdieCount > 0 && <div style={{ width: `${(h.birdieCount / total) * 100}%`, background: T.gold }} title={`${h.birdieCount} Birdie(s)`} />}
+                        {h.parCount > 0 && <div style={{ width: `${(h.parCount / total) * 100}%`, background: T.sage }} title={`${h.parCount} Par(s)`} />}
+                        {h.bogeyCount > 0 && <div style={{ width: `${(h.bogeyCount / total) * 100}%`, background: T.bogey }} title={`${h.bogeyCount} Bogey(s)`} />}
+                        {h.doubleCount > 0 && <div style={{ width: `${(h.doubleCount / total) * 100}%`, background: T.double }} title={`${h.doubleCount} Double+`} />}
+                      </div>
+                      <div className="mono" style={{ fontSize: "11px", color: avgColor, textAlign: "right", fontWeight: 600 }}>
+                        {h.avgVsPar > 0 ? "+" : ""}{h.avgVsPar.toFixed(1)}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ fontSize: "9px", color: T.textDim, marginTop: "8px", display: "flex", gap: "10px", justifyContent: "center", flexWrap: "wrap" }}>
+                <span>🟡 Birdies</span>
+                <span>🟢 Pars</span>
+                <span>🟠 Bogeys</span>
+                <span>🔴 Doubles+</span>
+              </div>
+              <div style={{ fontSize: "9px", color: T.textDim, marginTop: "6px", textAlign: "center", fontStyle: "italic" }}>
+                Tee-übergreifend — alle Spieler aller Runden kombiniert.
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+
   const renderHome = () => {
     const totalRounds = rounds.length;
     const clubsPlayed = new Set(rounds.map(r => r.cfg.clubName).filter(Boolean)).size;
@@ -2082,13 +2406,13 @@ export default function GolfApp() {
 
         {/* Tabs */}
         <div style={{ padding: "0 16px 16px", display: "flex", gap: "4px" }}>
-          {[{k:"rounds",l:"Runden"},{k:"friends",l:"Freunde"},{k:"history",l:"Verlauf"}].map(({k,l}) => (
+          {[{k:"rounds",l:"Runden"},{k:"friends",l:"Freunde"},{k:"stats",l:"📊 Stats"},{k:"history",l:"Verlauf"}].map(({k,l}) => (
             <button key={k} onClick={() => setTab(k)} style={{
               flex: 1, padding: "10px 0",
               background: tab === k ? T.surface2 : "transparent",
               color: tab === k ? T.text : T.textSoft,
               border: `1px solid ${tab === k ? T.lineStrong : "transparent"}`,
-              borderRadius: "10px", fontSize: "13px",
+              borderRadius: "10px", fontSize: "12px",
               fontWeight: tab === k ? 600 : 500,
             }}>{l}</button>
           ))}
@@ -2163,11 +2487,41 @@ export default function GolfApp() {
             </>
           )}
 
+          {tab === "stats" && renderStatsTab()}
+
           {tab === "history" && (
             rounds.length === 0
               ? <EmptyState icon="📊" title="Kein Verlauf" sub="Sobald du Runden gespielt hast, siehst du hier deine Entwicklung." />
               : rounds.map(r => renderRoundCard(r, true))
           )}
+        </div>
+
+        {/* Feedback footer */}
+        <div style={{
+          padding: "24px 16px 32px",
+          borderTop: `1px solid ${T.line}`,
+          marginTop: "12px",
+          textAlign: "center",
+        }}>
+          <a
+            href="mailto:bodowin@gmail.com?subject=Fairway%20Feedback&body=Hallo%20Bodo%2C%0A%0AIch%20habe%20Feedback%20zur%20Fairway-App%3A%0A%0A"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "6px",
+              color: T.textDim,
+              fontSize: "11px",
+              textDecoration: "none",
+              padding: "8px 14px",
+              border: `1px dashed ${T.line}`,
+              borderRadius: "8px",
+            }}>
+            <span>💬</span>
+            <span>Feedback oder Bug gefunden?</span>
+          </a>
+          <div style={{ fontSize: "10px", color: T.textDim, marginTop: "10px", fontStyle: "italic" }}>
+            Fairway · Made with ⛳ by Bodo
+          </div>
         </div>
       </div>
     );
@@ -4639,6 +4993,32 @@ WICHTIG:
             </div>
             <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, margin: 0, fontStyle: "italic" }}>
               Die Extra-Schläge werden auf die schwersten Löcher (niedrigster Stroke-Index) verteilt. Bei 9-Loch-Runden halbiert.
+            </p>
+          </>
+        ),
+      },
+      {
+        icon: "🔒",
+        title: "Sync & Privatsphäre",
+        body: (
+          <>
+            <p style={{ fontSize: "13px", color: T.textSoft, lineHeight: 1.6, margin: "0 0 12px" }}>
+              Deine Daten werden über einen <b>Sync-Code</b> synchronisiert — vergleichbar mit einem gemeinsamen Passwort.
+            </p>
+            <div style={{ background: T.surface2, border: `1px solid ${T.line}`, borderRadius: "8px", padding: "12px", marginBottom: "10px" }}>
+              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "6px" }}>👤 Alleine spielen</div>
+              <div style={{ fontSize: "12px", color: T.text, lineHeight: 1.6 }}>
+                Eigenen Code wählen oder zufällig generieren lassen → deine Daten sind <b>privat</b> und nur auf deinen eigenen Geräten sichtbar.
+              </div>
+            </div>
+            <div style={{ background: T.surface2, border: `1px solid ${T.line}`, borderRadius: "8px", padding: "12px", marginBottom: "10px" }}>
+              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "6px" }}>👥 In einer Gruppe</div>
+              <div style={{ fontSize: "12px", color: T.text, lineHeight: 1.6 }}>
+                Gemeinsamen Code teilen (z.B. <span className="mono">STAMMRUNDE-2026</span>) → alle Gruppen-Mitglieder sehen dieselben Runden, Freunde und Clubs.
+              </div>
+            </div>
+            <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, margin: 0, fontStyle: "italic" }}>
+              Wichtig: Jeder mit dem Code kann Daten lesen und schreiben. Teile ihn nur mit Leuten denen du vertraust.
             </p>
           </>
         ),
