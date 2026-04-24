@@ -67,6 +67,10 @@
   .sc-double { color: #b85c4c; }
   .sc-strich { color: #5d6e63; }
   .score-pill { display: inline-block; padding: 2px 6px; border-radius: 4px; min-width: 20px; }
+  .breakdown-table { min-width: 100%; }
+  .breakdown-table td { padding: 8px 4px; border-bottom: 1px solid #1a2e22; }
+  .breakdown-table td.hole-num { color: #c9a85c; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 12px; text-align: left; padding-left: 10px; width: 28px; }
+  .breakdown-table td.par { color: #7a9281; font-family: 'JetBrains Mono', monospace; font-weight: 500; text-align: center; }
 </style>
 </head>
 <body>
@@ -184,12 +188,17 @@
     players.forEach(p => {
       totals[p.id] = { total: 0, best: 0, worst: 0, birdies: 0, uschi: 0 };
     });
+    const perHole = [];
     let carry = 1;
 
     for (let i = 0; i < holes.length; i++) {
       const hole = holes[i];
       const holePoints = {};
-      players.forEach(p => { holePoints[p.id] = 0; });
+      const holeBreakdown = {};
+      players.forEach(p => {
+        holePoints[p.id] = 0;
+        holeBreakdown[p.id] = { best: false, worst: false, birdie: false, uschi: 0 };
+      });
 
       // Netto for each player
       const nettos = [];
@@ -207,8 +216,8 @@
         const worstN = Math.max(...nettos.map(n => n.netto));
         if (bestN !== worstN) {
           nettos.forEach(n => {
-            if (n.netto === bestN)  { holePoints[n.pid] += 1; totals[n.pid].best += 1; }
-            if (n.netto === worstN) { holePoints[n.pid] -= 1; totals[n.pid].worst -= 1; }
+            if (n.netto === bestN)  { holePoints[n.pid] += 1; totals[n.pid].best += 1;  holeBreakdown[n.pid].best = true; }
+            if (n.netto === worstN) { holePoints[n.pid] -= 1; totals[n.pid].worst -= 1; holeBreakdown[n.pid].worst = true; }
           });
         }
       }
@@ -219,6 +228,7 @@
         if (isValid(gross) && gross <= hole.par - 1) {
           holePoints[p.id] += 1;
           totals[p.id].birdies += 1;
+          holeBreakdown[p.id].birdie = true;
         }
       });
 
@@ -237,6 +247,7 @@
             if (isValid(cGross) && cGross <= hole.par) {
               holePoints[closest] += carry;
               totals[closest].uschi += carry;
+              holeBreakdown[closest].uschi = carry;
               carry = 1;
             } else {
               carry = 1;
@@ -245,10 +256,11 @@
         }
       }
 
+      perHole.push({ holeIdx: i, holePoints, holeBreakdown });
       players.forEach(p => { totals[p.id].total += holePoints[p.id]; });
     }
 
-    return { totals };
+    return { totals, perHole };
   }
 
   // ─── Rendering ─────────────────────────────────────────────────────────────
@@ -446,6 +458,72 @@
       `;
     });
     html += `</div>`;
+
+    // Uschi breakdown per hole (only in Uschi mode)
+    if (isUschi && uschiResult && uschiResult.perHole) {
+      html += `<div class="card" style="padding:0; overflow:hidden">
+        <div class="eyebrow" style="padding:14px 14px 10px">Loch-für-Loch</div>
+        <div style="overflow-x:auto">
+        <table class="breakdown-table">
+          <thead>
+            <tr>
+              <th style="text-align:left; padding-left:10px">L</th>
+              <th>Par</th>
+              ${players.map(p => `<th>${escapeHtml(p.name.slice(0, 4))}</th>`).join("")}
+            </tr>
+          </thead>
+          <tbody>`;
+      holes.forEach((h, i) => {
+        const ph = uschiResult.perHole.find(x => x.holeIdx === i);
+        if (!ph) return;
+        const anyPlayed = players.some(p => {
+          const g = scores[p.id] && scores[p.id][i];
+          return isValid(g) || isStrich(g);
+        });
+        if (!anyPlayed) return;
+        html += `<tr>
+          <td class="hole-num">${i + 1}</td>
+          <td class="par">${h.par}</td>`;
+        players.forEach(p => {
+          const g = scores[p.id] && scores[p.id][i];
+          const points = (ph.holePoints && ph.holePoints[p.id]) || 0;
+          const bd = (ph.holeBreakdown && ph.holeBreakdown[p.id]) || {};
+          if (!isValid(g) && !isStrich(g)) {
+            html += `<td style="text-align:center; color:#5d6e63">—</td>`;
+            return;
+          }
+          if (isStrich(g)) {
+            html += `<td style="text-align:center; color:#5d6e63">✗</td>`;
+            return;
+          }
+          // Build icons
+          const icons = [];
+          if (bd.best)   icons.push("🏆");
+          if (bd.birdie) icons.push("🎯");
+          if (bd.uschi > 0) icons.push(bd.uschi > 1 ? `💧${bd.uschi}` : "💧");
+          if (bd.worst)  icons.push("🔻");
+          const isPuffer = points === 0 && icons.length === 0;
+          const color = points > 0 ? "#c9a85c" : points < 0 ? "#d67a5c" : "#a2bfa2";
+          const sign = points > 0 ? "+" : "";
+          html += `<td style="text-align:center">
+            <div class="mono" style="font-size:13px; font-weight:700; color:${color}; line-height:1">${sign}${points}</div>
+            <div style="font-size:10px; margin-top:2px; letter-spacing:-0.5px">
+              ${isPuffer ? '<span style="color:#5d6e63">·</span>' : icons.join("")}
+            </div>
+          </td>`;
+        });
+        html += `</tr>`;
+      });
+      html += `</tbody></table></div>
+        <div style="font-size:10px; color:#5d6e63; padding:8px 12px; display:flex; flex-wrap:wrap; gap:10px; justify-content:center; border-top:1px solid #213629">
+          <span>🏆 Bester</span>
+          <span>🔻 Schlechtester</span>
+          <span>🎯 Birdie</span>
+          <span>💧 Uschi</span>
+          <span>· Puffer</span>
+        </div>
+      </div>`;
+    }
 
     // Scorecard table
     html += `<div class="card" style="padding:0; overflow:hidden">
