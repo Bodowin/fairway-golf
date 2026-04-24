@@ -818,7 +818,11 @@ function computeUschiPoints(players, holes, scores, adjStrokes, par3Data) {
   for (let i = 0; i < holes.length; i++) {
     const hole = holes[i];
     const holePoints = {};
-    players.forEach(p => { holePoints[p.id] = 0; });
+    const holeBreakdown = {}; // { [pid]: { best: bool, worst: bool, birdie: bool, uschi: number } }
+    players.forEach(p => {
+      holePoints[p.id] = 0;
+      holeBreakdown[p.id] = { best: false, worst: false, birdie: false, uschi: 0 };
+    });
 
     // Compute netto for each player who played this hole
     const netto = {};
@@ -841,8 +845,8 @@ function computeUschiPoints(players, holes, scores, adjStrokes, par3Data) {
       const worst = Math.max(...nettos.map(n => n.netto));
       if (best !== worst) {
         nettos.forEach(n => {
-          if (n.netto === best)  { holePoints[n.pid] += 1; totals[n.pid].best += 1;  }
-          if (n.netto === worst) { holePoints[n.pid] -= 1; totals[n.pid].worst -= 1; }
+          if (n.netto === best)  { holePoints[n.pid] += 1; totals[n.pid].best += 1;  holeBreakdown[n.pid].best = true; }
+          if (n.netto === worst) { holePoints[n.pid] -= 1; totals[n.pid].worst -= 1; holeBreakdown[n.pid].worst = true; }
         });
       }
     }
@@ -853,6 +857,7 @@ function computeUschiPoints(players, holes, scores, adjStrokes, par3Data) {
       if (isValid(gross) && gross <= hole.par - 1) {
         holePoints[p.id] += 1;
         totals[p.id].birdies += 1;
+        holeBreakdown[p.id].birdie = true;
       }
     });
 
@@ -883,6 +888,7 @@ function computeUschiPoints(players, holes, scores, adjStrokes, par3Data) {
             // WON! Closest hit green AND made par (or better)
             holePoints[closest] += carry;
             totals[closest].uschi += carry;
+            holeBreakdown[closest].uschi = carry;
             uschiInfo = { type: "won", winner: closest, points: carry, multiplier: carry };
             carry = 1;
           } else {
@@ -898,7 +904,7 @@ function computeUschiPoints(players, holes, scores, adjStrokes, par3Data) {
       }
     }
 
-    perHole.push({ holeIdx: i, holePoints, uschi: uschiInfo, netto });
+    perHole.push({ holeIdx: i, holePoints, holeBreakdown, uschi: uschiInfo, netto });
 
     // Add hole points to totals
     players.forEach(p => { totals[p.id].total += holePoints[p.id]; });
@@ -1282,11 +1288,22 @@ export default function GolfApp() {
       setPadOpen(null);
     } else {
       // Live mode: next player same hole → next hole player 0
+      // But: if we're in "correction mode" (hole was already fully scored when pad opened),
+      // stop after filling gaps on this hole — don't auto-advance to next hole.
+      const wasFullyScoredOnOpen = padOpen.correctionMode === true;
+
       for (let i = playerIdx + 1; i < players.length; i++) {
         if (scores[players[i].id]?.[holeIdx] === undefined) {
-          setPadOpen({ playerId: players[i].id, holeIdx });
+          setPadOpen({ playerId: players[i].id, holeIdx, correctionMode: wasFullyScoredOnOpen });
           return;
         }
+      }
+      // All players on this hole are done
+      if (wasFullyScoredOnOpen) {
+        // Correction mode: just close the pad, don't jump forward.
+        // User can see all players' scores on this hole now and decide what to do next.
+        setPadOpen(null);
+        return;
       }
       if (holeIdx + 1 < cfg.numHoles) {
         for (let i = 0; i < players.length; i++) {
@@ -2715,7 +2732,14 @@ export default function GolfApp() {
                   </div>
                 </div>
 
-                <button onClick={() => setPadOpen({ playerId: p.id, holeIdx: currentHole })}
+                <button onClick={() => {
+                    // Correction mode: entering this hole when it's already fully scored?
+                    const isFullyScored = players.every(pp => {
+                      const g = scores[pp.id]?.[currentHole];
+                      return isValid(g) || isStrich(g);
+                    });
+                    setPadOpen({ playerId: p.id, holeIdx: currentHole, correctionMode: isFullyScored });
+                  }}
                   style={{
                     width: "100%", height: "64px",
                     background: isEmpty ? T.surface2 : `${col}15`,
@@ -3552,68 +3576,144 @@ export default function GolfApp() {
             🎯 Uschi-Protokoll
           </h3>
           <p style={{ fontSize: "12px", color: T.textSoft, marginBottom: "14px" }}>
-            Alle Par-3 Löcher auf einen Blick. Tap auf ein Loch zum Nachbearbeiten.
+            Alle Löcher und wer welche Punkte gemacht hat.
           </p>
 
-          {par3Indices.length === 0 && (
-            <EmptyState icon="🎯" title="Keine Par-3 Löcher" sub="Dieser Platz hat keine Par 3." />
+          {/* Par-3 quick access (tap to edit Uschi data) */}
+          {par3Indices.length > 0 && (
+            <>
+              <div style={{ ...S.eyebrow, marginBottom: "8px", color: T.gold }}>PAR-3 LÖCHER (TAP ZUM BEARBEITEN)</div>
+              {par3Indices.map(({ h, i }) => {
+                const data = par3Data[i];
+                const hasData = !!data;
+                const closest = data?.closest;
+                const closestPlayer = players.find(p => p.id === closest);
+                const greenHits = data?.greenHits || [];
+                const allScored = players.every(p => {
+                  const g = scores[p.id]?.[i];
+                  return isValid(g) || isStrich(g);
+                });
+                const uschiInfo = uschiResult?.perHole?.find(ph => ph.holeIdx === i)?.uschi;
+                const multiplierText = uschiInfo?.multiplier > 1 ? ` (${uschiInfo.multiplier}×)` : "";
+
+                const status = !allScored
+                  ? { label: "Score fehlt noch", color: T.textDim }
+                  : !hasData
+                    ? { label: "⚠️ Uschi-Eingabe fehlt", color: T.bogey }
+                    : greenHits.length === 0
+                      ? { label: `↻ Niemand Grün → carry${multiplierText}`, color: T.sage }
+                      : !closest
+                        ? { label: "⚠️ Closest fehlt", color: T.bogey }
+                        : (() => {
+                            const cScore = scores[closest]?.[i];
+                            if (!isValid(cScore)) return { label: "⚠️ unklar", color: T.bogey };
+                            const madePar = cScore - h.par <= 0;
+                            return madePar
+                              ? { label: `✓ ${closestPlayer?.name || "?"} gewinnt${multiplierText}`, color: T.gold }
+                              : { label: `🔥 ${closestPlayer?.name || "?"} verbrennt${multiplierText}`, color: T.double };
+                          })();
+
+                return (
+                  <button key={i} onClick={() => { setShowUschiReview(false); setUschiPromptHole(i); }}
+                    style={{
+                      width: "100%", textAlign: "left",
+                      padding: "10px 12px", marginBottom: "6px",
+                      background: T.surface2,
+                      border: `1px solid ${T.line}`,
+                      borderRadius: "10px",
+                      display: "flex", alignItems: "center", gap: "10px",
+                      color: T.text,
+                    }}>
+                    <div className="mono serif" style={{ fontSize: "18px", color: T.gold, lineHeight: 1, minWidth: "30px" }}>{i + 1}</div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: "12px", fontWeight: 600, color: T.text }}>
+                        Par {h.par} · SI {h.si}
+                      </div>
+                      <div style={{ fontSize: "11px", color: status.color, marginTop: "2px", fontWeight: 500 }}>
+                        {status.label}
+                      </div>
+                    </div>
+                    <span style={{ color: T.textDim, fontSize: "14px" }}>›</span>
+                  </button>
+                );
+              })}
+            </>
           )}
 
-          {par3Indices.map(({ h, i }) => {
-            const data = par3Data[i];
-            const hasData = !!data;
-            const closest = data?.closest;
-            const closestPlayer = players.find(p => p.id === closest);
-            const greenHits = data?.greenHits || [];
-            const allScored = players.every(p => {
-              const g = scores[p.id]?.[i];
-              return isValid(g) || isStrich(g);
-            });
-            // Find the uschi info from the computed result to show multiplier
-            const uschiInfo = uschiResult?.perHole?.find(ph => ph.holeIdx === i)?.uschi;
-            const multiplierText = uschiInfo?.multiplier > 1 ? ` (${uschiInfo.multiplier}×)` : "";
+          {/* Full per-hole breakdown */}
+          {uschiResult && (
+            <>
+              <div style={{ ...S.eyebrow, marginTop: "18px", marginBottom: "8px", color: T.sage }}>LOCH-FÜR-LOCH BREAKDOWN</div>
 
-            const status = !allScored
-              ? { label: "Score fehlt noch", color: T.textDim }
-              : !hasData
-                ? { label: "⚠️ Uschi-Eingabe fehlt", color: T.bogey }
-                : greenHits.length === 0
-                  ? { label: `↻ Niemand Grün → carry${multiplierText}`, color: T.sage }
-                  : !closest
-                    ? { label: "⚠️ Closest fehlt", color: T.bogey }
-                    : (() => {
-                        const cScore = scores[closest]?.[i];
-                        if (!isValid(cScore)) return { label: "⚠️ unklar", color: T.bogey };
-                        const madePar = cScore - h.par <= 0;
-                        return madePar
-                          ? { label: `✓ ${closestPlayer?.name || "?"} gewinnt${multiplierText}`, color: T.gold }
-                          : { label: `🔥 ${closestPlayer?.name || "?"} verbrennt${multiplierText}`, color: T.double };
-                      })();
-
-            return (
-              <button key={i} onClick={() => { setShowUschiReview(false); setUschiPromptHole(i); }}
-                style={{
-                  width: "100%", textAlign: "left",
-                  padding: "12px 14px", marginBottom: "8px",
-                  background: T.surface2,
-                  border: `1px solid ${T.line}`,
-                  borderRadius: "10px",
-                  display: "flex", alignItems: "center", gap: "12px",
-                  color: T.text,
-                }}>
-                <div className="mono serif" style={{ fontSize: "22px", color: T.gold, lineHeight: 1, minWidth: "40px" }}>{i + 1}</div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: "13px", fontWeight: 600, color: T.text }}>
-                    Loch {i + 1} · Par {h.par} · SI {h.si}
-                  </div>
-                  <div style={{ fontSize: "11px", color: status.color, marginTop: "3px", fontWeight: 500 }}>
-                    {status.label}
-                  </div>
+              <div style={{ background: T.surface2, borderRadius: "10px", border: `1px solid ${T.line}`, overflow: "hidden", marginBottom: "8px" }}>
+                {/* Header row with player initials */}
+                <div style={{ display: "grid", gridTemplateColumns: `28px 38px repeat(${players.length}, 1fr)`, gap: "6px", padding: "8px 10px", borderBottom: `1px solid ${T.line}`, background: T.surface3 }}>
+                  <div style={{ fontSize: "9px", color: T.textDim, fontWeight: 600 }}>L</div>
+                  <div style={{ fontSize: "9px", color: T.textDim, fontWeight: 600, textAlign: "center" }}>PAR</div>
+                  {players.map(p => (
+                    <div key={p.id} style={{ fontSize: "10px", color: T.textSoft, fontWeight: 600, textAlign: "center" }}>
+                      {p.name.slice(0, 4)}
+                    </div>
+                  ))}
                 </div>
-                <span style={{ color: T.textDim, fontSize: "16px" }}>›</span>
-              </button>
-            );
-          })}
+                {holes.map((h, i) => {
+                  const ph = uschiResult.perHole.find(x => x.holeIdx === i);
+                  if (!ph) return null;
+                  const anyPlayed = players.some(p => isValid(scores[p.id]?.[i]) || isStrich(scores[p.id]?.[i]));
+                  if (!anyPlayed) return null;
+                  return (
+                    <div key={i} style={{ display: "grid", gridTemplateColumns: `28px 38px repeat(${players.length}, 1fr)`, gap: "6px", padding: "8px 10px", borderBottom: i < holes.length - 1 ? `1px solid ${T.line}` : "none", alignItems: "center" }}>
+                      <div className="mono" style={{ fontSize: "12px", color: T.gold, fontWeight: 700 }}>{i + 1}</div>
+                      <div className="mono" style={{ fontSize: "11px", color: T.textSoft, textAlign: "center" }}>{h.par}</div>
+                      {players.map(p => {
+                        const gross = scores[p.id]?.[i];
+                        const points = ph.holePoints?.[p.id] || 0;
+                        const bd = ph.holeBreakdown?.[p.id] || {};
+                        if (!isValid(gross) && !isStrich(gross)) {
+                          return <div key={p.id} style={{ textAlign: "center", color: T.textDim, fontSize: "11px" }}>—</div>;
+                        }
+                        if (isStrich(gross)) {
+                          return <div key={p.id} style={{ textAlign: "center", color: T.textDim, fontSize: "11px" }}>✗</div>;
+                        }
+                        // Build icons based on breakdown
+                        const icons = [];
+                        if (bd.best)   icons.push("🏆");
+                        if (bd.birdie) icons.push("🎯");
+                        if (bd.uschi > 0) icons.push(bd.uschi > 1 ? `💧${bd.uschi}` : "💧");
+                        if (bd.worst)  icons.push("🔻");
+                        const isPuffer = points === 0 && icons.length === 0;
+                        const color = points > 0 ? T.gold : points < 0 ? T.double : T.textSoft;
+                        const sign = points > 0 ? "+" : "";
+                        return (
+                          <div key={p.id} style={{ textAlign: "center" }}>
+                            <div className="mono" style={{ fontSize: "13px", fontWeight: 700, color, lineHeight: 1 }}>
+                              {sign}{points}
+                            </div>
+                            <div style={{ fontSize: "9px", marginTop: "2px", letterSpacing: "-0.5px" }}>
+                              {isPuffer ? <span style={{ color: T.textDim }}>·</span> : icons.join("")}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Legend */}
+              <div style={{ fontSize: "10px", color: T.textDim, lineHeight: 1.6, padding: "8px 4px", display: "flex", flexWrap: "wrap", gap: "10px", justifyContent: "center" }}>
+                <span>🏆 Bester</span>
+                <span>🔻 Schlechtester</span>
+                <span>🎯 Birdie</span>
+                <span>💧 Uschi</span>
+                <span>· Puffer</span>
+              </div>
+            </>
+          )}
+
+          {par3Indices.length === 0 && !uschiResult && (
+            <EmptyState icon="🎯" title="Noch keine Daten" sub="Spiele ein paar Löcher um die Übersicht zu sehen." />
+          )}
 
           <button onClick={() => setShowUschiReview(false)}
             style={{ ...S.btnSecondary, width: "100%", marginTop: "14px" }}>
