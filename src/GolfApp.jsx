@@ -1776,6 +1776,9 @@ export default function GolfApp() {
   // Loaded flag - prevents sync-loop on initial data load
   const [loaded, setLoaded] = useState(false);
   const [showWelcome, setShowWelcome] = useState(false);
+  // Sync conflict modal: shown when cloud data significantly differs from local
+  const [syncConflict, setSyncConflict] = useState(null);
+  // Shape: { localRounds, cloudData, cloudUpdatedAt, type: "fewer-rounds" | "fresh-pull" }
   const [welcomeSlide, setWelcomeSlide] = useState(0);
   // Undo toast for destructive actions
   const [undoAction, setUndoAction] = useState(null); // { message, undo: () => void }
@@ -1842,7 +1845,7 @@ export default function GolfApp() {
       try { const c = await window.storage.get("golf-custom-clubs"); if (c) setCustomClubs(JSON.parse(c.value)); } catch {}
       try { const s = await window.storage.get("golf-sync-code");    if (s?.value) setSyncCode(s.value); } catch {}
 
-      // Pull from cloud if sync code exists
+      // Pull from cloud if sync code exists — with safety checks
       try {
         const stored = await window.storage.get("golf-sync-code");
         const code = stored?.value;
@@ -1852,12 +1855,90 @@ export default function GolfApp() {
             const localTsRaw = await window.storage.get("golf-last-sync");
             const localTs = localTsRaw?.value ? parseInt(localTsRaw.value) : 0;
             const cloudTs = new Date(cloud.updated_at).getTime();
-            if (cloudTs > localTs) {
-              if (cloud.data.rounds)       setRounds(cloud.data.rounds);
-              if (cloud.data.friends)      setFriends(cloud.data.friends);
-              if (cloud.data.customClubs)  setCustomClubs(cloud.data.customClubs);
+
+            // Read current local data (already loaded above)
+            const localRoundsRaw = await window.storage.get("golf-rounds");
+            const localRounds = localRoundsRaw?.value ? JSON.parse(localRoundsRaw.value) : [];
+
+            const cloudRounds = Array.isArray(cloud.data.rounds) ? cloud.data.rounds : [];
+
+            // ── SAFETY CHECK 1: Cloud is empty / drastically smaller ──
+            // If we have local data and cloud has none (or much fewer), DON'T overwrite.
+            // This protects against accidental wipes from someone pushing empty state.
+            const cloudIsSuspicious = (
+              localRounds.length > 0 &&
+              cloudRounds.length < Math.max(1, Math.floor(localRounds.length * 0.5))
+            );
+
+            if (cloudIsSuspicious) {
+              // Show conflict modal — let user decide
+              console.warn(`Cloud has ${cloudRounds.length} rounds but local has ${localRounds.length}. Asking user.`);
+              setSyncConflict({
+                localRounds,
+                cloudData: cloud.data,
+                cloudUpdatedAt: cloud.updated_at,
+                type: "fewer-rounds",
+              });
+              // Important: do NOT update last-sync here, so we won't auto-push the local state yet
+            } else if (cloudTs > localTs) {
+              // ── SMART MERGE: combine local + cloud, dedup by id ──
+              const cloudIds = new Set(cloudRounds.map(r => r.id));
+              const localOnlyRounds = localRounds.filter(r => !cloudIds.has(r.id));
+              const merged = [...cloudRounds, ...localOnlyRounds].sort((a, b) =>
+                (b.savedAt || 0) - (a.savedAt || 0)
+              );
+
+              // Friends: union by name (keep cloud version if duplicate)
+              const cloudFriends = Array.isArray(cloud.data.friends) ? cloud.data.friends : [];
+              const localFriendsRaw = await window.storage.get("golf-friends");
+              const localFriends = localFriendsRaw?.value ? JSON.parse(localFriendsRaw.value) : [];
+              const cloudFriendNames = new Set(cloudFriends.map(f => f.name));
+              const localOnlyFriends = localFriends.filter(f => !cloudFriendNames.has(f.name));
+              const mergedFriends = [...cloudFriends, ...localOnlyFriends];
+
+              // Custom clubs: union by name
+              const cloudClubs = Array.isArray(cloud.data.customClubs) ? cloud.data.customClubs : [];
+              const localClubsRaw = await window.storage.get("golf-custom-clubs");
+              const localClubs = localClubsRaw?.value ? JSON.parse(localClubsRaw.value) : [];
+              const cloudClubNames = new Set(cloudClubs.map(c => c.name));
+              const localOnlyClubs = localClubs.filter(c => !cloudClubNames.has(c.name));
+              const mergedClubs = [...cloudClubs, ...localOnlyClubs];
+
+              setRounds(merged);
+              setFriends(mergedFriends);
+              setCustomClubs(mergedClubs);
               try { await window.storage.set("golf-last-sync", String(cloudTs)); } catch {}
+
+              if (localOnlyRounds.length > 0) {
+                console.log(`Smart merge: kept ${localOnlyRounds.length} local-only rounds`);
+              }
             }
+
+            // ── AUTO-BACKUP: snapshot the resulting state under daily key ──
+            try {
+              const today = new Date().toISOString().slice(0, 10);
+              const backupKey = `golf-rounds-backup-${today}`;
+              const existingBackup = await window.storage.get(backupKey);
+              if (!existingBackup?.value) {
+                // Take backup of whatever we have right now (before any conflict resolution)
+                const backupData = JSON.stringify({
+                  date: today,
+                  rounds: localRounds,
+                  friends: (await window.storage.get("golf-friends"))?.value || "[]",
+                  customClubs: (await window.storage.get("golf-custom-clubs"))?.value || "[]",
+                });
+                await window.storage.set(backupKey, backupData);
+                // Cleanup: keep only last 7 backups
+                const allKeys = await window.storage.list?.("golf-rounds-backup-");
+                if (allKeys?.keys) {
+                  const sorted = [...allKeys.keys].sort();
+                  while (sorted.length > 7) {
+                    const oldKey = sorted.shift();
+                    try { await window.storage.delete(oldKey); } catch {}
+                  }
+                }
+              }
+            } catch (e) { console.warn("Auto-backup failed", e); }
           }
         }
       } catch (e) { console.warn("Initial pull failed", e); }
@@ -1873,6 +1954,9 @@ export default function GolfApp() {
   // ── Auto-sync on data change (debounced) ──────────────────────────────────
   useEffect(() => {
     if (!loaded || !syncCode || !SYNC_ENABLED) return;
+    // SAFETY: don't auto-push while a sync conflict modal is open
+    // (otherwise the user's "wait, let me decide" gets overruled by an instant push)
+    if (syncConflict) return;
     clearTimeout(syncTimerRef.current);
     syncTimerRef.current = setTimeout(async () => {
       setSyncStatus("syncing");
@@ -1883,7 +1967,7 @@ export default function GolfApp() {
       }
     }, 2000);
     return () => clearTimeout(syncTimerRef.current);
-  }, [rounds, friends, customClubs, syncCode, loaded]);
+  }, [rounds, friends, customClubs, syncCode, loaded, syncConflict]);
 
   // ── Live ticker auto-push (debounced) ─────────────────────────────────────
   // When a live ticker is active, push current round state to Supabase on any change.
@@ -6233,6 +6317,102 @@ WICHTIG:
     );
   };
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SYNC CONFLICT MODAL — protects against accidental data loss when cloud
+  // has fewer rounds than local (e.g., someone else pushed empty state)
+  // ═══════════════════════════════════════════════════════════════════════════
+  const renderSyncConflict = () => {
+    if (!syncConflict) return null;
+    const localCount = syncConflict.localRounds.length;
+    const cloudRounds = syncConflict.cloudData.rounds || [];
+    const cloudCount = cloudRounds.length;
+    const cloudDate = syncConflict.cloudUpdatedAt
+      ? new Date(syncConflict.cloudUpdatedAt).toLocaleString("de-AT", {
+          day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"
+        })
+      : "?";
+
+    const keepLocal = async () => {
+      // User chose: keep local data — overwrite cloud on next push
+      setSyncConflict(null);
+      // Trigger a push by bumping last-sync to NOW (so next auto-push fires)
+      try { await window.storage.set("golf-last-sync", "0"); } catch {}
+      showUndoToast(`✓ Lokale Daten behalten (${localCount} Runden)`, null);
+    };
+
+    const useCloud = async () => {
+      if (!confirm(`Wirklich ${localCount} lokale Runden durch ${cloudCount} Cloud-Runden ersetzen? Das kann nicht rückgängig gemacht werden!`)) return;
+      const cloudData = syncConflict.cloudData;
+      setRounds(cloudData.rounds || []);
+      setFriends(cloudData.friends || []);
+      setCustomClubs(cloudData.customClubs || []);
+      try { await window.storage.set("golf-last-sync", String(new Date(syncConflict.cloudUpdatedAt).getTime())); } catch {}
+      setSyncConflict(null);
+      showUndoToast("✓ Cloud-Daten geladen", null);
+    };
+
+    const merge = async () => {
+      const cloudIds = new Set(cloudRounds.map(r => r.id));
+      const localOnly = syncConflict.localRounds.filter(r => !cloudIds.has(r.id));
+      const merged = [...cloudRounds, ...localOnly].sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+
+      // Friends + clubs merge
+      const cloudFriends = syncConflict.cloudData.friends || [];
+      const cloudFriendNames = new Set(cloudFriends.map(f => f.name));
+      const localFriendsRaw = await window.storage.get("golf-friends");
+      const localFriends = localFriendsRaw?.value ? JSON.parse(localFriendsRaw.value) : [];
+      const mergedFriends = [...cloudFriends, ...localFriends.filter(f => !cloudFriendNames.has(f.name))];
+
+      const cloudClubs = syncConflict.cloudData.customClubs || [];
+      const cloudClubNames = new Set(cloudClubs.map(c => c.name));
+      const localClubsRaw = await window.storage.get("golf-custom-clubs");
+      const localClubs = localClubsRaw?.value ? JSON.parse(localClubsRaw.value) : [];
+      const mergedClubs = [...cloudClubs, ...localClubs.filter(c => !cloudClubNames.has(c.name))];
+
+      setRounds(merged);
+      setFriends(mergedFriends);
+      setCustomClubs(mergedClubs);
+      try { await window.storage.set("golf-last-sync", "0"); } catch {} // force re-push
+      setSyncConflict(null);
+      showUndoToast(`✓ Zusammengeführt: ${merged.length} Runden`, null);
+    };
+
+    return (
+      <div style={{ position: "fixed", inset: 0, background: "#000000dd", zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center", padding: "16px" }}>
+        <div style={{ width: "100%", maxWidth: "440px", background: T.surface1, borderRadius: "16px", border: `2px solid ${T.gold}`, padding: "22px" }}>
+          <div style={{ fontSize: "32px", textAlign: "center", marginBottom: "12px" }}>⚠️</div>
+          <h3 className="serif" style={{ fontSize: "20px", margin: "0 0 8px", color: T.text, textAlign: "center" }}>
+            Sync-Warnung
+          </h3>
+          <p style={{ fontSize: "12px", color: T.textSoft, lineHeight: 1.5, marginBottom: "14px" }}>
+            Die Cloud hat <b style={{ color: T.gold }}>{cloudCount} Runde{cloudCount === 1 ? "" : "n"}</b>, aber dein Gerät hat <b style={{ color: T.gold }}>{localCount} Runde{localCount === 1 ? "" : "n"}</b>.
+            <br /><br />
+            Das kann passieren wenn jemand den gleichen Sync-Code <span style={{ color: T.text }}>{syncCode}</span> nutzt. Cloud-Update war: <span style={{ color: T.textDim }}>{cloudDate}</span>.
+          </p>
+
+          <div style={{ background: T.surface2, padding: "10px 12px", borderRadius: "8px", fontSize: "11px", color: T.textSoft, marginBottom: "16px", lineHeight: 1.5 }}>
+            <b style={{ color: T.gold }}>Empfehlung:</b> "Lokal behalten" wenn du sicher bist dass deine lokalen Daten die richtigen sind — Cloud wird dann mit deinen Daten überschrieben.
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+            <button onClick={keepLocal}
+              style={{ ...S.btnPrimary, width: "100%", padding: "12px", fontSize: "13px" }}>
+              🛡️ Lokal behalten ({localCount} Runden) — empfohlen
+            </button>
+            <button onClick={merge}
+              style={{ ...S.btnSecondary, width: "100%", padding: "12px", fontSize: "13px" }}>
+              🔀 Zusammenführen (Union beider Stände)
+            </button>
+            <button onClick={useCloud}
+              style={{ ...S.btnSecondary, width: "100%", padding: "12px", fontSize: "13px", color: T.double, borderColor: `${T.double}40` }}>
+              ⚠️ Cloud verwenden (lokale Daten verlieren)
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderUndoToast = () => {
     if (!undoAction) return null;
     return (
@@ -6961,6 +7141,7 @@ WICHTIG:
       {renderStatsHoleDetail()}
       {renderStatsImportModal()}
       {renderRoundAnalysis()}
+      {renderSyncConflict()}
       {renderUndoToast()}
     </div>
   );
