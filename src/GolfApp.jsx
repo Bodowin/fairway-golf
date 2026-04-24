@@ -708,6 +708,34 @@ const isValid    = v => typeof v === "number" && v > 0;
 const sfNetto    = (g, hs, par) => isStrich(g) ? 0 : (isValid(g) ? Math.max(0, par - (g - hs) + 2) : null);
 const sfBrutto   = (g, par)     => isStrich(g) ? 0 : (isValid(g) ? Math.max(0, par - g + 2) : null);
 
+// Check whether a round is fully complete (all players, all holes have a score or strich).
+// Returns { complete, holesPlayed, totalHoles, playersCount }.
+// Also detects "not started" (zero scores across the board).
+function getRoundProgress(round) {
+  const players = round.players || [];
+  const holes = round.holes || [];
+  const scores = round.scores || {};
+  const totalHoles = holes.length;
+  if (players.length === 0 || totalHoles === 0) {
+    return { complete: false, notStarted: true, holesPlayed: 0, totalHoles, playersCount: players.length };
+  }
+  let totalFilled = 0;
+  let maxHolesForAnyPlayer = 0;
+  players.forEach(p => {
+    let n = 0;
+    for (let i = 0; i < totalHoles; i++) {
+      const v = scores[p.id]?.[i];
+      if (isValid(v) || isStrich(v)) n++;
+    }
+    totalFilled += n;
+    if (n > maxHolesForAnyPlayer) maxHolesForAnyPlayer = n;
+  });
+  const expected = players.length * totalHoles;
+  const complete = totalFilled === expected;
+  const notStarted = totalFilled === 0;
+  return { complete, notStarted, holesPlayed: maxHolesForAnyPlayer, totalHoles, playersCount: players.length };
+}
+
 
 const scoreColor = (gross, par) => {
   if (isStrich(gross)) return T.strich;
@@ -1566,8 +1594,28 @@ export default function GolfApp() {
     setGameMode(r.gameMode || "stableford");
     setTeams(r.teams || null);
     setPar3Data(r.par3Data || r.uschiInputs || {});
-    setCurrentHole(0); setScoringMode("batch");
-    setView("results");
+    // If incomplete, jump into scoring so user can continue where they left off.
+    const progress = getRoundProgress(r);
+    if (progress.notStarted) {
+      setCurrentHole(0); setScoringMode("batch");
+      setView("setup");
+    } else if (!progress.complete) {
+      // Jump to first hole with any missing score
+      let firstMissing = 0;
+      for (let i = 0; i < r.holes.length; i++) {
+        const allDone = r.players.every(p => {
+          const v = r.scores[p.id]?.[i];
+          return isValid(v) || isStrich(v);
+        });
+        if (!allDone) { firstMissing = i; break; }
+      }
+      setCurrentHole(firstMissing);
+      setScoringMode("live");
+      setView("scoring");
+    } else {
+      setCurrentHole(0); setScoringMode("batch");
+      setView("results");
+    }
   };
   // Show undo toast — fires an action that can be reverted within N seconds.
   const showUndoToast = (message, undoFn) => {
@@ -1602,6 +1650,47 @@ export default function GolfApp() {
     setClubQ(""); setPickedClub(null);
     setCurrentHole(0); setScoringMode("batch");
     setView("setup");
+  };
+
+  // Copy last completed round's setup: club, tee, players (with current HCPs), game mode.
+  // Scores and par3Data are reset — it's a fresh round, same people/course.
+  const copyLastRound = () => {
+    const last = rounds[0];
+    if (!last) {
+      alert("Keine vorherige Runde zum Kopieren vorhanden.");
+      return;
+    }
+    // Refresh player HCPs from friends list (HCPs might have changed)
+    const refreshedPlayers = (last.players || []).map(p => {
+      const friend = friends.find(f => f.name === p.name);
+      return {
+        ...p,
+        hcp: friend ? friend.hcp : p.hcp,
+      };
+    });
+
+    setLoadedRoundId(null);
+    setCfg({
+      ...last.cfg,
+      date: toDay(),        // today's date
+      name: "",             // fresh name
+    });
+    setHoles(last.holes);
+    setPlayers(refreshedPlayers);
+    setScores({});          // no scores yet
+    setGameMode(last.gameMode || "stableford");
+    setTeams(last.teams || null);
+    setPar3Data({});        // no par-3 data yet
+    setClubQ("");
+    setPickedClub(null);
+    setCurrentHole(0);
+    setScoringMode("batch");
+    setView("setup");
+
+    showUndoToast(
+      `🔁 Runde kopiert von ${fmtDate(last.cfg?.date)} (${last.cfg?.clubName || "Runde"})`,
+      () => {}
+    );
   };
 
   // ── Import / sync
@@ -1658,6 +1747,127 @@ export default function GolfApp() {
     try { await window.storage.delete("golf-sync-code"); } catch {}
     try { await window.storage.delete("golf-last-sync"); } catch {}
     setShowSyncModal(false);
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // JSON EXPORT / IMPORT — Local backup independent of Supabase
+  // ═══════════════════════════════════════════════════════════════════════════
+  const exportAllData = () => {
+    const payload = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      app: "Fairway",
+      data: {
+        rounds,
+        friends,
+        customClubs,
+      },
+    };
+    const json = JSON.stringify(payload, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    a.href = url;
+    a.download = `fairway-backup-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showUndoToast(`✓ Backup exportiert (${rounds.length} Runden, ${friends.length} Freunde, ${customClubs.length} Clubs)`, () => {});
+  };
+
+  // Parse imported JSON, validate shape, return { ok, data, error }
+  const parseImportJson = (text) => {
+    try {
+      const parsed = JSON.parse(text);
+      if (!parsed || typeof parsed !== "object") return { ok: false, error: "Datei ist kein gültiges JSON-Objekt." };
+      if (!parsed.data || typeof parsed.data !== "object") return { ok: false, error: "Keine gültigen Fairway-Daten gefunden." };
+      const d = parsed.data;
+      const rounds = Array.isArray(d.rounds) ? d.rounds : [];
+      const friends = Array.isArray(d.friends) ? d.friends : [];
+      const customClubs = Array.isArray(d.customClubs) ? d.customClubs : [];
+      return { ok: true, data: { rounds, friends, customClubs }, meta: { exportedAt: parsed.exportedAt } };
+    } catch (e) {
+      return { ok: false, error: "Datei konnte nicht gelesen werden: " + (e.message || "unbekannter Fehler") };
+    }
+  };
+
+  // Import handler called from file input. Asks user for Merge vs Replace.
+  const handleImportFile = async (file) => {
+    if (!file) return;
+    const text = await file.text();
+    const result = parseImportJson(text);
+    if (!result.ok) {
+      alert("❌ Import fehlgeschlagen\n\n" + result.error);
+      return;
+    }
+    const d = result.data;
+    const summary = `📥 Import bereit:\n\n• ${d.rounds.length} Runden\n• ${d.friends.length} Freunde\n• ${d.customClubs.length} Custom-Clubs`;
+
+    // Ask Merge or Replace
+    const hasLocal = rounds.length > 0 || friends.length > 0 || customClubs.length > 0;
+    let mode;
+    if (!hasLocal) {
+      if (!confirm(summary + "\n\nImportieren?")) return;
+      mode = "replace";
+    } else {
+      const choice = prompt(
+        summary +
+        `\n\nAktuell sind vorhanden:\n• ${rounds.length} Runden\n• ${friends.length} Freunde\n• ${customClubs.length} Custom-Clubs\n\nTippe:\n  M = MERGE (beides behalten)\n  R = REPLACE (lokale Daten überschreiben)\n  Abbrechen = Import stoppen`,
+        "M"
+      );
+      if (choice === null) return;
+      const c = choice.trim().toUpperCase();
+      if (c !== "M" && c !== "R") {
+        alert("Ungültige Eingabe. Import abgebrochen.");
+        return;
+      }
+      mode = c === "R" ? "replace" : "merge";
+    }
+
+    // Save backup for undo
+    const backup = { rounds, friends, customClubs };
+
+    let newRounds, newFriends, newClubs;
+    if (mode === "replace") {
+      newRounds = d.rounds;
+      newFriends = d.friends;
+      newClubs = d.customClubs;
+    } else {
+      // MERGE: rounds by id, friends by name, clubs by name
+      const roundIds = new Set(rounds.map(r => r.id));
+      newRounds = [...rounds, ...d.rounds.filter(r => !roundIds.has(r.id))].slice(0, 50);
+      const friendNames = new Set(friends.map(f => f.name));
+      newFriends = [...friends, ...d.friends.filter(f => !friendNames.has(f.name))];
+      const clubNames = new Set(customClubs.map(c => c.name));
+      newClubs = [...customClubs, ...d.customClubs.filter(c => !clubNames.has(c.name))];
+    }
+
+    setRounds(newRounds);
+    setFriends(newFriends);
+    setCustomClubs(newClubs);
+    try {
+      await window.storage.set("golf-rounds", JSON.stringify(newRounds));
+      await window.storage.set("golf-friends", JSON.stringify(newFriends));
+      await window.storage.set("golf-custom-clubs", JSON.stringify(newClubs));
+    } catch {}
+
+    // Show undo
+    showUndoToast(
+      `✓ Import erfolgreich (${mode === "replace" ? "ersetzt" : "zusammengeführt"})`,
+      async () => {
+        setRounds(backup.rounds);
+        setFriends(backup.friends);
+        setCustomClubs(backup.customClubs);
+        try {
+          await window.storage.set("golf-rounds", JSON.stringify(backup.rounds));
+          await window.storage.set("golf-friends", JSON.stringify(backup.friends));
+          await window.storage.set("golf-custom-clubs", JSON.stringify(backup.customClubs));
+        } catch {}
+        setUndoAction(null);
+      }
+    );
   };
 
   // ── Live mode navigation
@@ -1776,6 +1986,62 @@ export default function GolfApp() {
             <span>Neue Runde starten</span>
             <span style={{ fontSize: "18px" }}>→</span>
           </button>
+
+          {rounds.length > 0 && (
+            <button onClick={copyLastRound}
+              style={{
+                width: "100%", marginTop: "8px",
+                padding: "12px 16px",
+                background: T.surface2,
+                color: T.text,
+                border: `1px solid ${T.line}`,
+                borderRadius: "10px",
+                fontSize: "13px",
+                fontFamily: "Inter, sans-serif",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+                cursor: "pointer",
+              }}>
+              <span>🔁</span>
+              <span>Wie letztes Mal — gleiche Besetzung</span>
+            </button>
+          )}
+
+          {/* Continuation hint for incomplete rounds */}
+          {(() => {
+            const running = rounds.find(r => {
+              const p = getRoundProgress(r);
+              return !p.complete && !p.notStarted;
+            });
+            if (!running) return null;
+            const p = getRoundProgress(running);
+            return (
+              <button onClick={() => loadRound(running)}
+                style={{
+                  width: "100%", marginTop: "8px",
+                  padding: "14px 16px",
+                  background: `${T.gold}12`,
+                  color: T.text,
+                  border: `1px solid ${T.gold}60`,
+                  borderRadius: "10px",
+                  fontSize: "13px",
+                  fontFamily: "Inter, sans-serif",
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  cursor: "pointer",
+                  textAlign: "left",
+                }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", flex: 1, minWidth: 0 }}>
+                  <span style={{ fontSize: "18px" }}>📝</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, color: T.gold, fontSize: "12px" }}>LAUFENDE RUNDE</div>
+                    <div style={{ fontSize: "12px", color: T.textSoft, marginTop: "2px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {running.cfg.clubName || "Runde"} · Loch {p.holesPlayed}/{p.totalHoles}
+                    </div>
+                  </div>
+                </div>
+                <span style={{ fontSize: "16px", color: T.gold }}>→</span>
+              </button>
+            );
+          })()}
 
           <button
             onClick={() => { setWelcomeSlide(0); setShowWelcome(true); }}
@@ -1910,6 +2176,7 @@ export default function GolfApp() {
   // Round card (inline, not a sub-component to avoid remounts)
   const renderRoundCard = (r, showFull) => {
     const rClub = allClubs.find(c => c.name === r.cfg.clubName);
+    const progress = getRoundProgress(r);
     const sortedPlayers = r.players.map(p => {
       const tee = playerTee(p, r.cfg, rClub);
       const ph = tee ? calcPH(p.hcp, tee.slope, tee.cr, tee.par || sumPar(r.holes)) : 0;
@@ -1921,10 +2188,39 @@ export default function GolfApp() {
       return { p, sfNT, tee };
     }).sort((a, b) => b.sfNT - a.sfNT);
     const top = sortedPlayers[0];
+    const isRunning = !progress.complete && !progress.notStarted;
+    const isNotStarted = progress.notStarted;
 
     return (
       <div key={r.id} onClick={() => loadRound(r)} className="card-hover"
-        style={{ ...S.card, cursor: "pointer", padding: "14px 16px", marginBottom: "10px", position: "relative" }}>
+        style={{
+          ...S.card, cursor: "pointer", padding: "14px 16px", marginBottom: "10px", position: "relative",
+          border: isRunning ? `1px solid ${T.gold}60` : S.card.border,
+          background: isRunning ? `${T.gold}08` : S.card.background,
+        }}>
+        {/* Running/incomplete badge */}
+        {isRunning && (
+          <div style={{
+            position: "absolute", top: "10px", right: "38px",
+            fontSize: "10px", fontWeight: 700, color: T.gold,
+            background: `${T.gold}20`, border: `1px solid ${T.gold}60`,
+            padding: "2px 8px", borderRadius: "4px",
+            letterSpacing: "0.04em",
+          }}>
+            📝 LÄUFT · {progress.holesPlayed}/{progress.totalHoles}
+          </div>
+        )}
+        {isNotStarted && (
+          <div style={{
+            position: "absolute", top: "10px", right: "38px",
+            fontSize: "10px", fontWeight: 700, color: T.textDim,
+            background: T.surface3, border: `1px solid ${T.line}`,
+            padding: "2px 8px", borderRadius: "4px",
+            letterSpacing: "0.04em",
+          }}>
+            · LEER
+          </div>
+        )}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div style={{ flex: 1, minWidth: 0, paddingRight: "24px" }}>
             <div style={{ fontSize: "14px", fontWeight: 600, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginBottom: "3px" }}>
@@ -1934,8 +2230,8 @@ export default function GolfApp() {
               {fmtDate(r.cfg.date)} · {r.cfg.numHoles}L · {r.players.length} {r.players.length === 1 ? "Spieler" : "Spieler"}
             </div>
           </div>
-          {top && (
-            <div style={{ textAlign: "right" }}>
+          {top && !isNotStarted && (
+            <div style={{ textAlign: "right", marginTop: isRunning ? "14px" : "0" }}>
               <div className="mono" style={{ fontSize: "20px", fontWeight: 700, color: T.gold, lineHeight: 1 }}>{top.sfNT}</div>
               <div style={{ fontSize: "9px", color: T.textDim, letterSpacing: "0.06em", marginTop: "2px" }}>SF NETTO</div>
             </div>
@@ -4824,6 +5120,36 @@ WICHTIG:
               </button>
             </>
           )}
+
+          {/* Backup via JSON export/import — independent of cloud */}
+          <div style={{ marginTop: "22px", paddingTop: "18px", borderTop: `1px solid ${T.line}` }}>
+            <div style={{ ...S.eyebrow, marginBottom: "10px" }}>Lokales Backup</div>
+            <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, marginBottom: "10px" }}>
+              Sichere alle deine Runden, Freunde und Clubs als JSON-Datei auf deinem Gerät — unabhängig von der Cloud.
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+              <button onClick={exportAllData}
+                style={{ ...S.btnSecondary, fontSize: "12px", padding: "10px" }}>
+                📥 Exportieren
+              </button>
+              <label
+                htmlFor="fairway-import-file"
+                style={{ ...S.btnSecondary, fontSize: "12px", padding: "10px", textAlign: "center", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                📤 Importieren
+              </label>
+              <input
+                id="fairway-import-file"
+                type="file"
+                accept="application/json,.json"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (file) await handleImportFile(file);
+                  e.target.value = ""; // allow re-import of same file
+                }}
+                style={{ display: "none" }}
+              />
+            </div>
+          </div>
 
           <button onClick={() => setShowSyncModal(false)}
             style={{ ...S.btnGhost, width: "100%", marginTop: "18px", fontSize: "13px" }}>Schließen</button>
