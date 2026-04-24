@@ -100,8 +100,9 @@ async function cloudPush(syncCode, data) {
 async function cloudPull(syncCode) {
   if (!SYNC_ENABLED || !syncCode) return null;
   try {
+    const encodedCode = encodeURIComponent(syncCode);
     const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/user_data?sync_code=eq.${syncCode}&select=*`,
+      `${SUPABASE_URL}/rest/v1/user_data?sync_code=eq.${encodedCode}&select=*`,
       { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
     );
     if (!res.ok) return null;
@@ -1625,19 +1626,30 @@ export default function GolfApp() {
 
   const setupSync = async (code) => {
     const clean = cleanSync(code);
-    if (clean.length !== 8) return false;
+    if (!isValidSyncCode(clean)) {
+      alert("Ungültiger Code. Er muss mindestens 4 Zeichen lang sein (Buchstaben, Zahlen, Bindestrich).");
+      return false;
+    }
     setSyncCode(clean);
     try { await window.storage.set("golf-sync-code", clean); } catch {}
     // Pull existing cloud data if any
     if (SYNC_ENABLED) {
       const cloud = await cloudPull(clean);
       if (cloud && cloud.data) {
+        // Existing code found → load data
         if (cloud.data.rounds)      setRounds(cloud.data.rounds);
         if (cloud.data.friends)     setFriends(cloud.data.friends);
         if (cloud.data.customClubs) setCustomClubs(cloud.data.customClubs);
+        setShowSyncModal(false);
+        showUndoToast(`✓ Mit "${clean}" verbunden — Daten geladen`, () => {});
+      } else {
+        // New code → will push current data on next change
+        setShowSyncModal(false);
+        showUndoToast(`✓ Neuer Code "${clean}" angelegt — deine Daten werden gesichert`, () => {});
       }
+    } else {
+      setShowSyncModal(false);
     }
-    setShowSyncModal(false);
     return true;
   };
 
@@ -1763,6 +1775,24 @@ export default function GolfApp() {
             style={{ ...S.btnPrimary, width: "100%", padding: "18px", fontSize: "16px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <span>Neue Runde starten</span>
             <span style={{ fontSize: "18px" }}>→</span>
+          </button>
+
+          <button
+            onClick={() => { setWelcomeSlide(0); setShowWelcome(true); }}
+            style={{
+              width: "100%", marginTop: "10px",
+              padding: "12px 16px",
+              background: "transparent",
+              color: T.textSoft,
+              border: `1px dashed ${T.line}`,
+              borderRadius: "10px",
+              fontSize: "12px",
+              fontFamily: "Inter, sans-serif",
+              display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+              cursor: "pointer",
+            }}>
+            <span>ℹ️</span>
+            <span>Hilfe & Spielregeln</span>
           </button>
         </div>
 
@@ -4293,6 +4323,31 @@ WICHTIG:
         ),
       },
       {
+        icon: "⚖️",
+        title: "Fairer HC-Ausgleich",
+        body: (
+          <>
+            <p style={{ fontSize: "13px", color: T.textSoft, lineHeight: 1.6, margin: "0 0 10px" }}>
+              Damit Uschi auch mit gemischten Handicaps fair bleibt, gibt's automatisch Extra-Schläge für schwächere Spieler:
+            </p>
+            <div style={{ background: T.surface2, border: `1px solid ${T.line}`, borderRadius: "8px", padding: "12px", marginBottom: "12px" }}>
+              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "6px" }}>Die Formel</div>
+              <div style={{ fontSize: "12px", color: T.text, lineHeight: 1.6 }}>
+                Der Spieler mit dem <b>niedrigsten Kurs-HCP</b> ist der Maßstab (0 Extra-Schläge). Alle anderen bekommen <b>80% ihres HCP-Abstands</b> zu ihm als Extra-Schläge.
+              </div>
+            </div>
+            <div style={{ fontSize: "12px", color: T.textSoft, lineHeight: 1.6, marginBottom: "8px" }}>
+              <b style={{ color: T.text }}>Beispiel:</b><br/>
+              Max (HC 16) · Bodo (HC 31) · Thorsten (HC 33)<br/>
+              → Max: <span className="mono">0</span> · Bodo: <span className="mono">(31−16)×0.8 = 12</span> · Thorsten: <span className="mono">14</span>
+            </div>
+            <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, margin: 0, fontStyle: "italic" }}>
+              Die Extra-Schläge werden auf die schwersten Löcher (niedrigster Stroke-Index) verteilt. Bei 9-Loch-Runden halbiert.
+            </p>
+          </>
+        ),
+      },
+      {
         icon: "🚀",
         title: "Zum Loslegen",
         body: (
@@ -4755,11 +4810,12 @@ WICHTIG:
               <div style={{ ...S.eyebrow, marginBottom: "8px" }}>Vorhandenen Code eingeben</div>
               <input value={syncInput}
                 onChange={e => setSyncInput(cleanSync(e.target.value))}
-                placeholder="z.B. BODO-TKTR oder KF7M2XRB"
+                placeholder="z.B. GOLF-GANG-2026"
                 maxLength={20}
                 style={{ ...S.input, textTransform: "uppercase", letterSpacing: "0.1em", fontFamily: "JetBrains Mono, monospace" }}/>
               <div style={{ fontSize: "10px", color: T.textDim, marginTop: "4px", lineHeight: 1.4 }}>
-                💡 Du kannst einen eigenen Code wählen (min. 4 Zeichen, Buchstaben/Zahlen/Bindestrich)
+                💡 Wähle einen eigenen Code für deine Gruppe (4-20 Zeichen: Buchstaben, Zahlen, Bindestrich).<br/>
+                Jeder mit dem Code kann Daten lesen und schreiben — wie ein Passwort.
               </div>
               <button onClick={async () => await setupSync(syncInput)}
                 disabled={!isValidSyncCode(syncInput)}
