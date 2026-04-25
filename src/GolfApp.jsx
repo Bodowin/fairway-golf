@@ -850,6 +850,7 @@ function aggregateClubStats(clubName, allRounds) {
     grossList: [], // all gross scores incl. strikes-as-par+3
     realGrossList: [], // only non-strike scores
     birdieCount: 0, parCount: 0, bogeyCount: 0, doubleCount: 0, strichCount: 0,
+    ladyCount: 0, // total # ladies across all rounds and players on this hole
     scores: [], // { playerName, gross, date, isStrich }
   }));
 
@@ -867,12 +868,14 @@ function aggregateClubStats(clubName, allRounds) {
           roundsPlayed: 0,
           sfList: [], // {score, date, clubName} per round
           birdies: 0, pars: 0, bogeys: 0, doubles: 0, strichCount: 0,
+          ladiesTotal: 0, // total # ladies across all rounds at this club
           uschi: { total: 0, par3Wins: 0, bestCarry: 0, burntCount: 0 },
           perHole: holes.map((h, i) => ({
             holeIdx: i, par: h.par, si: h.si,
             grossList: [], // strikes treated as par+3
             realGrossList: [], // only played scores
             birdieCount: 0, parCount: 0, bogeyCount: 0, doubleCount: 0, strichCount: 0,
+            ladyCount: 0,
             scores: [], // { gross, date, isStrich }
           })),
         };
@@ -954,6 +957,16 @@ function aggregateClubStats(clubName, allRounds) {
       });
 
       pm.sfList.push({ score: roundSF, date: roundDate });
+
+      // Aggregate ladies for this player from this round's ladies map
+      const rLadies = r.ladies || {};
+      const playerLadies = rLadies[p.id] || [];
+      pm.ladiesTotal += playerLadies.length;
+      // Increment per-hole counts (both for the player and the global hole stats)
+      playerLadies.forEach(holeIdx => {
+        if (holeIdx < pm.perHole.length) pm.perHole[holeIdx].ladyCount++;
+        if (holeIdx < holeStats.length) holeStats[holeIdx].ladyCount++;
+      });
 
       // Uschi data (if available)
       if ((r.gameMode === "uschi-single" || r.gameMode === "uschi-team") && r.uschiResult?.totals?.[p.id]) {
@@ -1935,6 +1948,10 @@ export default function GolfApp() {
   const [holes, setHoles] = useState(makeHoles(72, 18));
   const [players, setPlayers] = useState([]);
   const [scores, setScores] = useState({});
+  // Lady tradition: per-player set of hole indices where a "Lady" was recorded.
+  // A "Lady" is when a player fails to pass the women's tee box on tee shot —
+  // costs them a round of beer. Stored as { [playerId]: [holeIdx, holeIdx, ...] }
+  const [ladies, setLadies] = useState({});
   // Persisted data
   const [rounds, setRounds] = useState([]);
   const [friends, setFriends] = useState([]);
@@ -2236,6 +2253,7 @@ export default function GolfApp() {
         gameMode,
         teams,
         par3Data,
+        ladies,
         clubName: cfg.clubName,
         syncCode: syncCode || null,
         selectedClubSnapshot: selectedClub ? {
@@ -2249,7 +2267,7 @@ export default function GolfApp() {
       await liveUpdate(liveCode, payload);
     }, 2500);
     return () => clearTimeout(livePushTimerRef.current);
-  }, [liveCode, liveStatus, cfg, holes, players, scores, gameMode, teams, par3Data, selectedClub, syncCode]);
+  }, [liveCode, liveStatus, cfg, holes, players, scores, gameMode, teams, par3Data, selectedClub, syncCode, ladies]);
 
   // ── Stable callbacks (prevent remounts) ───────────────────────────────────
   const onClubQ   = useCallback(e => { setClubQ(e.target.value); setShowDD(true); }, []);
@@ -2463,6 +2481,20 @@ export default function GolfApp() {
     return { ...s, [pid]: ps };
   });
 
+  // Toggle the "Lady" status for a player on a hole.
+  // A "Lady" = player did not pass the women's tee on tee shot (German tradition: pays a beer).
+  const toggleLady = (pid, hi) => {
+    setLadies(l => {
+      const playerLadies = l[pid] || [];
+      const has = playerLadies.includes(hi);
+      const updated = has
+        ? playerLadies.filter(x => x !== hi)
+        : [...playerLadies, hi].sort((a, b) => a - b);
+      return { ...l, [pid]: updated };
+    });
+  };
+  const hasLady = (pid, hi) => (ladies[pid] || []).includes(hi);
+
   // Auto-advance for number pad
   // Batch mode: same player, next hole → then next player, hole 0 (reads top-to-bottom per player)
   // Live mode: same hole, next player → then next hole, player 0 (reads hole-by-hole)
@@ -2650,7 +2682,7 @@ export default function GolfApp() {
   // ── Rounds
   const saveRound = async () => {
     let u;
-    const extra = { gameMode, teams, par3Data };
+    const extra = { gameMode, teams, par3Data, ladies };
     if (loadedRoundId) {
       u = rounds.map(r => r.id === loadedRoundId
         ? { ...r, cfg, holes, players, scores, ...extra, savedAt: new Date().toISOString() }
@@ -2683,6 +2715,7 @@ export default function GolfApp() {
     setGameMode(r.gameMode || "stableford");
     setTeams(r.teams || null);
     setPar3Data(r.par3Data || r.uschiInputs || {});
+    setLadies(r.ladies || {});
     // If incomplete, jump into scoring so user can continue where they left off.
     const progress = getRoundProgress(r);
     if (progress.notStarted) {
@@ -2736,6 +2769,7 @@ export default function GolfApp() {
     setCfg({ name: "", date: toDay(), numHoles: 18, clubName: "", defaultTeeName: "" });
     setHoles(makeHoles(72, 18)); setPlayers([]); setScores({});
     setGameMode("stableford"); setTeams(null); setPar3Data({});
+    setLadies({});
     setClubQ(""); setPickedClub(null);
     setCurrentHole(0); setScoringMode("batch");
     setView("setup");
@@ -4066,6 +4100,22 @@ export default function GolfApp() {
                   ⛳ SF
                 </span>
               )}
+              {/* Lady count badge — only show if any ladies recorded in this round */}
+              {(() => {
+                const total = Object.values(r.ladies || {}).reduce((s, arr) => s + (arr?.length || 0), 0);
+                if (total === 0) return null;
+                return (
+                  <span style={{
+                    fontSize: "9px", padding: "1px 6px",
+                    background: `${T.gold}20`, color: T.gold,
+                    border: `1px solid ${T.gold}60`,
+                    borderRadius: "4px", letterSpacing: "0.04em", fontWeight: 700,
+                    whiteSpace: "nowrap",
+                  }} title={`${total} ${total === 1 ? "Lady" : "Ladies"} in dieser Runde`}>
+                    👯 {total}
+                  </span>
+                );
+              })()}
             </div>
             <div style={{ fontSize: "11px", color: T.textSoft, marginBottom: "4px" }}>
               {fmtDate(r.cfg.date)} · {r.cfg.numHoles}L
@@ -4993,6 +5043,9 @@ export default function GolfApp() {
                         {hs > 0 && !isEmpty && (
                           <span style={{ position: "absolute", top: "-4px", right: "-3px", fontSize: "8px", fontWeight: 700, background: T.gold, color: T.canvas, borderRadius: "4px", padding: "1px 3px", lineHeight: 1 }}>+{hs}</span>
                         )}
+                        {hasLady(p.id, i) && (
+                          <span style={{ position: "absolute", bottom: "-3px", left: "-3px", fontSize: "10px", lineHeight: 1 }} title="Lady">👯</span>
+                        )}
                         {display}
                       </button>
                     </td>
@@ -5286,7 +5339,11 @@ export default function GolfApp() {
     const headerH = 320;
     const footerH = 100;
     const teamBlockH = isTeamMode ? 260 : 0; // extra space for team ranking at top
-    const H = headerH + teamBlockH + rowH * players.length + footerH + (isUschi ? 140 : 0);
+    // Reserve space for ladies section if any ladies recorded
+    const totalLadiesPreview = Object.values(ladies || {}).reduce((s, arr) => s + (arr?.length || 0), 0);
+    const playersWithLadies = players.filter(p => (ladies[p.id] || []).length > 0).length;
+    const ladiesH = totalLadiesPreview > 0 ? 80 + playersWithLadies * 32 : 0;
+    const H = headerH + teamBlockH + rowH * players.length + footerH + (isUschi ? 140 : 0) + ladiesH;
 
     const canvas = document.createElement("canvas");
     canvas.width = W; canvas.height = H;
@@ -5532,6 +5589,34 @@ export default function GolfApp() {
         ctx.textAlign = "right";
         ctx.fillStyle = "#c9a85c";
         ctx.fillText(`${s.sfNT}`, W - 70, y);
+        ctx.textAlign = "left";
+        y += 32;
+      });
+    }
+
+    // Ladies section — only if any ladies recorded in this round
+    const totalLadies = Object.values(ladies || {}).reduce((s, arr) => s + (arr?.length || 0), 0);
+    if (totalLadies > 0) {
+      // Build per-player breakdown
+      const ladiesPerPlayer = players
+        .map(p => ({ name: p.name, count: (ladies[p.id] || []).length }))
+        .filter(x => x.count > 0)
+        .sort((a, b) => b.count - a.count);
+
+      ctx.fillStyle = "#3a4a40";
+      ctx.fillRect(70, y + 14, W - 140, 1);
+      y += 40;
+      ctx.fillStyle = "#c9a85c";
+      ctx.font = "600 22px 'Inter', sans-serif";
+      ctx.fillText(`👯 LADY-TRADITION · ${totalLadies} ${totalLadies === 1 ? "BIER" : "BIERE"}`, 70, y);
+      y += 40;
+      ladiesPerPlayer.forEach(pp => {
+        ctx.fillStyle = "#cdd5c8";
+        ctx.font = "500 22px 'Inter', sans-serif";
+        ctx.fillText(`${pp.name}`, 70, y);
+        ctx.textAlign = "right";
+        ctx.fillStyle = "#c9a85c";
+        ctx.fillText(`${pp.count}× 🍺`, W - 70, y);
         ctx.textAlign = "left";
         y += 32;
       });
@@ -6308,7 +6393,30 @@ export default function GolfApp() {
             </button>
           </div>
 
-          <button onClick={() => setPadOpen(null)} style={{ ...S.btnSecondary, width: "100%", fontSize: "13px", padding: "10px" }}>Schließen</button>
+          {/* Lady toggle — German tradition: did the player pass the women's tee? */}
+          {(() => {
+            const ladyOn = hasLady(padOpen.playerId, padOpen.holeIdx);
+            return (
+              <button
+                onClick={() => toggleLady(padOpen.playerId, padOpen.holeIdx)}
+                style={{
+                  width: "100%", marginTop: "10px",
+                  padding: "10px",
+                  background: ladyOn ? `${T.gold}25` : T.surface2,
+                  color: ladyOn ? T.gold : T.textSoft,
+                  border: `1.5px solid ${ladyOn ? T.gold : T.line}`,
+                  borderRadius: "12px",
+                  fontSize: "13px", fontWeight: 600,
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+                }}
+                title="Lady = Spieler hat den Damen-Abschlag nicht passiert (Bier-Tradition)">
+                <span style={{ fontSize: "16px" }}>👯</span>
+                <span>{ladyOn ? "LADY ✓ (1 Bier)" : "Lady markieren"}</span>
+              </button>
+            );
+          })()}
+
+          <button onClick={() => setPadOpen(null)} style={{ ...S.btnSecondary, width: "100%", fontSize: "13px", padding: "10px", marginTop: "8px" }}>Schließen</button>
           {/* Mac/desktop keyboard hint — only shown on devices with physical keyboard (heuristic) */}
           <div className="kbhint" style={{
             marginTop: "8px", fontSize: "10px", color: T.textDim, textAlign: "center", lineHeight: 1.5,
@@ -6441,6 +6549,7 @@ WICHTIG:
       gameMode,
       teams,
       par3Data,
+      ladies,
       clubName: cfg.clubName,
       // Tag this live entry with the user's sync code so that only
       // friends with the same sync code can see it on their home screen.
@@ -6542,7 +6651,7 @@ WICHTIG:
       const withSamples = me.perHole.filter(h => h.samplesSize > 0);
       const bestHole = withSamples.length ? withSamples.reduce((min, h) => h.avgVsPar < min.avgVsPar ? h : min, withSamples[0]) : null;
       const worstHole = withSamples.length ? withSamples.reduce((max, h) => h.avgVsPar > max.avgVsPar ? h : max, withSamples[0]) : null;
-      return { clubName, avgSF: me.avgSF, bestSF: me.bestSF, roundsPlayed: me.roundsPlayed, bestHole, worstHole, strichCount: me.strichCount };
+      return { clubName, avgSF: me.avgSF, bestSF: me.bestSF, roundsPlayed: me.roundsPlayed, bestHole, worstHole, strichCount: me.strichCount, ladiesTotal: me.ladiesTotal || 0 };
     }).filter(Boolean);
 
     // Sparkline: last 10 rounds chronologically (any club)
@@ -6634,6 +6743,7 @@ WICHTIG:
                   <span style={{ color: T.textSoft }}>🟢 Loch {c.bestHole.holeIdx + 1} ({c.bestHole.avgVsPar > 0 ? "+" : ""}{c.bestHole.avgVsPar.toFixed(1)})</span>
                   <span style={{ color: T.textSoft }}>💀 Loch {c.worstHole.holeIdx + 1} ({c.worstHole.avgVsPar > 0 ? "+" : ""}{c.worstHole.avgVsPar.toFixed(1)})</span>
                   {c.strichCount > 0 && <span style={{ color: T.double }}>✗ {c.strichCount}</span>}
+                  {c.ladiesTotal > 0 && <span style={{ color: T.gold }}>👯 {c.ladiesTotal}</span>}
                 </div>
               )}
             </div>
@@ -6696,6 +6806,7 @@ WICHTIG:
           </h3>
           <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "16px" }}>
             Par {hole.par} · SI {hole.si} · {hole.samplesSize} Einträge
+            {hole.ladyCount > 0 && <span style={{ color: T.gold, marginLeft: "8px" }}>· 👯 {hole.ladyCount} Ladies</span>}
           </p>
 
           {/* Per-player comparison */}
@@ -7066,6 +7177,48 @@ WICHTIG:
               </div>
             </div>
           )}
+
+          {/* Ladies overview — only shown if any ladies recorded */}
+          {(() => {
+            const rLadies = r.ladies || {};
+            const totalLadies = Object.values(rLadies).reduce((s, arr) => s + (arr?.length || 0), 0);
+            if (totalLadies === 0) return null;
+            // Per-player count
+            const perPlayer = (r.players || []).map(p => ({
+              name: p.name,
+              count: (rLadies[p.id] || []).length,
+              holes: rLadies[p.id] || [],
+            })).filter(x => x.count > 0).sort((a, b) => b.count - a.count);
+            return (
+              <div style={{ ...S.card, padding: "14px", marginBottom: "10px" }}>
+                <div style={{ ...S.eyebrow, marginBottom: "10px", color: T.gold }}>
+                  👯 Lady-Tradition · {totalLadies} {totalLadies === 1 ? "Bier" : "Biere"}
+                </div>
+                {perPlayer.map(pp => (
+                  <div key={pp.name} style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    padding: "8px 0", borderBottom: `1px solid ${T.line}`,
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px", flex: 1, minWidth: 0 }}>
+                      <span style={{ fontSize: "14px" }}>👯</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: "13px", fontWeight: 600, color: T.text }}>{pp.name}</div>
+                        <div style={{ fontSize: "10px", color: T.textDim, marginTop: "2px" }}>
+                          Loch {pp.holes.map(h => h + 1).join(", ")}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mono" style={{ fontSize: "16px", fontWeight: 700, color: T.gold }}>
+                      {pp.count} 🍺
+                    </div>
+                  </div>
+                ))}
+                <p style={{ fontSize: "10px", color: T.textDim, marginTop: "10px", lineHeight: 1.5, fontStyle: "italic" }}>
+                  Lady = Tee-Shot kommt nicht über den Damen-Abschlag. Die alte Tradition: eine Runde Bier zahlen.
+                </p>
+              </div>
+            );
+          })()}
 
           <button onClick={() => setRoundAnalysisId(null)}
             style={{ ...S.btnSecondary, width: "100%", marginTop: "8px" }}>
