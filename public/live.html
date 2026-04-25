@@ -334,7 +334,9 @@
         sfNT += sfNetto(g, hs, h.par) || 0;
         sfBT += sfBrutto(g, h.par) || 0;
       });
-      return { p, ph, bT, sfNT, sfBT, strichCount, teeName };
+      // Lady count for this player from the live data
+      const ladyCount = (data.ladies && Array.isArray(data.ladies[p.id])) ? data.ladies[p.id].length : 0;
+      return { p, ph, bT, sfNT, sfBT, strichCount, ladyCount, teeName };
     });
 
     const isUschi = gameMode !== "stableford";
@@ -450,7 +452,7 @@
               ${isCrown && isUschi ? `<span class="crown">👑</span>` : ""}
             </div>
             <div class="player-meta">
-              HCP ${s.p.hcp} · Vorgabe ${s.ph} · Brutto ${s.bT || "—"}${s.strichCount > 0 ? "*" : ""} · SF ${s.sfNT}
+              HCP ${s.p.hcp} · Vorgabe ${s.ph} · Brutto ${s.bT || "—"}${s.strichCount > 0 ? "*" : ""} · SF ${s.sfNT}${s.ladyCount > 0 ? ` · 👯 ${s.ladyCount}` : ""}
             </div>
           </div>
           <div class="player-pts">
