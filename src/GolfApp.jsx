@@ -751,6 +751,53 @@ function getRoundProgress(round) {
  * Strike handling: strich (null value) counts as par+3 gross for stat purposes.
  * It's tracked separately so UI can display it distinctly.
  */
+// ─── SwipeHandle: drag-down-to-close handle for bottom sheet modals ─────────
+// Renders the visual grab handle AND attaches touch handlers that detect a
+// downward swipe of >80px on the handle area, calling onClose when triggered.
+//
+// Usage:
+//   <SwipeHandle onClose={() => setShowModal(false)} />
+//
+// Note: only the handle bar itself is the swipe target — the rest of the
+// modal content is unaffected, so users can still scroll inside long modals.
+function SwipeHandle({ onClose }) {
+  const startY = useRef(null);
+  const moved = useRef(0);
+  const handleStart = (e) => {
+    const t = e.touches ? e.touches[0] : e;
+    startY.current = t.clientY;
+    moved.current = 0;
+  };
+  const handleMove = (e) => {
+    if (startY.current === null) return;
+    const t = e.touches ? e.touches[0] : e;
+    moved.current = t.clientY - startY.current;
+  };
+  const handleEnd = () => {
+    if (moved.current > 80) onClose && onClose();
+    startY.current = null;
+    moved.current = 0;
+  };
+  return (
+    <div
+      onTouchStart={handleStart}
+      onTouchMove={handleMove}
+      onTouchEnd={handleEnd}
+      style={{
+        padding: "8px 0 14px",
+        margin: "-8px auto 4px",
+        cursor: "grab",
+        touchAction: "none",
+      }}
+    >
+      <div style={{
+        width: "40px", height: "4px",
+        background: "#3a4a40", borderRadius: "2px", margin: "0 auto",
+      }}/>
+    </div>
+  );
+}
+
 function aggregateClubStats(clubName, allRounds) {
   const rounds = allRounds.filter(r => r.cfg?.clubName === clubName);
   if (rounds.length === 0) return null;
@@ -2761,15 +2808,27 @@ export default function GolfApp() {
       padding: "14px 16px", borderBottom: `1px solid ${T.line}`, background: T.canvas,
       position: "sticky", top: 0, zIndex: 50, display: "flex", alignItems: "center", gap: "10px",
     }}>
-      <LogoMark size={22} />
-      <div style={{ flex: 1 }}>
-        <div className="serif" style={{ fontSize: "18px", color: T.text }}>Fairway</div>
-        {view !== "home" && (
-          <div style={{ fontSize: "11px", color: T.textSoft, marginTop: "1px" }}>
-            {cfg.clubName || "Neue Runde"}
-          </div>
-        )}
-      </div>
+      <button
+        onClick={() => setView("home")}
+        aria-label="Zurück zum Hauptmenü"
+        style={{
+          background: "transparent", border: "none", padding: 0,
+          display: "flex", alignItems: "center", gap: "10px",
+          flex: 1, minWidth: 0, cursor: "pointer", textAlign: "left",
+        }}>
+        <LogoMark size={22} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="serif" style={{ fontSize: "18px", color: T.text }}>Fairway</div>
+          {view !== "home" && (
+            <div style={{
+              fontSize: "11px", color: T.textSoft, marginTop: "1px",
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            }}>
+              {cfg.clubName || "Neue Runde"}
+            </div>
+          )}
+        </div>
+      </button>
       {syncCode && SYNC_ENABLED && view === "home" && (
         <button
           onClick={() => setShowSyncModal(true)}
@@ -3969,6 +4028,9 @@ export default function GolfApp() {
                           {tee && (
                             <>Berechnung: <span className="mono">{p.hcp} × {tee.slope}/113 + ({tee.cr} − {tee.par || par}) = {calcPH(p.hcp, tee.slope, tee.cr, tee.par || par)}</span></>
                           )}
+                        </div>
+                        <div style={{ fontSize: "10px", color: T.gold, marginBottom: "8px", lineHeight: 1.4, fontStyle: "italic" }}>
+                          💡 Bei Turnieren werden manchmal andere Vorgaben verteilt. Hier kannst du den Wert für diese Runde überschreiben — nur diese Runde, deine HCP bleibt gespeichert.
                         </div>
                         <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
                           <input type="number"
@@ -5238,7 +5300,7 @@ export default function GolfApp() {
         style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
         <div onClick={e => e.stopPropagation()} className="slide-up"
           style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
-          <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 18px" }}/>
+          <SwipeHandle onClose={() => canClose && setUschiPromptHole(null)} />
 
           <div style={{ display: "flex", alignItems: "flex-start", gap: "14px", marginBottom: "16px" }}>
             <div style={{ fontSize: "32px" }}>🎯</div>
@@ -5371,7 +5433,7 @@ export default function GolfApp() {
         style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1050, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
         <div onClick={e => e.stopPropagation()} className="slide-up"
           style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
-          <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 18px" }}/>
+          <SwipeHandle onClose={() => setShowUschiReview(false)} />
 
           <h3 className="serif" style={{ fontSize: "24px", margin: "0 0 6px", color: T.text }}>
             🎯 Uschi-Protokoll
@@ -5616,7 +5678,7 @@ export default function GolfApp() {
         style={{ position: "fixed", inset: 0, background: "#000000aa", zIndex: 1000, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
         <div onClick={e => e.stopPropagation()} className="slide-up"
           style={{ width: "100%", maxWidth: "500px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, borderBottom: "none", padding: "20px 16px 32px", boxShadow: "0 -20px 60px #000000dd" }}>
-          <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 18px" }}/>
+          <SwipeHandle onClose={() => setPadOpen(null)} />
 
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
             <div>
@@ -5964,7 +6026,7 @@ WICHTIG:
         style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
         <div onClick={e => e.stopPropagation()} className="slide-up"
           style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
-          <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 18px" }}/>
+          <SwipeHandle onClose={() => setStatsPlayerDetail(null)} />
 
           <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>
             👤 {playerName}
@@ -6075,7 +6137,7 @@ WICHTIG:
         style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
         <div onClick={e => e.stopPropagation()} className="slide-up"
           style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
-          <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 18px" }}/>
+          <SwipeHandle onClose={() => setStatsHoleDetail(null)} />
 
           <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>
             Loch {holeIdx + 1}
@@ -6236,7 +6298,7 @@ WICHTIG:
         style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
         <div onClick={e => e.stopPropagation()} className="slide-up"
           style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
-          <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 18px" }}/>
+          <SwipeHandle onClose={() => setRoundAnalysisId(null)} />
 
           <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>
             📖 Runden-Analyse
@@ -6831,7 +6893,7 @@ WICHTIG:
         style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1160, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
         <div onClick={e => e.stopPropagation()} className="slide-up"
           style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
-          <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 18px" }}/>
+          <SwipeHandle onClose={() => setShowLiveModal(false)} />
 
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "10px" }}>
             <h3 className="serif" style={{ fontSize: "22px", margin: 0, color: T.text }}>
@@ -6909,7 +6971,7 @@ WICHTIG:
         style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1150, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
         <div onClick={e => e.stopPropagation()} className="slide-up"
           style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
-          <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 18px" }}/>
+          <SwipeHandle onClose={() => { setShowAddClub(false); setAddClubMode("choose"); }} />
 
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "14px" }}>
             <h3 className="serif" style={{ fontSize: "22px", margin: 0, color: T.text }}>
@@ -7100,7 +7162,7 @@ WICHTIG:
             maxHeight: "92vh",
             display: "flex", flexDirection: "column",
           }}>
-          <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 14px" }}/>
+          <SwipeHandle onClose={closeSharePreview} />
 
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px" }}>
             <div>
@@ -7145,7 +7207,7 @@ WICHTIG:
         style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1000, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
         <div onClick={e => e.stopPropagation()} className="slide-up"
           style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "90vh", overflowY: "auto" }}>
-          <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 18px" }}/>
+          <SwipeHandle onClose={() => setShowSyncModal(false)} />
           <h3 className="serif" style={{ fontSize: "24px", margin: "0 0 6px", color: T.text }}>☁️ Cloud Sync</h3>
 
           {!SYNC_ENABLED ? (
@@ -7300,7 +7362,7 @@ WICHTIG:
       style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1000, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
       <div onClick={e => e.stopPropagation()} className="slide-up"
         style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "90vh", overflowY: "auto" }}>
-        <div style={{ width: "40px", height: "4px", background: T.lineStrong, borderRadius: "2px", margin: "0 auto 18px" }}/>
+        <SwipeHandle onClose={() => setShowImport(false)} />
         <h3 className="serif" style={{ fontSize: "24px", margin: "0 0 6px", color: T.text }}>Club-Daten importieren</h3>
         <p style={{ fontSize: "13px", color: T.textSoft, marginBottom: "14px" }}>JSON aus dem Agent-Prompt einfügen.</p>
         <textarea value={importText} onChange={e => setImportText(e.target.value)}
