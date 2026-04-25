@@ -2014,20 +2014,29 @@ export default function GolfApp() {
 
   // ── Active live rounds: fetch from cloud, refresh on home view ────────────
   // Polls every 60s while on home screen so users see in real-time who's playing.
+  // STRICT FILTER: only shows live rounds tagged with the same sync code as the user.
+  // Without a sync code, no live rounds are shown — protects privacy.
   useEffect(() => {
     if (!SYNC_ENABLED) return;
     let cancelled = false;
     let timer = null;
     const fetchOnce = async () => {
+      // Without a sync code → no live rounds visible (privacy)
+      if (!syncCode) {
+        if (!cancelled) setActiveLiveRounds([]);
+        return;
+      }
       const list = await liveListActive();
-      if (!cancelled) setActiveLiveRounds(list);
+      // Only show rounds tagged with the same sync code
+      const filtered = list.filter(r => r.data?.syncCode === syncCode);
+      if (!cancelled) setActiveLiveRounds(filtered);
     };
     fetchOnce();
     if (view === "home") {
       timer = setInterval(fetchOnce, 60000);
     }
     return () => { cancelled = true; if (timer) clearInterval(timer); };
-  }, [view]);
+  }, [view, syncCode]);
 
   // ── Initial load ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -2228,6 +2237,7 @@ export default function GolfApp() {
         teams,
         par3Data,
         clubName: cfg.clubName,
+        syncCode: syncCode || null,
         selectedClubSnapshot: selectedClub ? {
           name: selectedClub.name,
           region: selectedClub.region,
@@ -2239,7 +2249,7 @@ export default function GolfApp() {
       await liveUpdate(liveCode, payload);
     }, 2500);
     return () => clearTimeout(livePushTimerRef.current);
-  }, [liveCode, liveStatus, cfg, holes, players, scores, gameMode, teams, par3Data, selectedClub]);
+  }, [liveCode, liveStatus, cfg, holes, players, scores, gameMode, teams, par3Data, selectedClub, syncCode]);
 
   // ── Stable callbacks (prevent remounts) ───────────────────────────────────
   const onClubQ   = useCallback(e => { setClubQ(e.target.value); setShowDD(true); }, []);
@@ -4016,22 +4026,80 @@ export default function GolfApp() {
         {isNotStarted && (
           <div style={{
             display: "inline-block", marginBottom: "6px",
-            fontSize: "10px", fontWeight: 700, color: T.textDim,
-            background: T.surface3, border: `1px solid ${T.line}`,
+            fontSize: "10px", fontWeight: 700, color: T.gold,
+            background: `${T.gold}15`, border: `1px solid ${T.gold}40`,
             padding: "2px 8px", borderRadius: "4px",
             letterSpacing: "0.04em",
           }}>
-            · LEER
+            📅 VORBEREITET
           </div>
         )}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div style={{ flex: 1, minWidth: 0, paddingRight: "24px" }}>
-            <div style={{ fontSize: "14px", fontWeight: 600, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginBottom: "3px" }}>
-              {r.cfg.clubName || r.cfg.name || "Runde"}
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "3px", flexWrap: "wrap" }}>
+              <div style={{
+                fontSize: "14px", fontWeight: 600, color: T.text,
+                whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+              }}>
+                {r.cfg.clubName || r.cfg.name || "Runde"}
+              </div>
+              {/* Mode badge */}
+              {r.gameMode && r.gameMode !== "stableford" && (
+                <span style={{
+                  fontSize: "9px", padding: "1px 6px",
+                  background: T.surface2, color: T.gold,
+                  border: `1px solid ${T.gold}40`,
+                  borderRadius: "4px", letterSpacing: "0.04em", fontWeight: 700,
+                  whiteSpace: "nowrap",
+                }}>
+                  🎯 {r.gameMode === "uschi-team" ? "USCHI 2v2" : "USCHI"}
+                </span>
+              )}
+              {(!r.gameMode || r.gameMode === "stableford") && (
+                <span style={{
+                  fontSize: "9px", padding: "1px 6px",
+                  background: T.surface2, color: T.textSoft,
+                  border: `1px solid ${T.line}`,
+                  borderRadius: "4px", letterSpacing: "0.04em", fontWeight: 700,
+                  whiteSpace: "nowrap",
+                }}>
+                  ⛳ SF
+                </span>
+              )}
             </div>
-            <div style={{ fontSize: "11px", color: T.textSoft }}>
-              {fmtDate(r.cfg.date)} · {r.cfg.numHoles}L · {r.players.length} {r.players.length === 1 ? "Spieler" : "Spieler"}
+            <div style={{ fontSize: "11px", color: T.textSoft, marginBottom: "4px" }}>
+              {fmtDate(r.cfg.date)} · {r.cfg.numHoles}L
             </div>
+            {/* Player initials with winner highlighted */}
+            {!isNotStarted && sortedPlayers.length > 0 && (
+              <div style={{ display: "flex", gap: "5px", flexWrap: "wrap", marginTop: "4px" }}>
+                {sortedPlayers.map((s, i) => {
+                  const initials = s.p.name.trim().split(/\s+/).map(part => part.charAt(0).toUpperCase()).join("").slice(0, 2) || "?";
+                  const isWinner = i === 0 && progress.complete;
+                  return (
+                    <span
+                      key={s.p.id}
+                      title={`${s.p.name}: ${s.sfNT} SF`}
+                      style={{
+                        fontSize: "10px", padding: "2px 6px",
+                        background: isWinner ? `${T.gold}25` : T.surface2,
+                        color: isWinner ? T.gold : T.textSoft,
+                        border: `1px solid ${isWinner ? T.gold + "60" : T.line}`,
+                        borderRadius: "4px", fontWeight: 700,
+                        fontFamily: "JetBrains Mono, monospace", letterSpacing: "0.04em",
+                      }}>
+                      {isWinner && "🏆 "}{initials}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+            {/* If round has not started, show player names instead */}
+            {isNotStarted && r.players.length > 0 && (
+              <div style={{ fontSize: "10px", color: T.textDim, marginTop: "4px" }}>
+                {r.players.map(p => p.name).join(", ")}
+              </div>
+            )}
           </div>
         </div>
         {showFull && sortedPlayers.length > 0 && (
@@ -6374,6 +6442,9 @@ WICHTIG:
       teams,
       par3Data,
       clubName: cfg.clubName,
+      // Tag this live entry with the user's sync code so that only
+      // friends with the same sync code can see it on their home screen.
+      syncCode: syncCode || null,
       selectedClubSnapshot: selectedClub ? {
         name: selectedClub.name,
         region: selectedClub.region,
@@ -7924,6 +7995,94 @@ WICHTIG:
               Auto-Backups werden täglich automatisch erstellt (letzte 7 Tage).
             </p>
           </div>
+
+          {/* Sync diagnose: shows cloud vs local state, with force-pull option */}
+          {SYNC_ENABLED && syncCode && (
+            <div style={{ marginTop: "18px", paddingTop: "16px", borderTop: `1px solid ${T.line}` }}>
+              <div style={{ ...S.eyebrow, marginBottom: "8px" }}>Sync-Diagnose</div>
+              <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, marginBottom: "10px" }}>
+                Wenn andere Geräte mit dem gleichen Code andere Runden zeigen, hier Cloud-Status prüfen oder erzwingen.
+              </p>
+              <button
+                onClick={async () => {
+                  const cloud = await cloudPull(syncCode);
+                  const cloudRounds = cloud?.data?.rounds?.length || 0;
+                  const cloudFriends = cloud?.data?.friends?.length || 0;
+                  const cloudClubs = cloud?.data?.customClubs?.length || 0;
+                  const cloudUpdated = cloud?.updated_at ? new Date(cloud.updated_at).toLocaleString("de-AT") : "—";
+                  const localRounds = rounds.length;
+                  const localFriends = friends.length;
+                  const localClubs = customClubs.length;
+                  let recommendation = "";
+                  if (!cloud) {
+                    recommendation = "❌ Kein Cloud-Eintrag gefunden. Drück 'Cloud erzwingen ▲' damit dein lokaler Stand hochgeladen wird.";
+                  } else if (cloudRounds === 0 && localRounds > 0) {
+                    recommendation = "⚠ Cloud ist leer aber du hast lokale Runden! Drück 'Cloud erzwingen ▲' um deine lokalen Runden hochzuladen.";
+                  } else if (cloudRounds > 0 && localRounds === 0) {
+                    recommendation = "⚠ Cloud hat Runden aber lokal sind keine. Drück 'Cloud holen ▼' um die Cloud-Runden zu laden.";
+                  } else if (cloudRounds > localRounds + 2) {
+                    recommendation = "ℹ Cloud hat mehr Runden als lokal. Drück 'Cloud holen ▼' falls du diese sehen möchtest.";
+                  } else if (localRounds > cloudRounds + 2) {
+                    recommendation = "ℹ Lokal hat mehr Runden als Cloud. Drück 'Cloud erzwingen ▲' damit andere Geräte sie sehen.";
+                  } else {
+                    recommendation = "✓ Beide Stände sehen ähnlich aus. Wenn andere Geräte trotzdem nicht synchron sind, beide Buttons probieren.";
+                  }
+                  alert(
+                    `Sync-Diagnose für „${syncCode}"\n\n` +
+                    `📊 Cloud-Stand:\n` +
+                    `   ${cloudRounds} Runden, ${cloudFriends} Freunde, ${cloudClubs} Clubs\n` +
+                    `   Zuletzt: ${cloudUpdated}\n\n` +
+                    `💾 Lokaler Stand:\n` +
+                    `   ${localRounds} Runden, ${localFriends} Freunde, ${localClubs} Clubs\n\n` +
+                    `🔍 Empfehlung:\n${recommendation}`
+                  );
+                }}
+                style={{ ...S.btnSecondary, width: "100%", fontSize: "11px", padding: "8px", marginBottom: "6px" }}>
+                🔍 Status anzeigen
+              </button>
+              <div style={{ display: "flex", gap: "6px" }}>
+                <button
+                  onClick={async () => {
+                    if (!confirm("Lokalen Stand zur Cloud hochladen? Falls Cloud schon Daten hat, werden sie dadurch ersetzt.")) return;
+                    setSyncStatus("syncing");
+                    const ok = await cloudPush(syncCode, { rounds, friends, customClubs });
+                    setSyncStatus(ok ? "idle" : "error");
+                    if (ok) {
+                      try { await window.storage.set("golf-last-sync", String(Date.now())); } catch {}
+                      alert(`✓ ${rounds.length} Runden zur Cloud hochgeladen`);
+                    } else {
+                      alert("Push fehlgeschlagen — bist du online?");
+                    }
+                  }}
+                  style={{ ...S.btnSecondary, flex: 1, fontSize: "11px", padding: "8px", color: T.gold, borderColor: `${T.gold}40` }}>
+                  ▲ Cloud erzwingen
+                </button>
+                <button
+                  onClick={async () => {
+                    const cloud = await cloudPull(syncCode);
+                    if (!cloud || !cloud.data) {
+                      alert("Cloud ist leer oder nicht erreichbar.");
+                      return;
+                    }
+                    const cloudRounds = cloud.data.rounds || [];
+                    const cloudFriends = cloud.data.friends || [];
+                    const cloudClubs = cloud.data.customClubs || [];
+                    if (!confirm(`Aus Cloud holen: ${cloudRounds.length} Runden, ${cloudFriends.length} Freunde, ${cloudClubs.length} Clubs.\n\nLokaler Stand wird durch den Cloud-Stand ersetzt!\n\nSicher?`)) return;
+                    setRounds(cloudRounds);
+                    setFriends(cloudFriends);
+                    setCustomClubs(cloudClubs);
+                    try { await window.storage.set("golf-rounds", JSON.stringify(cloudRounds)); } catch {}
+                    try { await window.storage.set("golf-friends", JSON.stringify(cloudFriends)); } catch {}
+                    try { await window.storage.set("golf-custom-clubs", JSON.stringify(cloudClubs)); } catch {}
+                    try { await window.storage.set("golf-last-sync", String(new Date(cloud.updated_at).getTime())); } catch {}
+                    alert(`✓ ${cloudRounds.length} Runden aus Cloud geladen`);
+                  }}
+                  style={{ ...S.btnSecondary, flex: 1, fontSize: "11px", padding: "8px", color: T.sage, borderColor: `${T.sage}40` }}>
+                  ▼ Cloud holen
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Live ticker cleanup */}
           {SYNC_ENABLED && (
