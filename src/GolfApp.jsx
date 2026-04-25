@@ -1862,6 +1862,7 @@ const GLOBAL_CSS = `
   .slide-in-l { animation: slideInL 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
   @keyframes slideInL { from { transform: translateX(-40%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
   @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } }
+  @media (hover: hover) and (pointer: fine) { .kbhint { display: block !important; } }
   .scroll-hide::-webkit-scrollbar { display: none; }
   .scroll-hide { scrollbar-width: none; }
   .btn-hover:hover { background: ${T.surface3} !important; }
@@ -1977,6 +1978,11 @@ export default function GolfApp() {
   const [activeLiveRounds, setActiveLiveRounds] = useState([]);
   // Round-delete confirmation modal: holds the round to delete (null = closed)
   const [deleteConfirm, setDeleteConfirm] = useState(null);
+  // Last-score-undo: tracks the most recent score entry so user can undo it
+  // { playerId, holeIdx, prevValue } — prevValue is undefined if hole was previously empty
+  const [lastScoreEntry, setLastScoreEntry] = useState(null);
+  // Rounds list search query (only visible when >= 8 rounds saved)
+  const [roundsQuery, setRoundsQuery] = useState("");
   const [loadedRoundId, setLoadedRoundId] = useState(null); // track which round is being viewed/edited
   // Scoring mode
   const [scoringMode, setScoringMode] = useState("batch"); // batch | live
@@ -2271,10 +2277,22 @@ export default function GolfApp() {
     : sortedClubs.slice(0, 8);
 
   // ── Club + tee selection ──────────────────────────────────────────────────
+  // Default tee preference: try "Gelb (Herren)" first (Bodos friend group plays Gelb).
+  // Falls back to the only tee (if just 1) or shows picker for the user to choose.
   const pickClub = useCallback(club => {
     const teeKeys = Object.keys(club.tees);
-    if (teeKeys.length === 1) pickDefaultTee(club, teeKeys[0]);
-    else setPickedClub(club);
+    if (teeKeys.length === 1) {
+      pickDefaultTee(club, teeKeys[0]);
+    } else {
+      // Look for "Gelb"-flavored tee key — the default for the friend group
+      const gelbKey = teeKeys.find(k => /gelb/i.test(k))
+        || teeKeys.find(k => /yellow/i.test(k));
+      if (gelbKey) {
+        pickDefaultTee(club, gelbKey);
+      } else {
+        setPickedClub(club);
+      }
+    }
     setShowDD(false);
   }, []);
 
@@ -2292,7 +2310,8 @@ export default function GolfApp() {
     setPickedClub(null);
   }, []);
 
-  // Change a specific player's tee
+  // Change a specific player's tee — and remember this choice in friends store
+  // so the same player automatically gets the same tee next time.
   const changePlayerTee = useCallback((playerId, teeName) => {
     if (!selectedClub) return;
     const tee = selectedClub.tees[teeName];
@@ -2300,8 +2319,17 @@ export default function GolfApp() {
     setPlayers(ps => ps.map(p => p.id === playerId ? {
       ...p, teeName, cr: tee.cr, slope: tee.slope, par: tee.par,
     } : p));
+    // Persist the tee preference in friends list (so e.g. Theresa stays on Blau)
+    const player = players.find(p => p.id === playerId);
+    if (player?.name) {
+      const updatedFriends = friends.find(f => f.name === player.name)
+        ? friends.map(f => f.name === player.name ? { ...f, lastTeeName: teeName } : f)
+        : [...friends, { name: player.name, hcp: player.hcp, lastTeeName: teeName }];
+      setFriends(updatedFriends);
+      try { window.storage.set("golf-friends", JSON.stringify(updatedFriends)); } catch {}
+    }
     setTeePickerFor(null);
-  }, [selectedClub]);
+  }, [selectedClub, players, friends]);
 
   // ── Players
   const par = sumPar(holes);
@@ -2322,10 +2350,14 @@ export default function GolfApp() {
   const addFromFriend = useCallback(f => {
     setPlayers(p => {
       if (p.find(x => x.name === f.name)) return p;
-      const tee = selectedClub && cfg.defaultTeeName ? selectedClub.tees[cfg.defaultTeeName] : null;
+      // Use friend's remembered tee if it exists for this club, else cfg default
+      const teeName = (f.lastTeeName && selectedClub?.tees?.[f.lastTeeName])
+        ? f.lastTeeName
+        : (cfg.defaultTeeName || "");
+      const tee = selectedClub && teeName ? selectedClub.tees[teeName] : null;
       return [...p, {
         id: uid(), name: f.name, hcp: f.hcp,
-        teeName: cfg.defaultTeeName || "",
+        teeName,
         cr: tee?.cr, slope: tee?.slope, par: tee?.par,
       }];
     });
@@ -2365,7 +2397,57 @@ export default function GolfApp() {
   };
 
   // ── Scores
-  const setScore = (pid, hi, val) => setScores(s => ({ ...s, [pid]: { ...s[pid], [hi]: val } }));
+  // setScore also detects when a hole is freshly completed (all players have a value)
+  // and shows a small summary toast like "Loch 7: Bodo +2, Max +0, Thorsten Strich".
+  const setScore = (pid, hi, val) => {
+    setScores(s => {
+      const prevValue = s[pid]?.[hi]; // capture pre-change state for undo
+      // Track this entry so the user can undo via the "↶ Letzten Score rückgängig" button
+      setLastScoreEntry({ playerId: pid, holeIdx: hi, prevValue });
+      const updated = { ...s, [pid]: { ...s[pid], [hi]: val } };
+      // Check if this update completes the hole (all players have a value)
+      const allDone = players.length > 0 && players.every(p => {
+        const v = updated[p.id]?.[hi];
+        return typeof v === "number" || v === null;
+      });
+      const wasDone = players.length > 0 && players.every(p => {
+        const v = s[p.id]?.[hi];
+        return typeof v === "number" || v === null;
+      });
+      // Only fire toast on freshly-completed holes (transition from incomplete → complete)
+      if (allDone && !wasDone) {
+        // Build summary string
+        const hole = holes[hi];
+        if (hole) {
+          const parts = players.map(p => {
+            const v = updated[p.id]?.[hi];
+            if (v === null) return `${p.name} ✗`;
+            const diff = v - hole.par;
+            const label = diff === 0 ? "±0"
+              : diff > 0 ? `+${diff}`
+              : `${diff}`;
+            return `${p.name} ${label}`;
+          });
+          // Defer the toast slightly so it doesn't race with the pad-close animation
+          setTimeout(() => showUndoToast(`Loch ${hi + 1}: ${parts.join(" · ")}`, null), 50);
+        }
+      }
+      return updated;
+    });
+  };
+
+  // Undo the last score entry (restore the previous value, or clear if it was empty)
+  const undoLastScore = () => {
+    if (!lastScoreEntry) return;
+    const { playerId, holeIdx, prevValue } = lastScoreEntry;
+    if (prevValue === undefined) {
+      clearScore(playerId, holeIdx);
+    } else {
+      setScores(s => ({ ...s, [playerId]: { ...s[playerId], [holeIdx]: prevValue } }));
+    }
+    setLastScoreEntry(null);
+    showUndoToast("↶ Letzter Score rückgängig", null);
+  };
   const clearScore = (pid, hi) => setScores(s => {
     const ps = { ...(s[pid] || {}) }; delete ps[hi];
     return { ...s, [pid]: ps };
@@ -2459,6 +2541,34 @@ export default function GolfApp() {
     if (!padOpen) return;
     clearScore(padOpen.playerId, padOpen.holeIdx);
   };
+
+  // Mac/desktop keyboard shortcuts for the score pad:
+  // 0-9 → enter score, "S"/"s" → strich, "Backspace"/"Delete" → clear, "Escape" → close
+  // Only active when padOpen is set (i.e. the pad modal is visible).
+  useEffect(() => {
+    if (!padOpen) return;
+    const handleKeyDown = (e) => {
+      // Ignore if user is typing in an input field elsewhere
+      const tag = e.target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      // Number keys 0-9
+      if (/^[0-9]$/.test(e.key)) {
+        e.preventDefault();
+        padEnter(parseInt(e.key));
+      } else if (e.key === "s" || e.key === "S") {
+        e.preventDefault();
+        padStrich();
+      } else if (e.key === "Backspace" || e.key === "Delete") {
+        e.preventDefault();
+        padClear();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        setPadOpen(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [padOpen, players, holes, scoringMode]);
 
   // Open Uschi par-3 dialog if conditions are met
   // Called right after a score is set for `latestPlayerId` on `holeIdx`
@@ -3685,10 +3795,59 @@ export default function GolfApp() {
 
               {rounds.length === 0
                 ? <EmptyState icon="🏌️" title="Noch keine Runden" sub="Deine gespielten Runden erscheinen hier." />
-                : (<>
-                    <div style={{ ...S.eyebrow, marginBottom: "10px" }}>Letzte Runden</div>
-                    {rounds.slice(0, 5).map(r => renderRoundCard(r, false))}
-                  </>)}
+                : (() => {
+                    const q = roundsQuery.trim().toLowerCase();
+                    const filtered = q
+                      ? rounds.filter(r => {
+                          const club = (r.cfg?.clubName || "").toLowerCase();
+                          const playerNames = (r.players || []).map(p => p.name.toLowerCase()).join(" ");
+                          return club.includes(q) || playerNames.includes(q);
+                        })
+                      : rounds;
+                    const showSearch = rounds.length >= 8;
+                    return (
+                      <>
+                        {showSearch && (
+                          <div style={{ position: "relative", marginBottom: "12px" }}>
+                            <input
+                              type="text"
+                              value={roundsQuery}
+                              onChange={e => setRoundsQuery(e.target.value)}
+                              placeholder={`🔍 Club oder Spieler suchen... (${rounds.length} Runden)`}
+                              style={{
+                                ...S.input, width: "100%",
+                                paddingLeft: "12px", paddingRight: q ? "32px" : "12px",
+                                fontSize: "13px",
+                              }}/>
+                            {q && (
+                              <button
+                                onClick={() => setRoundsQuery("")}
+                                aria-label="Suche löschen"
+                                style={{
+                                  position: "absolute", right: "8px", top: "50%",
+                                  transform: "translateY(-50%)",
+                                  background: "transparent", border: "none",
+                                  color: T.textDim, fontSize: "16px",
+                                  width: "24px", height: "24px",
+                                  display: "flex", alignItems: "center", justifyContent: "center",
+                                  cursor: "pointer",
+                                }}>×</button>
+                            )}
+                          </div>
+                        )}
+                        <div style={{ ...S.eyebrow, marginBottom: "10px" }}>
+                          {q ? `${filtered.length} Treffer` : (rounds.length <= 5 ? "Letzte Runden" : `Alle Runden (${rounds.length})`)}
+                        </div>
+                        {filtered.length === 0 && q ? (
+                          <div style={{ padding: "20px", textAlign: "center", color: T.textDim, fontSize: "13px" }}>
+                            Kein Treffer für „{roundsQuery}"
+                          </div>
+                        ) : (
+                          (q ? filtered : filtered.slice(0, 20)).map(r => renderRoundCard(r, false))
+                        )}
+                      </>
+                    );
+                  })()}
             </>
           )}
 
@@ -4661,6 +4820,27 @@ export default function GolfApp() {
 
           <div style={{ display: "flex", gap: "10px" }}>
             <button style={{ ...S.btnSecondary, flex: 1 }} onClick={() => setView("holes")}>← Löcher</button>
+            <button
+              onClick={undoLastScore}
+              disabled={!lastScoreEntry}
+              style={{
+                ...S.btnSecondary, flex: 1,
+                opacity: lastScoreEntry ? 1 : 0.4,
+                cursor: lastScoreEntry ? "pointer" : "not-allowed",
+              }}
+              title={lastScoreEntry ? "Letzte Score-Eingabe rückgängig" : "Kein Score zum Rückgängigmachen"}>
+              ↶ Zurück
+            </button>
+            <button
+              onClick={async () => { await saveRound(); setView("home"); showUndoToast("⏸️ Runde pausiert — taucht als 'läuft' auf der Home-Seite auf", null); }}
+              style={{
+                ...S.btnSecondary, flex: 1,
+                background: `${T.gold}15`, color: T.gold,
+                border: `1px solid ${T.gold}50`,
+              }}
+              title="Runde wird automatisch gespeichert und kann später fortgesetzt werden">
+              ⏸ Pause
+            </button>
             <button style={{ ...S.btnPrimary, flex: 2 }} className="gold-hover" onClick={() => { saveRound(); setView("results"); }}>Auswertung →</button>
           </div>
         </div>
@@ -4692,9 +4872,20 @@ export default function GolfApp() {
             </tr>
           </thead>
           <tbody>
-            {holes.map((hole,i) => (
-              <tr key={i} style={{ borderBottom: `1px solid ${T.line}` }}>
-                <td style={{ padding: "8px 12px", fontSize: "13px", fontWeight: 700, color: T.gold, position: "sticky", left: 0, background: T.surface1, zIndex: 1, borderRight: `1px solid ${T.line}` }}>
+            {holes.map((hole,i) => {
+              // Highlight the current/most-recently-edited hole
+              const isCurrentHole = (padOpen?.holeIdx === i) || (currentHole === i && padOpen === null);
+              const rowBg = isCurrentHole ? `${T.gold}10` : "transparent";
+              const rowBorder = isCurrentHole ? `${T.gold}40` : T.line;
+              return (
+              <tr key={i} style={{ borderBottom: `1px solid ${rowBorder}`, background: rowBg }}>
+                <td style={{
+                  padding: "8px 12px", fontSize: "13px", fontWeight: 700,
+                  color: isCurrentHole ? T.gold : T.gold,
+                  position: "sticky", left: 0,
+                  background: isCurrentHole ? `${T.gold}15` : T.surface1,
+                  zIndex: 1, borderRight: `1px solid ${rowBorder}`,
+                }}>
                   <span className="mono">{i+1}</span>
                   <span style={{ fontSize: "9px", color: T.textDim, marginLeft: "6px", fontWeight: 500 }}>SI{hole.si}</span>
                   {gameMode !== "stableford" && hole.par === 3 && (
@@ -4721,7 +4912,7 @@ export default function GolfApp() {
                   const display = isStrich(g) ? "✗" : isValid(g) ? g : "—";
                   return (
                     <td key={p.id} style={{ padding: "5px 6px", textAlign: "center" }}>
-                      <button onClick={() => setPadOpen({ playerId: p.id, holeIdx: i })}
+                      <button onClick={() => { setCurrentHole(i); setPadOpen({ playerId: p.id, holeIdx: i }); }}
                         style={{
                           position: "relative", width: "56px", height: "40px",
                           background: isEmpty ? T.surface1 : `${col}12`,
@@ -4740,7 +4931,8 @@ export default function GolfApp() {
                   );
                 })}
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -6049,6 +6241,13 @@ export default function GolfApp() {
           </div>
 
           <button onClick={() => setPadOpen(null)} style={{ ...S.btnSecondary, width: "100%", fontSize: "13px", padding: "10px" }}>Schließen</button>
+          {/* Mac/desktop keyboard hint — only shown on devices with physical keyboard (heuristic) */}
+          <div className="kbhint" style={{
+            marginTop: "8px", fontSize: "10px", color: T.textDim, textAlign: "center", lineHeight: 1.5,
+            display: "none",
+          }}>
+            ⌨ Tasten <span style={{ color: T.textSoft, fontFamily: "JetBrains Mono, monospace" }}>0–9</span> für Score · <span style={{ color: T.textSoft, fontFamily: "JetBrains Mono, monospace" }}>S</span> für Strich · <span style={{ color: T.textSoft, fontFamily: "JetBrains Mono, monospace" }}>⌫</span> löschen · <span style={{ color: T.textSoft, fontFamily: "JetBrains Mono, monospace" }}>Esc</span> schließen
+          </div>
         </div>
       </div>
     );
