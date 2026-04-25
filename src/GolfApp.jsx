@@ -222,6 +222,20 @@ async function liveListActive() {
   } catch (e) { console.error("Live list failed", e); return []; }
 }
 
+// List ALL live rounds without filtering (for cleanup purposes).
+// Returns full data so we can match against local rounds by content fingerprint.
+async function liveListAll() {
+  if (!SYNC_ENABLED) return [];
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/live_rounds?select=code,updated_at,data&order=updated_at.desc&limit=50`,
+      { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
+    );
+    if (!res.ok) return [];
+    return await res.json();
+  } catch (e) { console.error("Live listAll failed", e); return []; }
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // CLUB DATABASE
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1961,6 +1975,8 @@ export default function GolfApp() {
   const [showLiveModal, setShowLiveModal] = useState(false); // controls the Live-Share modal
   // List of live rounds from anyone in the wider community (refreshed every minute)
   const [activeLiveRounds, setActiveLiveRounds] = useState([]);
+  // Round-delete confirmation modal: holds the round to delete (null = closed)
+  const [deleteConfirm, setDeleteConfirm] = useState(null);
   const [loadedRoundId, setLoadedRoundId] = useState(null); // track which round is being viewed/edited
   // Scoring mode
   const [scoringMode, setScoringMode] = useState("batch"); // batch | live
@@ -3426,11 +3442,18 @@ export default function GolfApp() {
             </button>
           )}
 
-          {/* Live rounds: anyone in the wider community currently sharing a live ticker */}
+          {/* Live rounds: own round at top (clickable to score), then community */}
           {(() => {
-            // Filter out our own live ticker (we already see our own data) and any duplicates
+            // Build the displayed list:
+            // 1. Own active live round (if any) — directly editable, special styling
+            // 2. Other community rounds (sorted by recency)
+            const ownLive = activeLiveRounds.find(r => r.code === liveCode);
             const others = activeLiveRounds.filter(r => r.code !== liveCode);
-            if (others.length === 0) return null;
+            const allToShow = [
+              ...(ownLive ? [{ ...ownLive, _isOwn: true }] : []),
+              ...others.map(r => ({ ...r, _isOwn: false })),
+            ];
+            if (allToShow.length === 0) return null;
             return (
               <div style={{ marginTop: "12px" }}>
                 <div style={{
@@ -3443,9 +3466,9 @@ export default function GolfApp() {
                     borderRadius: "50%", background: "#ff4444",
                     animation: "pulse 1.5s ease-in-out infinite",
                   }}/>
-                  <span>LIVE GERADE · {others.length} Runde{others.length === 1 ? "" : "n"}</span>
+                  <span>LIVE GERADE · {allToShow.length} Runde{allToShow.length === 1 ? "" : "n"}</span>
                 </div>
-                {others.slice(0, 4).map(live => {
+                {allToShow.slice(0, 4).map(live => {
                   const data = live.data || {};
                   const clubName = data.cfg?.clubName || "Unbekannter Club";
                   const playerNames = (data.players || []).map(p => p.name).join(", ") || "—";
@@ -3471,18 +3494,38 @@ export default function GolfApp() {
                     : ageMs < 3600000 ? `vor ${Math.floor(ageMs / 60000)} Min`
                     : `vor ${Math.floor(ageMs / 3600000)} Std`;
 
+                  // Click handler: own → continue scoring; other → open viewer
+                  const handleClick = (e) => {
+                    if (live._isOwn) {
+                      e.preventDefault();
+                      // Find local round matching this live code, jump back to scoring
+                      const matchingRound = rounds.find(r => {
+                        const p = getRoundProgress(r);
+                        return !p.complete && !p.notStarted;
+                      });
+                      if (matchingRound) {
+                        loadRound(matchingRound);
+                      } else {
+                        // Fallback: open viewer
+                        window.open(`/live.html#${live.code}`, "_blank");
+                      }
+                    }
+                    // Otherwise the link navigates normally
+                  };
+
                   return (
                     <a
                       key={live.code}
-                      href={`/live.html#${live.code}`}
-                      target="_blank"
+                      href={live._isOwn ? "#" : `/live.html#${live.code}`}
+                      target={live._isOwn ? "_self" : "_blank"}
                       rel="noopener noreferrer"
+                      onClick={handleClick}
                       style={{
                         display: "block", textDecoration: "none",
                         marginBottom: "6px",
                         padding: "12px 14px",
-                        background: T.surface2,
-                        border: `1px solid ${T.line}`,
+                        background: live._isOwn ? `${T.gold}15` : T.surface2,
+                        border: `1px solid ${live._isOwn ? T.gold + "60" : T.line}`,
                         borderRadius: "10px",
                         cursor: "pointer",
                       }}>
@@ -3496,8 +3539,17 @@ export default function GolfApp() {
                           <div style={{
                             fontSize: "13px", fontWeight: 600, color: T.text,
                             overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                            display: "flex", alignItems: "center", gap: "6px",
                           }}>
-                            {clubName}
+                            <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{clubName}</span>
+                            {live._isOwn && (
+                              <span style={{
+                                fontSize: "9px", padding: "2px 6px",
+                                background: T.gold, color: T.canvas,
+                                borderRadius: "4px", fontWeight: 700, letterSpacing: "0.04em",
+                                flexShrink: 0,
+                              }}>✏️ DU SCORST</span>
+                            )}
                           </div>
                           <div style={{
                             fontSize: "11px", color: T.textSoft, marginTop: "2px",
@@ -3741,13 +3793,59 @@ export default function GolfApp() {
       <div key={r.id} onClick={() => loadRound(r)} className="card-hover"
         style={{
           ...S.card, cursor: "pointer", padding: "14px 16px", marginBottom: "10px", position: "relative",
+          paddingRight: "92px", // reserve space for action buttons on the right
           border: isRunning ? `1px solid ${T.gold}60` : S.card.border,
           background: isRunning ? `${T.gold}08` : S.card.background,
         }}>
-        {/* Running/incomplete badge */}
+        {/* Action buttons stacked vertically on the right */}
+        <div style={{
+          position: "absolute", top: "8px", right: "8px",
+          display: "flex", flexDirection: "column", gap: "6px", alignItems: "flex-end",
+        }}>
+          <div style={{ display: "flex", gap: "6px" }}>
+            <button
+              onClick={e => { e.stopPropagation(); setRoundAnalysisId(r.id); }}
+              aria-label="Runden-Analyse"
+              title="Runden-Analyse öffnen"
+              style={{
+                width: "32px", height: "32px",
+                background: T.surface2,
+                border: `1px solid ${T.line}`,
+                borderRadius: "8px",
+                color: T.gold,
+                fontSize: "14px",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                lineHeight: 1,
+                padding: 0,
+              }}>📖</button>
+            <button
+              onClick={e => { e.stopPropagation(); confirmDelete(r); }}
+              aria-label="Runde löschen"
+              style={{
+                width: "32px", height: "32px",
+                background: T.surface2,
+                border: `1px solid ${T.line}`,
+                borderRadius: "8px",
+                color: T.textDim,
+                fontSize: "18px",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                lineHeight: 1,
+                padding: 0,
+              }}>×</button>
+          </div>
+          {/* SF-Netto value below the buttons (when there's a top score) */}
+          {top && !isNotStarted && (
+            <div style={{ textAlign: "right", marginTop: "4px" }}>
+              <div className="mono" style={{ fontSize: "20px", fontWeight: 700, color: T.gold, lineHeight: 1 }}>{top.sfNT}</div>
+              <div style={{ fontSize: "9px", color: T.textDim, letterSpacing: "0.06em", marginTop: "2px" }}>SF NETTO</div>
+            </div>
+          )}
+        </div>
+
+        {/* Running/incomplete badge — positioned BELOW the action buttons */}
         {isRunning && (
           <div style={{
-            position: "absolute", top: "10px", right: "38px",
+            display: "inline-block", marginBottom: "6px",
             fontSize: "10px", fontWeight: 700, color: T.gold,
             background: `${T.gold}20`, border: `1px solid ${T.gold}60`,
             padding: "2px 8px", borderRadius: "4px",
@@ -3758,7 +3856,7 @@ export default function GolfApp() {
         )}
         {isNotStarted && (
           <div style={{
-            position: "absolute", top: "10px", right: "38px",
+            display: "inline-block", marginBottom: "6px",
             fontSize: "10px", fontWeight: 700, color: T.textDim,
             background: T.surface3, border: `1px solid ${T.line}`,
             padding: "2px 8px", borderRadius: "4px",
@@ -3776,12 +3874,6 @@ export default function GolfApp() {
               {fmtDate(r.cfg.date)} · {r.cfg.numHoles}L · {r.players.length} {r.players.length === 1 ? "Spieler" : "Spieler"}
             </div>
           </div>
-          {top && !isNotStarted && (
-            <div style={{ textAlign: "right", marginTop: isRunning ? "14px" : "0" }}>
-              <div className="mono" style={{ fontSize: "20px", fontWeight: 700, color: T.gold, lineHeight: 1 }}>{top.sfNT}</div>
-              <div style={{ fontSize: "9px", color: T.textDim, letterSpacing: "0.06em", marginTop: "2px" }}>SF NETTO</div>
-            </div>
-          )}
         </div>
         {showFull && sortedPlayers.length > 0 && (
           <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginTop: "10px", paddingTop: "10px", borderTop: `1px solid ${T.line}` }}>
@@ -3800,37 +3892,6 @@ export default function GolfApp() {
             ))}
           </div>
         )}
-        <button
-          onClick={e => { e.stopPropagation(); setRoundAnalysisId(r.id); }}
-          aria-label="Runden-Analyse"
-          title="Runden-Analyse öffnen"
-          style={{
-            position: "absolute", top: "8px", right: "48px",
-            width: "32px", height: "32px",
-            background: T.surface2,
-            border: `1px solid ${T.line}`,
-            borderRadius: "8px",
-            color: T.gold,
-            fontSize: "14px",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            lineHeight: 1,
-            padding: 0,
-          }}>📖</button>
-        <button
-          onClick={e => { e.stopPropagation(); if (confirm("Runde löschen?")) deleteRound(r.id); }}
-          aria-label="Runde löschen"
-          style={{
-            position: "absolute", top: "8px", right: "8px",
-            width: "32px", height: "32px",
-            background: T.surface2,
-            border: `1px solid ${T.line}`,
-            borderRadius: "8px",
-            color: T.textDim,
-            fontSize: "18px",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            lineHeight: 1,
-            padding: 0,
-          }}>×</button>
       </div>
     );
   };
@@ -5434,13 +5495,9 @@ export default function GolfApp() {
           {/* Delete button - only shown when viewing/editing a saved round */}
           {loadedRoundId && rounds.find(r => r.id === loadedRoundId) && (
             <button
-              onClick={async () => {
-                if (confirm("Diese Runde wirklich löschen? Das kann nicht rückgängig gemacht werden.")) {
-                  await deleteRound(loadedRoundId);
-                  setLoadedRoundId(null);
-                  setTab("rounds");
-                  setView("home");
-                }
+              onClick={() => {
+                const r = rounds.find(rr => rr.id === loadedRoundId);
+                if (r) confirmDelete(r);
               }}
               style={{
                 width: "100%", marginTop: "14px",
@@ -6102,6 +6159,12 @@ WICHTIG:
       alert("Live-Ticker benötigt Cloud-Sync. Bitte in den Einstellungen aktivieren.");
       return;
     }
+    // If we already have an active live code, reuse it instead of creating a duplicate
+    if (liveCode && liveStatus === "active") {
+      // Already active — just confirm and reset URL etc
+      setShowLiveModal(true);
+      return;
+    }
     setLiveStatus("creating");
     const payload = {
       cfg,
@@ -6738,6 +6801,93 @@ WICHTIG:
             style={{ ...S.btnSecondary, width: "100%", marginTop: "8px" }}>
             Schließen
           </button>
+        </div>
+      </div>
+    );
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // DELETE CONFIRMATION MODAL — context-aware delete prompt for rounds
+  // ═══════════════════════════════════════════════════════════════════════════
+  const confirmDelete = (round) => {
+    setDeleteConfirm(round);
+  };
+
+  const renderDeleteConfirm = () => {
+    if (!deleteConfirm) return null;
+    const r = deleteConfirm;
+    const playerCount = (r.players || []).length;
+    const holesCount = (r.holes || []).length;
+    const dateLabel = r.cfg?.date ? fmtDate(r.cfg.date) : "Unbekanntes Datum";
+    const playerNames = (r.players || []).map(p => p.name).join(", ");
+    const progress = getRoundProgress(r);
+    const statusLabel = progress.complete ? "Abgeschlossen"
+      : progress.notStarted ? "Noch nicht begonnen"
+      : `Läuft (${progress.holesPlayed}/${progress.totalHoles} Löcher)`;
+
+    const doDelete = () => {
+      const id = r.id;
+      setDeleteConfirm(null);
+      deleteRound(id);
+    };
+
+    return (
+      <div onClick={() => setDeleteConfirm(null)}
+        style={{
+          position: "fixed", inset: 0, background: "#000000dd", zIndex: 1200,
+          display: "flex", alignItems: "center", justifyContent: "center", padding: "16px",
+        }}>
+        <div onClick={e => e.stopPropagation()}
+          style={{
+            width: "100%", maxWidth: "420px",
+            background: T.surface1, borderRadius: "16px",
+            border: `1px solid ${T.line}`, padding: "22px",
+          }}>
+          <div style={{ fontSize: "32px", textAlign: "center", marginBottom: "12px" }}>🗑️</div>
+          <h3 className="serif" style={{ fontSize: "20px", margin: "0 0 14px", color: T.text, textAlign: "center" }}>
+            Runde löschen?
+          </h3>
+
+          {/* Context details */}
+          <div style={{
+            background: T.surface2, padding: "14px",
+            borderRadius: "10px", marginBottom: "16px",
+            border: `1px solid ${T.line}`,
+          }}>
+            <div style={{ fontSize: "14px", fontWeight: 600, color: T.text, marginBottom: "8px" }}>
+              {r.cfg?.clubName || "Runde"}
+            </div>
+            <div style={{ fontSize: "12px", color: T.textSoft, lineHeight: 1.6 }}>
+              <div>📅 {dateLabel}</div>
+              <div>⛳ {holesCount} Löcher · {playerCount} {playerCount === 1 ? "Spieler" : "Spieler"}</div>
+              {playerNames && (
+                <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  👥 {playerNames}
+                </div>
+              )}
+              <div style={{ marginTop: "4px", color: progress.complete ? T.gold : progress.notStarted ? T.textDim : T.gold }}>
+                {progress.complete ? "✓" : progress.notStarted ? "○" : "📝"} {statusLabel}
+              </div>
+            </div>
+          </div>
+
+          <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, marginBottom: "16px", textAlign: "center" }}>
+            Du kannst es danach kurz rückgängig machen über das Toast.
+          </p>
+
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button onClick={() => setDeleteConfirm(null)}
+              style={{ ...S.btnSecondary, flex: 1, padding: "12px", fontSize: "13px" }}>
+              Abbrechen
+            </button>
+            <button onClick={doDelete}
+              style={{
+                ...S.btnPrimary, flex: 1, padding: "12px", fontSize: "13px",
+                background: T.double, color: "#fff",
+              }}>
+              Löschen
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -7576,6 +7726,74 @@ WICHTIG:
             </p>
           </div>
 
+          {/* Live ticker cleanup */}
+          {SYNC_ENABLED && (
+            <div style={{ marginTop: "18px", paddingTop: "16px", borderTop: `1px solid ${T.line}` }}>
+              <div style={{ ...S.eyebrow, marginBottom: "8px" }}>Live-Ticker bereinigen</div>
+              <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, marginBottom: "10px" }}>
+                Falls du mehrere Live-Einträge für die gleiche Runde erstellt hast (Doppel-Klick etc), kannst du hier alte Einträge löschen.
+              </p>
+              <button
+                onClick={async () => {
+                  const all = await liveListAll();
+                  if (!all.length) {
+                    alert("Keine Live-Einträge gefunden.");
+                    return;
+                  }
+                  // Group by content fingerprint (club + first player + holes count)
+                  const fingerprintFor = entry => {
+                    const data = entry.data || {};
+                    const club = data.cfg?.clubName || "";
+                    const firstPlayer = (data.players || [])[0]?.name || "";
+                    const numHoles = (data.holes || []).length;
+                    return `${club}::${firstPlayer}::${numHoles}`;
+                  };
+                  let summary = "Live-Einträge:\n\n";
+                  all.forEach(e => {
+                    const data = e.data || {};
+                    const club = data.cfg?.clubName || "?";
+                    const playerNames = (data.players || []).map(p => p.name).join(", ") || "?";
+                    const ageMs = Date.now() - new Date(e.updated_at).getTime();
+                    const ageMin = Math.floor(ageMs / 60000);
+                    const isOwn = e.code === liveCode ? " [DEINE]" : "";
+                    summary += `${e.code}: ${club} · ${playerNames} · vor ${ageMin}min${isOwn}\n`;
+                  });
+                  summary += `\nWelche löschen?\n• "alle alten" - alle ausser deiner aktuellen Live-Runde\n• "<code>" - nur diesen einen Code\n• Abbrechen für Nichts`;
+                  const choice = prompt(summary, "alle alten");
+                  if (!choice) return;
+                  if (choice.toLowerCase() === "alle alten") {
+                    const toDelete = all.filter(e => e.code !== liveCode);
+                    if (!toDelete.length) {
+                      alert("Keine alten Einträge gefunden.");
+                      return;
+                    }
+                    if (!confirm(`Wirklich ${toDelete.length} Live-Einträge löschen?`)) return;
+                    for (const e of toDelete) {
+                      await liveDelete(e.code);
+                    }
+                    alert(`✓ ${toDelete.length} Einträge gelöscht`);
+                    // Refresh the home screen list
+                    const refreshed = await liveListActive();
+                    setActiveLiveRounds(refreshed);
+                  } else {
+                    const target = all.find(e => e.code === choice.trim());
+                    if (!target) {
+                      alert("Code nicht gefunden.");
+                      return;
+                    }
+                    if (!confirm(`Wirklich Live-Eintrag "${choice.trim()}" löschen?`)) return;
+                    await liveDelete(target.code);
+                    alert(`✓ Gelöscht`);
+                    const refreshed = await liveListActive();
+                    setActiveLiveRounds(refreshed);
+                  }
+                }}
+                style={{ ...S.btnSecondary, width: "100%", fontSize: "11px", padding: "8px" }}>
+                🧹 Alte Live-Einträge bereinigen
+              </button>
+            </div>
+          )}
+
           <button onClick={() => setShowSyncModal(false)}
             style={{ ...S.btnGhost, width: "100%", marginTop: "18px", fontSize: "13px" }}>Schließen</button>
         </div>
@@ -7648,6 +7866,7 @@ WICHTIG:
       {renderStatsImportModal()}
       {renderRoundAnalysis()}
       {renderSyncConflict()}
+      {renderDeleteConfirm()}
       {renderUndoToast()}
     </div>
   );
