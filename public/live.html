@@ -320,7 +320,10 @@
         ? club.tees[teeName]
         : (club && club.tees ? Object.values(club.tees)[0] : null);
       const hcpNum = typeof p.hcp === "number" ? p.hcp : parseFloat(p.hcp) || 0;
-      const ph = tee ? calcPH(hcpNum, tee.slope, tee.cr, tee.par) : 0;
+      // Honor manual override if set (e.g. tournament-specific course handicap)
+      const ph = (typeof p.phOverride === "number")
+        ? p.phOverride
+        : (tee ? calcPH(hcpNum, tee.slope, tee.cr, tee.par) : 0);
       let bT = 0, sfNT = 0, sfBT = 0, strichCount = 0;
       holes.forEach((h, i) => {
         const g = scores[p.id] && scores[p.id][i];
