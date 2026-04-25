@@ -202,6 +202,26 @@ async function liveDelete(code) {
   } catch (e) { console.error("Live delete failed", e); return false; }
 }
 
+// List all currently-active live rounds, optionally filtered to recently-updated ones.
+// Backend's TTL is ~48h so we additionally filter client-side to "updated within last 24h"
+// so we only show truly active rounds (not just stale ones).
+async function liveListActive() {
+  if (!SYNC_ENABLED) return [];
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/live_rounds?select=code,updated_at,data&order=updated_at.desc&limit=20`,
+      { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
+    );
+    if (!res.ok) return [];
+    const rows = await res.json();
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000; // 24h ago
+    return rows.filter(r => {
+      const ts = new Date(r.updated_at).getTime();
+      return ts > cutoff;
+    });
+  } catch (e) { console.error("Live list failed", e); return []; }
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // CLUB DATABASE
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1827,6 +1847,7 @@ const GLOBAL_CSS = `
   @keyframes slideInR { from { transform: translateX(40%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
   .slide-in-l { animation: slideInL 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
   @keyframes slideInL { from { transform: translateX(-40%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+  @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } }
   .scroll-hide::-webkit-scrollbar { display: none; }
   .scroll-hide { scrollbar-width: none; }
   .btn-hover:hover { background: ${T.surface3} !important; }
@@ -1938,6 +1959,8 @@ export default function GolfApp() {
   const [liveCode, setLiveCode] = useState(null); // current live ticker code, if active
   const [liveStatus, setLiveStatus] = useState("idle"); // "idle" | "creating" | "active" | "error"
   const [showLiveModal, setShowLiveModal] = useState(false); // controls the Live-Share modal
+  // List of live rounds from anyone in the wider community (refreshed every minute)
+  const [activeLiveRounds, setActiveLiveRounds] = useState([]);
   const [loadedRoundId, setLoadedRoundId] = useState(null); // track which round is being viewed/edited
   // Scoring mode
   const [scoringMode, setScoringMode] = useState("batch"); // batch | live
@@ -1967,10 +1990,60 @@ export default function GolfApp() {
     };
   }, []);
 
+  // ── Active live rounds: fetch from cloud, refresh on home view ────────────
+  // Polls every 60s while on home screen so users see in real-time who's playing.
+  useEffect(() => {
+    if (!SYNC_ENABLED) return;
+    let cancelled = false;
+    let timer = null;
+    const fetchOnce = async () => {
+      const list = await liveListActive();
+      if (!cancelled) setActiveLiveRounds(list);
+    };
+    fetchOnce();
+    if (view === "home") {
+      timer = setInterval(fetchOnce, 60000);
+    }
+    return () => { cancelled = true; if (timer) clearInterval(timer); };
+  }, [view]);
+
   // ── Initial load ──────────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
-      try { const r = await window.storage.get("golf-rounds");       if (r) setRounds(JSON.parse(r.value)); } catch {}
+      try {
+        const r = await window.storage.get("golf-rounds");
+        if (r) {
+          let loadedRounds = JSON.parse(r.value);
+          // Self-cleanup: dedup duplicates by content fingerprint
+          // (same club + date + player names + holes count = treat as same round)
+          // This protects against legacy duplicates with mismatched IDs.
+          if (Array.isArray(loadedRounds) && loadedRounds.length > 0) {
+            const fingerprint = round => {
+              const date = round.cfg?.date || round.savedAt || 0;
+              const club = round.cfg?.clubName || "";
+              const playerNames = (round.players || []).map(p => p.name).sort().join("|");
+              const holesCount = (round.holes || []).length;
+              return `${club}::${date}::${playerNames}::${holesCount}`;
+            };
+            const seen = new Map();
+            for (const round of loadedRounds) {
+              const key = fingerprint(round);
+              const existing = seen.get(key);
+              // Keep the version with the higher savedAt (most recent edit)
+              if (!existing || (round.savedAt || 0) > (existing.savedAt || 0)) {
+                seen.set(key, round);
+              }
+            }
+            const cleaned = Array.from(seen.values()).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+            if (cleaned.length < loadedRounds.length) {
+              console.log(`Cleaned ${loadedRounds.length - cleaned.length} duplicate round(s) from local storage`);
+              loadedRounds = cleaned;
+              try { await window.storage.set("golf-rounds", JSON.stringify(cleaned)); } catch {}
+            }
+          }
+          setRounds(loadedRounds);
+        }
+      } catch {}
       try { const f = await window.storage.get("golf-friends");      if (f) setFriends(JSON.parse(f.value)); } catch {}
       try { const c = await window.storage.get("golf-custom-clubs"); if (c) setCustomClubs(JSON.parse(c.value)); } catch {}
       try { const s = await window.storage.get("golf-sync-code");    if (s?.value) setSyncCode(s.value); } catch {}
@@ -2011,12 +2084,31 @@ export default function GolfApp() {
               });
               // Important: do NOT update last-sync here, so we won't auto-push the local state yet
             } else if (cloudTs > localTs) {
-              // ── SMART MERGE: combine local + cloud, dedup by id ──
+              // ── SMART MERGE: combine local + cloud, dedup by id + fingerprint ──
+              // First pass: dedup by ID
               const cloudIds = new Set(cloudRounds.map(r => r.id));
               const localOnlyRounds = localRounds.filter(r => !cloudIds.has(r.id));
-              const merged = [...cloudRounds, ...localOnlyRounds].sort((a, b) =>
+
+              // Second pass: dedup by content fingerprint (club + date + sorted player names + holes count)
+              // This catches the edge case where the same round exists with different IDs in cloud vs local
+              // (can happen when a round was created locally before sync, then later synced).
+              const fingerprint = r => {
+                const date = r.cfg?.date || r.savedAt || 0;
+                const club = r.cfg?.clubName || "";
+                const playerNames = (r.players || []).map(p => p.name).sort().join("|");
+                const holesCount = (r.holes || []).length;
+                return `${club}::${date}::${playerNames}::${holesCount}`;
+              };
+              const cloudFingerprints = new Set(cloudRounds.map(fingerprint));
+              const trulyLocalOnly = localOnlyRounds.filter(r => !cloudFingerprints.has(fingerprint(r)));
+
+              const merged = [...cloudRounds, ...trulyLocalOnly].sort((a, b) =>
                 (b.savedAt || 0) - (a.savedAt || 0)
               );
+
+              if (localOnlyRounds.length !== trulyLocalOnly.length) {
+                console.log(`Smart merge: ${localOnlyRounds.length - trulyLocalOnly.length} duplicate(s) by content fingerprint suppressed`);
+              }
 
               // Friends: union by name (keep cloud version if duplicate)
               const cloudFriends = Array.isArray(cloud.data.friends) ? cloud.data.friends : [];
@@ -2435,6 +2527,20 @@ export default function GolfApp() {
     setRounds(u);
     try { await window.storage.set("golf-rounds", JSON.stringify(u)); } catch {}
   };
+
+  // ── Navigation: go home, but auto-save any in-progress setup ──
+  // If the user has started preparing a round (club + at least one player),
+  // we persist it as a "läuft" round so it appears on the home screen and
+  // can be resumed. Otherwise the setup state silently disappears.
+  const goHome = async () => {
+    const isInSetup = view === "setup" || view === "scoring";
+    const hasContent = cfg?.clubName && players && players.length > 0;
+    if (isInSetup && hasContent) {
+      // Save current setup state silently (skip if it's already a saved round)
+      await saveRound();
+    }
+    setView("home");
+  };
   const loadRound = r => {
     setLoadedRoundId(r.id);
     setCfg(r.cfg); setHoles(r.holes); setPlayers(r.players); setScores(r.scores);
@@ -2601,7 +2707,17 @@ export default function GolfApp() {
         // ── Existing code with non-empty data → SMART MERGE (don't overwrite) ──
         const cloudIds = new Set(cloudRounds.map(r => r.id));
         const localOnlyRounds = rounds.filter(r => !cloudIds.has(r.id));
-        const merged = [...cloudRounds, ...localOnlyRounds].sort((a, b) =>
+        // Also dedup by content fingerprint (handles legacy rounds with mismatched IDs)
+        const fingerprint = r => {
+          const date = r.cfg?.date || r.savedAt || 0;
+          const club = r.cfg?.clubName || "";
+          const playerNames = (r.players || []).map(p => p.name).sort().join("|");
+          const holesCount = (r.holes || []).length;
+          return `${club}::${date}::${playerNames}::${holesCount}`;
+        };
+        const cloudFingerprints = new Set(cloudRounds.map(fingerprint));
+        const trulyLocalOnly = localOnlyRounds.filter(r => !cloudFingerprints.has(fingerprint(r)));
+        const merged = [...cloudRounds, ...trulyLocalOnly].sort((a, b) =>
           (b.savedAt || 0) - (a.savedAt || 0)
         );
 
@@ -2805,16 +2921,23 @@ export default function GolfApp() {
   // Header
   const renderHeader = () => (
     <div style={{
-      padding: "14px 16px", borderBottom: `1px solid ${T.line}`, background: T.canvas,
+      paddingTop: "calc(14px + env(safe-area-inset-top))",
+      paddingBottom: "14px",
+      paddingLeft: "calc(16px + env(safe-area-inset-left))",
+      paddingRight: "calc(16px + env(safe-area-inset-right))",
+      borderBottom: `1px solid ${T.line}`, background: T.canvas,
       position: "sticky", top: 0, zIndex: 50, display: "flex", alignItems: "center", gap: "10px",
     }}>
       <button
-        onClick={() => setView("home")}
+        onClick={goHome}
         aria-label="Zurück zum Hauptmenü"
         style={{
-          background: "transparent", border: "none", padding: 0,
+          background: "transparent", border: "none",
+          padding: "6px 4px",
+          margin: "-6px -4px",
           display: "flex", alignItems: "center", gap: "10px",
           flex: 1, minWidth: 0, cursor: "pointer", textAlign: "left",
+          minHeight: "44px",
         }}>
         <LogoMark size={22} />
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -2845,7 +2968,7 @@ export default function GolfApp() {
         </button>
       )}
       {view !== "home" && (
-        <button onClick={() => setView("home")} className="btn-hover" style={{ ...S.btnGhost, padding: "7px 12px" }}>
+        <button onClick={goHome} className="btn-hover" style={{ ...S.btnGhost, padding: "7px 12px" }}>
           Schließen
         </button>
       )}
@@ -3302,6 +3425,102 @@ export default function GolfApp() {
               <span>Wie letztes Mal — gleiche Besetzung</span>
             </button>
           )}
+
+          {/* Live rounds: anyone in the wider community currently sharing a live ticker */}
+          {(() => {
+            // Filter out our own live ticker (we already see our own data) and any duplicates
+            const others = activeLiveRounds.filter(r => r.code !== liveCode);
+            if (others.length === 0) return null;
+            return (
+              <div style={{ marginTop: "12px" }}>
+                <div style={{
+                  display: "flex", alignItems: "center", gap: "8px",
+                  fontSize: "11px", color: T.textDim, fontWeight: 600, letterSpacing: "0.05em",
+                  marginBottom: "8px", padding: "0 4px",
+                }}>
+                  <span style={{
+                    display: "inline-block", width: "6px", height: "6px",
+                    borderRadius: "50%", background: "#ff4444",
+                    animation: "pulse 1.5s ease-in-out infinite",
+                  }}/>
+                  <span>LIVE GERADE · {others.length} Runde{others.length === 1 ? "" : "n"}</span>
+                </div>
+                {others.slice(0, 4).map(live => {
+                  const data = live.data || {};
+                  const clubName = data.cfg?.clubName || "Unbekannter Club";
+                  const playerNames = (data.players || []).map(p => p.name).join(", ") || "—";
+                  // Compute holes played: highest hole index with any score across all players
+                  let holesPlayed = 0;
+                  const totalHoles = (data.holes || []).length || 18;
+                  if (data.scores && data.players) {
+                    let maxHole = 0;
+                    data.players.forEach(p => {
+                      const ps = data.scores[p.id] || {};
+                      Object.keys(ps).forEach(idx => {
+                        const v = ps[idx];
+                        if ((typeof v === "number" && v > 0) || v === null) {
+                          maxHole = Math.max(maxHole, parseInt(idx) + 1);
+                        }
+                      });
+                    });
+                    holesPlayed = maxHole;
+                  }
+                  // Time since last update
+                  const ageMs = Date.now() - new Date(live.updated_at).getTime();
+                  const ageLabel = ageMs < 60000 ? "gerade eben"
+                    : ageMs < 3600000 ? `vor ${Math.floor(ageMs / 60000)} Min`
+                    : `vor ${Math.floor(ageMs / 3600000)} Std`;
+
+                  return (
+                    <a
+                      key={live.code}
+                      href={`/live.html#${live.code}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{
+                        display: "block", textDecoration: "none",
+                        marginBottom: "6px",
+                        padding: "12px 14px",
+                        background: T.surface2,
+                        border: `1px solid ${T.line}`,
+                        borderRadius: "10px",
+                        cursor: "pointer",
+                      }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                        <span style={{
+                          display: "inline-block", width: "8px", height: "8px",
+                          borderRadius: "50%", background: "#ff4444", flexShrink: 0,
+                          animation: "pulse 1.5s ease-in-out infinite",
+                        }}/>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{
+                            fontSize: "13px", fontWeight: 600, color: T.text,
+                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                          }}>
+                            {clubName}
+                          </div>
+                          <div style={{
+                            fontSize: "11px", color: T.textSoft, marginTop: "2px",
+                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                          }}>
+                            {playerNames}
+                          </div>
+                        </div>
+                        <div style={{ textAlign: "right", flexShrink: 0 }}>
+                          <div className="mono" style={{ fontSize: "12px", color: T.gold, fontWeight: 700 }}>
+                            {holesPlayed}/{totalHoles}
+                          </div>
+                          <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>
+                            {ageLabel}
+                          </div>
+                        </div>
+                      </div>
+                    </a>
+                  );
+                })}
+              </div>
+            );
+          })()}
 
           {/* Continuation hint for incomplete rounds */}
           {(() => {
@@ -6576,7 +6795,17 @@ WICHTIG:
     const merge = async () => {
       const cloudIds = new Set(cloudRounds.map(r => r.id));
       const localOnly = syncConflict.localRounds.filter(r => !cloudIds.has(r.id));
-      const merged = [...cloudRounds, ...localOnly].sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+      // Also dedup by content fingerprint
+      const fingerprint = r => {
+        const date = r.cfg?.date || r.savedAt || 0;
+        const club = r.cfg?.clubName || "";
+        const playerNames = (r.players || []).map(p => p.name).sort().join("|");
+        const holesCount = (r.holes || []).length;
+        return `${club}::${date}::${playerNames}::${holesCount}`;
+      };
+      const cloudFingerprints = new Set(cloudRounds.map(fingerprint));
+      const trulyLocalOnly = localOnly.filter(r => !cloudFingerprints.has(fingerprint(r)));
+      const merged = [...cloudRounds, ...trulyLocalOnly].sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
 
       // Friends + clubs merge
       const cloudFriends = syncConflict.cloudData.friends || [];
