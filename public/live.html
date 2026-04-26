@@ -1,5 +1,4 @@
 <!DOCTYPE html>
-
 <html lang="de">
 <head>
 <meta charset="UTF-8" />
@@ -136,613 +135,654 @@
     </div>
     <style>@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.5 } }</style>`;
 
-let lastData = null;
-let lastUpdate = null;
+  let lastData = null;
+  let lastUpdate = null;
 
-// ─── Data fetch ────────────────────────────────────────────────────────────
-async function fetchLive() {
-if (!code) return null;
-const url = `${SUPABASE_URL}/rest/v1/live_rounds?code=eq.${encodeURIComponent(code)}&select=*`;
-// Update visible status
-const statusEl = document.getElementById(“live-status”);
-if (statusEl) statusEl.textContent = “Verbinde mit Supabase…”;
-try {
-const res = await fetch(url, {
-headers: { “apikey”: SUPABASE_KEY, “Authorization”: `Bearer ${SUPABASE_KEY}` }
-});
-if (statusEl) statusEl.textContent = `Antwort: HTTP ${res.status}`;
-if (!res.ok) {
-console.error(`Live fetch failed: HTTP ${res.status} from ${url}`);
-// Show error visibly
-root.innerHTML = ` <div style="padding:60px 20px;text-align:center;color:#7a9281;font-family:Inter,sans-serif;max-width:500px;margin:0 auto"> <div style="font-size:48px;margin-bottom:20px">⚠️</div> <h2 style="color:#cdd5c8;font-size:22px;margin-bottom:12px">Verbindungs-Fehler</h2> <p style="font-size:14px;line-height:1.5;margin-bottom:20px"> HTTP ${res.status} ${res.statusText || ""} </p> <div style="font-size:11px;color:#5d6e63;padding:12px;background:#1a2620;border-radius:8px;text-align:left;font-family:monospace"> URL: ${SUPABASE_URL.slice(0, 40)}...<br> Code: ${code}<br> Status: ${res.status} </div> </div>`;
-return null;
-}
-const rows = await res.json();
-if (statusEl) statusEl.textContent = `${rows.length} Treffer`;
-return rows[0] || null;
-} catch (e) {
-console.error(“Live fetch error:”, e.message, “URL:”, url);
-// Show network/CORS error visibly
-root.innerHTML = ` <div style="padding:60px 20px;text-align:center;color:#7a9281;font-family:Inter,sans-serif;max-width:500px;margin:0 auto"> <div style="font-size:48px;margin-bottom:20px">📡</div> <h2 style="color:#cdd5c8;font-size:22px;margin-bottom:12px">Netzwerk-Fehler</h2> <p style="font-size:14px;line-height:1.5;margin-bottom:20px"> Konnte Supabase nicht erreichen. </p> <div style="font-size:11px;color:#5d6e63;padding:12px;background:#1a2620;border-radius:8px;text-align:left;font-family:monospace"> Fehler: ${(e.message || "?").slice(0, 100)}<br> URL: ${SUPABASE_URL.slice(0, 40)}...<br> Code: ${code} </div> </div>`;
-return null;
-}
-}
-
-// ─── Helpers (mirrors main app logic) ──────────────────────────────────────
-function isStrich(v) { return v === null; }
-function isValid(v) { return typeof v === “number” && v > 0; }
-function sfNetto(g, hs, par) {
-if (isStrich(g)) return 0;
-if (!isValid(g)) return null;
-return Math.max(0, par - (g - hs) + 2);
-}
-function sfBrutto(g, par) {
-if (isStrich(g)) return 0;
-if (!isValid(g)) return null;
-return Math.max(0, par - g + 2);
-}
-function holeHS(ph, si, n) {
-return Math.floor(Math.abs(ph)/n) + (si <= Math.abs(ph)%n ? 1 : 0);
-}
-function calcPH(idx, slope, cr, par) {
-return Math.round(idx * (slope/113) + (cr - par));
-}
-function scoreColorClass(gross, par) {
-if (isStrich(gross)) return “sc-strich”;
-if (!isValid(gross)) return “”;
-const d = gross - par;
-if (d <= -2) return “sc-eagle”;
-if (d === -1) return “sc-birdie”;
-if (d === 0) return “sc-par”;
-if (d === 1) return “sc-bogey”;
-return “sc-double”;
-}
-
-// Adjusted strokes for Uschi mode (matches main app uschiAdjustedStrokes).
-// Returns [{ playerId, strokes, perHole: [0|1|2…] }]
-function uschiAdjustedStrokes(players, holes, stats) {
-const numHoles = holes.length;
-const is9 = numHoles === 9;
-// For each player we need the course handicap (ph from stats).
-const withCH = players.map(p => {
-const s = stats.find(st => st.p.id === p.id);
-return { playerId: p.id, ch: s ? s.ph : (p.hcp || 0) };
-});
-if (withCH.length === 0) return [];
-const minCH = Math.min(…withCH.map(c => c.ch));
-const sortedByHardness = holes.map((h, i) => ({ i, si: h.si })).sort((a, b) => a.si - b.si);
-
-```
-return withCH.map(({ playerId, ch }) => {
-  const diff = ch - minCH;
-  const strokes18 = Math.max(0, Math.round(diff * 0.8));
-  const strokes = is9 ? Math.ceil(strokes18 * 9 / 18) : strokes18;
-  const perHole = new Array(numHoles).fill(0);
-  let remaining = strokes;
-  let safety = 3;
-  while (remaining > 0 && safety > 0) {
-    for (const { i } of sortedByHardness) {
-      if (remaining === 0) break;
-      perHole[i]++;
-      remaining--;
-    }
-    safety--;
-  }
-  return { playerId, strokes, perHole };
-});
-```
-
-}
-
-// Full Uschi points computation — mirrors main app’s computeUschiPoints.
-// Per hole: +1 best netto, -1 worst netto, +1 birdie-or-better (per player),
-// Par-3 Uschi: closest-to-pin wins carry if made par, nobody hit green → carry++.
-function computeUschiPoints(players, holes, scores, adjStrokes, par3Data) {
-const strokesByPid = {};
-adjStrokes.forEach(a => { strokesByPid[a.playerId] = a.perHole; });
-const totals = {};
-players.forEach(p => {
-totals[p.id] = { total: 0, best: 0, worst: 0, birdies: 0, uschi: 0 };
-});
-const perHole = [];
-let carry = 1;
-
-```
-for (let i = 0; i < holes.length; i++) {
-  const hole = holes[i];
-  const holePoints = {};
-  const holeBreakdown = {};
-  players.forEach(p => {
-    holePoints[p.id] = 0;
-    holeBreakdown[p.id] = { best: false, worst: false, birdie: false, uschi: 0 };
-  });
-
-  // Netto for each player
-  const nettos = [];
-  players.forEach(p => {
-    const gross = scores[p.id] && scores[p.id][i];
-    if (isValid(gross)) {
-      const s = (strokesByPid[p.id] && strokesByPid[p.id][i]) || 0;
-      nettos.push({ pid: p.id, netto: gross - s });
-    }
-  });
-
-  // Best/worst points (only if ≥2 valid AND not all same)
-  if (nettos.length >= 2) {
-    const bestN = Math.min(...nettos.map(n => n.netto));
-    const worstN = Math.max(...nettos.map(n => n.netto));
-    if (bestN !== worstN) {
-      nettos.forEach(n => {
-        if (n.netto === bestN)  { holePoints[n.pid] += 1; totals[n.pid].best += 1;  holeBreakdown[n.pid].best = true; }
-        if (n.netto === worstN) { holePoints[n.pid] -= 1; totals[n.pid].worst -= 1; holeBreakdown[n.pid].worst = true; }
+  // ─── Data fetch ────────────────────────────────────────────────────────────
+  async function fetchLive() {
+    if (!code) return null;
+    const url = `${SUPABASE_URL}/rest/v1/live_rounds?code=eq.${encodeURIComponent(code)}&select=*`;
+    // Update visible status
+    const statusEl = document.getElementById("live-status");
+    if (statusEl) statusEl.textContent = "Verbinde mit Supabase...";
+    try {
+      const res = await fetch(url, {
+        headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` }
       });
+      if (statusEl) statusEl.textContent = `Antwort: HTTP ${res.status}`;
+      if (!res.ok) {
+        console.error(`Live fetch failed: HTTP ${res.status} from ${url}`);
+        // Show error visibly
+        root.innerHTML = `
+          <div style="padding:60px 20px;text-align:center;color:#7a9281;font-family:Inter,sans-serif;max-width:500px;margin:0 auto">
+            <div style="font-size:48px;margin-bottom:20px">⚠️</div>
+            <h2 style="color:#cdd5c8;font-size:22px;margin-bottom:12px">Verbindungs-Fehler</h2>
+            <p style="font-size:14px;line-height:1.5;margin-bottom:20px">
+              HTTP ${res.status} ${res.statusText || ""}
+            </p>
+            <div style="font-size:11px;color:#5d6e63;padding:12px;background:#1a2620;border-radius:8px;text-align:left;font-family:monospace">
+              URL: ${SUPABASE_URL.slice(0, 40)}...<br>
+              Code: ${code}<br>
+              Status: ${res.status}
+            </div>
+          </div>`;
+        return null;
+      }
+      const rows = await res.json();
+      if (statusEl) statusEl.textContent = `${rows.length} Treffer`;
+      return rows[0] || null;
+    } catch (e) {
+      console.error("Live fetch error:", e.message, "URL:", url);
+      // Show network/CORS error visibly
+      root.innerHTML = `
+        <div style="padding:60px 20px;text-align:center;color:#7a9281;font-family:Inter,sans-serif;max-width:500px;margin:0 auto">
+          <div style="font-size:48px;margin-bottom:20px">📡</div>
+          <h2 style="color:#cdd5c8;font-size:22px;margin-bottom:12px">Netzwerk-Fehler</h2>
+          <p style="font-size:14px;line-height:1.5;margin-bottom:20px">
+            Konnte Supabase nicht erreichen.
+          </p>
+          <div style="font-size:11px;color:#5d6e63;padding:12px;background:#1a2620;border-radius:8px;text-align:left;font-family:monospace">
+            Fehler: ${(e.message || "?").slice(0, 100)}<br>
+            URL: ${SUPABASE_URL.slice(0, 40)}...<br>
+            Code: ${code}
+          </div>
+        </div>`;
+      return null;
     }
   }
 
-  // Birdie bonus
-  players.forEach(p => {
-    const gross = scores[p.id] && scores[p.id][i];
-    if (isValid(gross) && gross <= hole.par - 1) {
-      holePoints[p.id] += 1;
-      totals[p.id].birdies += 1;
-      holeBreakdown[p.id].birdie = true;
-    }
-  });
+  // ─── Helpers (mirrors main app logic) ──────────────────────────────────────
+  function isStrich(v) { return v === null; }
+  function isValid(v) { return typeof v === "number" && v > 0; }
+  function sfNetto(g, hs, par) {
+    if (isStrich(g)) return 0;
+    if (!isValid(g)) return null;
+    return Math.max(0, par - (g - hs) + 2);
+  }
+  function sfBrutto(g, par) {
+    if (isStrich(g)) return 0;
+    if (!isValid(g)) return null;
+    return Math.max(0, par - g + 2);
+  }
+  function holeHS(ph, si, n) {
+    return Math.floor(Math.abs(ph)/n) + (si <= Math.abs(ph)%n ? 1 : 0);
+  }
+  function calcPH(idx, slope, cr, par) {
+    return Math.round(idx * (slope/113) + (cr - par));
+  }
+  function scoreColorClass(gross, par) {
+    if (isStrich(gross)) return "sc-strich";
+    if (!isValid(gross)) return "";
+    const d = gross - par;
+    if (d <= -2) return "sc-eagle";
+    if (d === -1) return "sc-birdie";
+    if (d === 0) return "sc-par";
+    if (d === 1) return "sc-bogey";
+    return "sc-double";
+  }
 
-  // Par-3 Uschi
-  if (hole.par === 3) {
-    const data = par3Data && par3Data[i];
-    if (!data) {
-      // pending — carry stays
-    } else {
-      const greenHits = data.greenHits || [];
-      const closest = data.closest;
-      if (greenHits.length === 0) {
-        carry += 1;
-      } else if (closest && greenHits.includes(closest)) {
-        const cGross = scores[closest] && scores[closest][i];
-        if (isValid(cGross) && cGross <= hole.par) {
-          holePoints[closest] += carry;
-          totals[closest].uschi += carry;
-          holeBreakdown[closest].uschi = carry;
-          carry = 1;
-        } else {
-          carry = 1;
+  // Adjusted strokes for Uschi mode (matches main app uschiAdjustedStrokes).
+  // Returns [{ playerId, strokes, perHole: [0|1|2...] }]
+  function uschiAdjustedStrokes(players, holes, stats) {
+    const numHoles = holes.length;
+    const is9 = numHoles === 9;
+    // For each player we need the course handicap (ph from stats).
+    const withCH = players.map(p => {
+      const s = stats.find(st => st.p.id === p.id);
+      return { playerId: p.id, ch: s ? s.ph : (p.hcp || 0) };
+    });
+    if (withCH.length === 0) return [];
+    const minCH = Math.min(...withCH.map(c => c.ch));
+    const sortedByHardness = holes.map((h, i) => ({ i, si: h.si })).sort((a, b) => a.si - b.si);
+
+    return withCH.map(({ playerId, ch }) => {
+      const diff = ch - minCH;
+      const strokes18 = Math.max(0, Math.round(diff * 0.8));
+      const strokes = is9 ? Math.ceil(strokes18 * 9 / 18) : strokes18;
+      const perHole = new Array(numHoles).fill(0);
+      let remaining = strokes;
+      let safety = 3;
+      while (remaining > 0 && safety > 0) {
+        for (const { i } of sortedByHardness) {
+          if (remaining === 0) break;
+          perHole[i]++;
+          remaining--;
+        }
+        safety--;
+      }
+      return { playerId, strokes, perHole };
+    });
+  }
+
+  // Full Uschi points computation — mirrors main app's computeUschiPoints.
+  // Per hole: +1 best netto, -1 worst netto, +1 birdie-or-better (per player),
+  // Par-3 Uschi: closest-to-pin wins carry if made par, nobody hit green → carry++.
+  function computeUschiPoints(players, holes, scores, adjStrokes, par3Data) {
+    const strokesByPid = {};
+    adjStrokes.forEach(a => { strokesByPid[a.playerId] = a.perHole; });
+    const totals = {};
+    players.forEach(p => {
+      totals[p.id] = { total: 0, best: 0, worst: 0, birdies: 0, uschi: 0 };
+    });
+    const perHole = [];
+    let carry = 1;
+
+    for (let i = 0; i < holes.length; i++) {
+      const hole = holes[i];
+      const holePoints = {};
+      const holeBreakdown = {};
+      players.forEach(p => {
+        holePoints[p.id] = 0;
+        holeBreakdown[p.id] = { best: false, worst: false, birdie: false, uschi: 0 };
+      });
+
+      // Netto for each player
+      const nettos = [];
+      players.forEach(p => {
+        const gross = scores[p.id] && scores[p.id][i];
+        if (isValid(gross)) {
+          const s = (strokesByPid[p.id] && strokesByPid[p.id][i]) || 0;
+          nettos.push({ pid: p.id, netto: gross - s });
+        }
+      });
+
+      // Best/worst points (only if ≥2 valid AND not all same)
+      if (nettos.length >= 2) {
+        const bestN = Math.min(...nettos.map(n => n.netto));
+        const worstN = Math.max(...nettos.map(n => n.netto));
+        if (bestN !== worstN) {
+          nettos.forEach(n => {
+            if (n.netto === bestN)  { holePoints[n.pid] += 1; totals[n.pid].best += 1;  holeBreakdown[n.pid].best = true; }
+            if (n.netto === worstN) { holePoints[n.pid] -= 1; totals[n.pid].worst -= 1; holeBreakdown[n.pid].worst = true; }
+          });
         }
       }
+
+      // Birdie bonus
+      players.forEach(p => {
+        const gross = scores[p.id] && scores[p.id][i];
+        if (isValid(gross) && gross <= hole.par - 1) {
+          holePoints[p.id] += 1;
+          totals[p.id].birdies += 1;
+          holeBreakdown[p.id].birdie = true;
+        }
+      });
+
+      // Par-3 Uschi
+      if (hole.par === 3) {
+        const data = par3Data && par3Data[i];
+        if (!data) {
+          // pending — carry stays
+        } else {
+          const greenHits = data.greenHits || [];
+          const closest = data.closest;
+          if (greenHits.length === 0) {
+            carry += 1;
+          } else if (closest && greenHits.includes(closest)) {
+            const cGross = scores[closest] && scores[closest][i];
+            if (isValid(cGross) && cGross <= hole.par) {
+              holePoints[closest] += carry;
+              totals[closest].uschi += carry;
+              holeBreakdown[closest].uschi = carry;
+              carry = 1;
+            } else {
+              carry = 1;
+            }
+          }
+        }
+      }
+
+      perHole.push({ holeIdx: i, holePoints, holeBreakdown });
+      players.forEach(p => { totals[p.id].total += holePoints[p.id]; });
     }
+
+    return { totals, perHole };
   }
 
-  perHole.push({ holeIdx: i, holePoints, holeBreakdown });
-  players.forEach(p => { totals[p.id].total += holePoints[p.id]; });
-}
-
-return { totals, perHole };
-```
-
-}
-
-// ─── Rendering ─────────────────────────────────────────────────────────────
-function fmtDate(iso) {
-if (!iso) return “”;
-const d = new Date(iso);
-const months = [“Jan”, “Feb”, “Mär”, “Apr”, “Mai”, “Jun”, “Jul”, “Aug”, “Sep”, “Okt”, “Nov”, “Dez”];
-return `${d.getDate()}. ${months[d.getMonth()]}. ${d.getFullYear()}`;
-}
-
-function fmtLastUpdate(iso) {
-if (!iso) return “”;
-const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
-if (diff < 10) return “gerade eben”;
-if (diff < 60) return `vor ${diff} Sek`;
-if (diff < 3600) return `vor ${Math.floor(diff / 60)} Min`;
-return `vor ${Math.floor(diff / 3600)} Std`;
-}
-
-function escapeHtml(s) {
-return String(s || “”).replace(/[&<>”’]/g, c => ({
-‘&’: ‘&’, ‘<’: ‘<’, ‘>’: ‘>’, ‘”’: ‘"’, “’”: ‘'’
-}[c]));
-}
-
-function renderData(row) {
-const d = row.data;
-if (!d || !d.players) {
-return `<div class="error">Keine gültigen Daten gefunden.</div>`;
-}
-
-```
-const cfg = d.cfg || {};
-const holes = d.holes || [];
-const players = d.players || [];
-const scores = d.scores || {};
-const gameMode = d.gameMode || "stableford";
-const teams = d.teams;
-const par3Data = d.par3Data || {};
-const club = d.selectedClubSnapshot;
-const par = holes.reduce((s, h) => s + (h.par || 0), 0);
-
-// Holes played (max across players)
-let holesPlayed = 0;
-players.forEach(p => {
-  const c = holes.filter((_, i) => {
-    const g = scores[p.id] && scores[p.id][i];
-    return isValid(g) || isStrich(g);
-  }).length;
-  if (c > holesPlayed) holesPlayed = c;
-});
-
-// Compute stats per player
-const stats = players.map(p => {
-  // Find this player's tee
-  const teeName = p.teeName || cfg.defaultTeeName;
-  const tee = club && club.tees && teeName && club.tees[teeName]
-    ? club.tees[teeName]
-    : (club && club.tees ? Object.values(club.tees)[0] : null);
-  const hcpNum = typeof p.hcp === "number" ? p.hcp : parseFloat(p.hcp) || 0;
-  // Honor manual override if set (e.g. tournament-specific course handicap)
-  const ph = (typeof p.phOverride === "number")
-    ? p.phOverride
-    : (tee ? calcPH(hcpNum, tee.slope, tee.cr, tee.par) : 0);
-  let bT = 0, sfNT = 0, sfBT = 0, strichCount = 0;
-  holes.forEach((h, i) => {
-    const g = scores[p.id] && scores[p.id][i];
-    if (isStrich(g)) { strichCount++; return; }
-    if (!isValid(g)) return;
-    bT += g;
-    const hs = holeHS(ph, h.si, holes.length);
-    sfNT += sfNetto(g, hs, h.par) || 0;
-    sfBT += sfBrutto(g, h.par) || 0;
-  });
-  // Lady count for this player from the live data — defensive against missing/invalid arrays
-  const ladyCount = Array.isArray((d.ladies || {})[p.id]) ? d.ladies[p.id].length : 0;
-  return { p, ph, bT, sfNT, sfBT, strichCount, ladyCount, teeName };
-});
-
-const isUschi = gameMode !== "stableford";
-const adjStrokes = isUschi ? uschiAdjustedStrokes(players, holes, stats) : [];
-const uschiResult = isUschi ? computeUschiPoints(players, holes, scores, adjStrokes, par3Data) : null;
-
-// Team setup (for 2v2)
-const isTeamMode = gameMode === "uschi-team" && teams && teams.A && teams.B && teams.A.length === 2 && teams.B.length === 2;
-const teamMap = {};
-if (isTeamMode) {
-  teams.A.forEach(pid => teamMap[pid] = "A");
-  teams.B.forEach(pid => teamMap[pid] = "B");
-}
-const teamTotals = { A: 0, B: 0 };
-if (isTeamMode && uschiResult) {
-  players.forEach(p => {
-    const k = teamMap[p.id];
-    if (k) teamTotals[k] += uschiResult.totals[p.id] ? uschiResult.totals[p.id].total : 0;
-  });
-}
-
-// Sort players by uschi (if uschi mode) or by sfNT
-const sorted = stats.slice().sort((a, b) => {
-  if (isUschi && uschiResult) {
-    const aT = uschiResult.totals[a.p.id] ? uschiResult.totals[a.p.id].total : 0;
-    const bT = uschiResult.totals[b.p.id] ? uschiResult.totals[b.p.id].total : 0;
-    return bT - aT;
+  // ─── Rendering ─────────────────────────────────────────────────────────────
+  function fmtDate(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    const months = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
+    return `${d.getDate()}. ${months[d.getMonth()]}. ${d.getFullYear()}`;
   }
-  return b.sfNT - a.sfNT;
-});
 
-// ── Build HTML ───────────────────────────────────────────────────────────
-let html = `
-  <div class="status-bar">
-    <span class="status-live">LIVE · Loch ${holesPlayed}/${holes.length}</span>
-    <span>Aktualisiert ${fmtLastUpdate(row.updated_at)}</span>
-  </div>
+  function fmtLastUpdate(iso) {
+    if (!iso) return "";
+    const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+    if (diff < 10) return "gerade eben";
+    if (diff < 60) return `vor ${diff} Sek`;
+    if (diff < 3600) return `vor ${Math.floor(diff / 60)} Min`;
+    return `vor ${Math.floor(diff / 3600)} Std`;
+  }
 
-  <div class="header">
-    <div class="logo">
-      <div class="logo-mark"></div>
-      <div class="brand">Fairway</div>
-    </div>
-    <div class="title">${escapeHtml(cfg.clubName || club?.name || "Runde")}</div>
-    <div class="subtitle">${fmtDate(cfg.date)} · ${holes.length} Loch · Par ${par}</div>
-    ${isUschi ? `<div class="meta">🎯 ${gameMode === "uschi-team" ? "Uschi 2 vs 2" : "Uschi-Modus"}</div>` : ""}
-  </div>
-`;
+  function escapeHtml(s) {
+    return String(s || "").replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
 
-// Team ranking (if team mode)
-if (isTeamMode) {
-  const teamData = [
-    { k: "A", color: "#c9a85c", total: teamTotals.A, members: teams.A.map(pid => {
-      const p = players.find(pp => pp.id === pid);
-      return p ? p.name : "?";
-    }).join(" + ") },
-    { k: "B", color: "#7ea88a", total: teamTotals.B, members: teams.B.map(pid => {
-      const p = players.find(pp => pp.id === pid);
-      return p ? p.name : "?";
-    }).join(" + ") },
-  ].sort((a, b) => b.total - a.total);
+  function renderData(row) {
+    const d = row.data;
+    if (!d || !d.players) {
+      return `<div class="error">Keine gültigen Daten gefunden.</div>`;
+    }
 
-  html += `<div class="card">
-    <div class="eyebrow eyebrow-gold">🏆 Team-Wertung</div>`;
-  teamData.forEach((t, i) => {
-    const medal = i === 0 ? "🥇" : "🥈";
-    const pts = t.total > 0 ? `+${t.total}` : t.total;
-    const col = t.total >= 0 ? "#c9a85c" : "#d67a5c";
-    html += `
-      <div class="team-row">
-        <div style="font-size:24px">${medal}</div>
-        <div class="team-dot" style="background:${t.color}">${t.k}</div>
-        <div class="team-name">
-          ${escapeHtml(t.members)}
-          <div class="team-members">Team ${t.k}</div>
+    const cfg = d.cfg || {};
+    const holes = d.holes || [];
+    const players = d.players || [];
+    const scores = d.scores || {};
+    const gameMode = d.gameMode || "stableford";
+    const teams = d.teams;
+    const par3Data = d.par3Data || {};
+    const club = d.selectedClubSnapshot;
+    const par = holes.reduce((s, h) => s + (h.par || 0), 0);
+
+    // Holes played (max across players)
+    let holesPlayed = 0;
+    players.forEach(p => {
+      const c = holes.filter((_, i) => {
+        const g = scores[p.id] && scores[p.id][i];
+        return isValid(g) || isStrich(g);
+      }).length;
+      if (c > holesPlayed) holesPlayed = c;
+    });
+
+    // Compute stats per player
+    const stats = players.map(p => {
+      // Find this player's tee
+      const teeName = p.teeName || cfg.defaultTeeName;
+      const tee = club && club.tees && teeName && club.tees[teeName]
+        ? club.tees[teeName]
+        : (club && club.tees ? Object.values(club.tees)[0] : null);
+      const hcpNum = typeof p.hcp === "number" ? p.hcp : parseFloat(p.hcp) || 0;
+      // Honor manual override if set (e.g. tournament-specific course handicap)
+      const ph = (typeof p.phOverride === "number")
+        ? p.phOverride
+        : (tee ? calcPH(hcpNum, tee.slope, tee.cr, tee.par) : 0);
+      let bT = 0, sfNT = 0, sfBT = 0, strichCount = 0;
+      holes.forEach((h, i) => {
+        const g = scores[p.id] && scores[p.id][i];
+        if (isStrich(g)) { strichCount++; return; }
+        if (!isValid(g)) return;
+        bT += g;
+        const hs = holeHS(ph, h.si, holes.length);
+        sfNT += sfNetto(g, hs, h.par) || 0;
+        sfBT += sfBrutto(g, h.par) || 0;
+      });
+      // Lady count for this player from the live data
+      const ladyCount = (data.ladies && Array.isArray(data.ladies[p.id])) ? data.ladies[p.id].length : 0;
+      return { p, ph, bT, sfNT, sfBT, strichCount, ladyCount, teeName };
+    });
+
+    const isUschi = gameMode !== "stableford";
+    const adjStrokes = isUschi ? uschiAdjustedStrokes(players, holes, stats) : [];
+    const uschiResult = isUschi ? computeUschiPoints(players, holes, scores, adjStrokes, par3Data) : null;
+
+    // Team setup (for 2v2)
+    const isTeamMode = gameMode === "uschi-team" && teams && teams.A && teams.B && teams.A.length === 2 && teams.B.length === 2;
+    const teamMap = {};
+    if (isTeamMode) {
+      teams.A.forEach(pid => teamMap[pid] = "A");
+      teams.B.forEach(pid => teamMap[pid] = "B");
+    }
+    const teamTotals = { A: 0, B: 0 };
+    if (isTeamMode && uschiResult) {
+      players.forEach(p => {
+        const k = teamMap[p.id];
+        if (k) teamTotals[k] += uschiResult.totals[p.id] ? uschiResult.totals[p.id].total : 0;
+      });
+    }
+
+    // Sort players by uschi (if uschi mode) or by sfNT
+    const sorted = stats.slice().sort((a, b) => {
+      if (isUschi && uschiResult) {
+        const aT = uschiResult.totals[a.p.id] ? uschiResult.totals[a.p.id].total : 0;
+        const bT = uschiResult.totals[b.p.id] ? uschiResult.totals[b.p.id].total : 0;
+        return bT - aT;
+      }
+      return b.sfNT - a.sfNT;
+    });
+
+    // ── Build HTML ───────────────────────────────────────────────────────────
+    let html = `
+      <div class="status-bar">
+        <span class="status-live">LIVE · Loch ${holesPlayed}/${holes.length}</span>
+        <span>Aktualisiert ${fmtLastUpdate(row.updated_at)}</span>
+      </div>
+
+      <div class="header">
+        <div class="logo">
+          <div class="logo-mark"></div>
+          <div class="brand">Fairway</div>
         </div>
-        <div class="team-pts" style="color:${col}">${pts}</div>
+        <div class="title">${escapeHtml(cfg.clubName || club?.name || "Runde")}</div>
+        <div class="subtitle">${fmtDate(cfg.date)} · ${holes.length} Loch · Par ${par}</div>
+        ${isUschi ? `<div class="meta">🎯 ${gameMode === "uschi-team" ? "Uschi 2 vs 2" : "Uschi-Modus"}</div>` : ""}
       </div>
     `;
-  });
-  html += `</div>`;
-}
 
-// ─── TensionBar: visual gap between top 2 ─────────────────────────────────
-// Compute holes played to gate the bar (only show after 3+ holes scored).
-let livMaxScored = 0;
-players.forEach(p => {
-  holes.forEach((h, i) => {
-    const g = scores[p.id] && scores[p.id][i];
-    if (typeof g === "number" || g === null) livMaxScored = Math.max(livMaxScored, i + 1);
-  });
-});
-if (livMaxScored >= 3) {
-  let topName, topScore, secondName, secondScore, unit;
-  if (isTeamMode && uschiResult && uschiResult.team) {
-    const teamA = uschiResult.team.A || 0;
-    const teamB = uschiResult.team.B || 0;
-    const aFirst = teamA >= teamB;
-    topName = aFirst ? (teams.nameA || "Team A") : (teams.nameB || "Team B");
-    topScore = Math.max(teamA, teamB);
-    secondName = aFirst ? (teams.nameB || "Team B") : (teams.nameA || "Team A");
-    secondScore = Math.min(teamA, teamB);
-    unit = "Pkt";
-  } else if (sorted.length >= 2) {
-    const t = sorted[0];
-    const s2 = sorted[1];
-    if (isUschi) {
-      topScore = uschiResult && uschiResult.totals[t.p.id] ? uschiResult.totals[t.p.id].total : 0;
-      secondScore = uschiResult && uschiResult.totals[s2.p.id] ? uschiResult.totals[s2.p.id].total : 0;
-      unit = "Pkt";
-    } else {
-      topScore = t.sfNT;
-      secondScore = s2.sfNT;
-      unit = "SF";
+    // Team ranking (if team mode)
+    if (isTeamMode) {
+      const teamData = [
+        { k: "A", color: "#c9a85c", total: teamTotals.A, members: teams.A.map(pid => {
+          const p = players.find(pp => pp.id === pid);
+          return p ? p.name : "?";
+        }).join(" + ") },
+        { k: "B", color: "#7ea88a", total: teamTotals.B, members: teams.B.map(pid => {
+          const p = players.find(pp => pp.id === pid);
+          return p ? p.name : "?";
+        }).join(" + ") },
+      ].sort((a, b) => b.total - a.total);
+
+      html += `<div class="card">
+        <div class="eyebrow eyebrow-gold">🏆 Team-Wertung</div>`;
+      teamData.forEach((t, i) => {
+        const medal = i === 0 ? "🥇" : "🥈";
+        const pts = t.total > 0 ? `+${t.total}` : t.total;
+        const col = t.total >= 0 ? "#c9a85c" : "#d67a5c";
+        html += `
+          <div class="team-row">
+            <div style="font-size:24px">${medal}</div>
+            <div class="team-dot" style="background:${t.color}">${t.k}</div>
+            <div class="team-name">
+              ${escapeHtml(t.members)}
+              <div class="team-members">Team ${t.k}</div>
+            </div>
+            <div class="team-pts" style="color:${col}">${pts}</div>
+          </div>
+        `;
+      });
+      html += `</div>`;
     }
-    topName = t.p.name;
-    secondName = s2.p.name;
-  }
-  if (topName !== undefined && secondName !== undefined) {
-    const diff = Math.abs(topScore - secondScore);
-    let leaderPct;
-    if (topScore === 0 && secondScore === 0) leaderPct = 50;
-    else {
-      const sum = topScore + Math.max(0, secondScore);
-      leaderPct = sum > 0 ? Math.max(20, Math.min(80, (topScore / sum) * 100)) : 50;
-    }
-    html += `
-    <div class="card" style="padding:14px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:12px;font-weight:700">
-        <div style="color:#c9a85c;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0">
-          ${escapeHtml(topName)} <span style="font-family:'JetBrains Mono',monospace">${topScore}</span>
-        </div>
-        <div style="color:#7ea88a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;text-align:right">
-          <span style="font-family:'JetBrains Mono',monospace">${secondScore}</span> ${escapeHtml(secondName)}
-        </div>
-      </div>
-      <div style="width:100%;height:10px;background:#3a4a40;border-radius:5px;overflow:hidden;display:flex">
-        <div style="width:${leaderPct}%;height:100%;background:#c9a85c;transition:width 0.4s ease"></div>
-        <div style="width:${100 - leaderPct}%;height:100%;background:#7ea88a;transition:width 0.4s ease"></div>
-      </div>
-      <div style="text-align:center;margin-top:8px;font-size:10px;color:#5d6e63;letter-spacing:0.05em">
-        ${diff === 0 ? "GLEICHSTAND" : `${diff} ${unit} Differenz`}
-      </div>
-    </div>`;
-  }
-}
 
-// Individual standings
-html += `<div class="card">
-  <div class="eyebrow">${isTeamMode ? "Einzelpunkte" : "Rangliste"}</div>`;
-sorted.forEach((s, i) => {
-  const uschiTotal = uschiResult && uschiResult.totals[s.p.id]
-    ? uschiResult.totals[s.p.id].total : 0;
-  const isCrown = i === 0;
-  const teamLetter = isTeamMode ? teamMap[s.p.id] : null;
-  const teamColor = teamLetter === "A" ? "#c9a85c" : teamLetter === "B" ? "#7ea88a" : null;
-
-  let mainVal, mainLabel, mainColor;
-  if (isUschi) {
-    mainVal = uschiTotal > 0 ? `+${uschiTotal}` : uschiTotal;
-    mainLabel = "USCHI";
-    mainColor = uschiTotal >= 0 ? "#c9a85c" : "#d67a5c";
-  } else {
-    mainVal = s.sfNT;
-    mainLabel = "SF NETTO";
-    mainColor = "#c9a85c";
-  }
-
-  html += `
-    <div class="player-row">
-      ${teamColor
-        ? `<div class="team-dot" style="background:${teamColor}; width:32px; height:32px; font-size:13px">${teamLetter}</div>`
-        : `<div class="avatar">${escapeHtml(s.p.name.charAt(0).toUpperCase())}</div>`}
-      <div style="flex:1; min-width:0">
-        <div class="player-name">
-          ${escapeHtml(s.p.name)}
-          ${isCrown && isUschi ? `<span class="crown">👑</span>` : ""}
-        </div>
-        <div class="player-meta">
-          HCP ${s.p.hcp} · Vorgabe ${s.ph} · Brutto ${s.bT || "—"}${s.strichCount > 0 ? "*" : ""} · SF ${s.sfNT}${s.ladyCount > 0 ? ` · 👯 ${s.ladyCount}` : ""}
-        </div>
-      </div>
-      <div class="player-pts">
-        <div class="player-pts-main" style="color:${mainColor}">${mainVal}</div>
-        <div class="player-pts-label">${mainLabel}</div>
-      </div>
-    </div>
-  `;
-});
-html += `</div>`;
-
-// Uschi breakdown per hole (only in Uschi mode)
-if (isUschi && uschiResult && uschiResult.perHole) {
-  html += `<div class="card" style="padding:0; overflow:hidden">
-    <div class="eyebrow" style="padding:14px 14px 10px">Loch-für-Loch</div>
-    <div style="overflow-x:auto">
-    <table class="breakdown-table">
-      <thead>
-        <tr>
-          <th style="text-align:left; padding-left:10px">L</th>
-          <th>Par</th>
-          ${players.map(p => `<th>${escapeHtml(p.name.slice(0, 4))}</th>`).join("")}
-        </tr>
-      </thead>
-      <tbody>`;
-  holes.forEach((h, i) => {
-    const ph = uschiResult.perHole.find(x => x.holeIdx === i);
-    if (!ph) return;
-    const anyPlayed = players.some(p => {
-      const g = scores[p.id] && scores[p.id][i];
-      return isValid(g) || isStrich(g);
-    });
-    if (!anyPlayed) return;
-    html += `<tr>
-      <td class="hole-num">${i + 1}</td>
-      <td class="par">${h.par}</td>`;
+    // ─── TensionBar: visual gap between top 2 ─────────────────────────────────
+    // Compute holes played to gate the bar (only show after 3+ holes scored).
+    let livMaxScored = 0;
     players.forEach(p => {
-      const g = scores[p.id] && scores[p.id][i];
-      const points = (ph.holePoints && ph.holePoints[p.id]) || 0;
-      const bd = (ph.holeBreakdown && ph.holeBreakdown[p.id]) || {};
-      if (!isValid(g) && !isStrich(g)) {
-        html += `<td style="text-align:center; color:#5d6e63">—</td>`;
-        return;
-      }
-      if (isStrich(g)) {
-        html += `<td style="text-align:center; color:#5d6e63">✗</td>`;
-        return;
-      }
-      // Build icons
-      const icons = [];
-      if (bd.best)   icons.push("🏆");
-      if (bd.birdie) icons.push("🎯");
-      if (bd.uschi > 0) icons.push(bd.uschi > 1 ? `💧${bd.uschi}` : "💧");
-      if (bd.worst)  icons.push("🔻");
-      const isPuffer = points === 0 && icons.length === 0;
-      const color = points > 0 ? "#c9a85c" : points < 0 ? "#d67a5c" : "#a2bfa2";
-      const sign = points > 0 ? "+" : "";
-      html += `<td style="text-align:center">
-        <div class="mono" style="font-size:13px; font-weight:700; color:${color}; line-height:1">${sign}${points}</div>
-        <div style="font-size:10px; margin-top:2px; letter-spacing:-0.5px">
-          ${isPuffer ? '<span style="color:#5d6e63">·</span>' : icons.join("")}
-        </div>
-      </td>`;
+      holes.forEach((h, i) => {
+        const g = scores[p.id] && scores[p.id][i];
+        if (typeof g === "number" || g === null) livMaxScored = Math.max(livMaxScored, i + 1);
+      });
     });
-    html += `</tr>`;
+    if (livMaxScored >= 3) {
+      let topName, topScore, secondName, secondScore, unit;
+      if (isTeamMode && uschiResult && uschiResult.team) {
+        const teamA = uschiResult.team.A || 0;
+        const teamB = uschiResult.team.B || 0;
+        const aFirst = teamA >= teamB;
+        topName = aFirst ? (teams.nameA || "Team A") : (teams.nameB || "Team B");
+        topScore = Math.max(teamA, teamB);
+        secondName = aFirst ? (teams.nameB || "Team B") : (teams.nameA || "Team A");
+        secondScore = Math.min(teamA, teamB);
+        unit = "Pkt";
+      } else if (sorted.length >= 2) {
+        const t = sorted[0];
+        const s2 = sorted[1];
+        if (isUschi) {
+          topScore = uschiResult && uschiResult.totals[t.p.id] ? uschiResult.totals[t.p.id].total : 0;
+          secondScore = uschiResult && uschiResult.totals[s2.p.id] ? uschiResult.totals[s2.p.id].total : 0;
+          unit = "Pkt";
+        } else {
+          topScore = t.sfNT;
+          secondScore = s2.sfNT;
+          unit = "SF";
+        }
+        topName = t.p.name;
+        secondName = s2.p.name;
+      }
+      if (topName !== undefined && secondName !== undefined) {
+        const diff = Math.abs(topScore - secondScore);
+        let leaderPct;
+        if (topScore === 0 && secondScore === 0) leaderPct = 50;
+        else {
+          const sum = topScore + Math.max(0, secondScore);
+          leaderPct = sum > 0 ? Math.max(20, Math.min(80, (topScore / sum) * 100)) : 50;
+        }
+        html += `
+        <div class="card" style="padding:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:12px;font-weight:700">
+            <div style="color:#c9a85c;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0">
+              ${escapeHtml(topName)} <span style="font-family:'JetBrains Mono',monospace">${topScore}</span>
+            </div>
+            <div style="color:#7ea88a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;text-align:right">
+              <span style="font-family:'JetBrains Mono',monospace">${secondScore}</span> ${escapeHtml(secondName)}
+            </div>
+          </div>
+          <div style="width:100%;height:10px;background:#3a4a40;border-radius:5px;overflow:hidden;display:flex">
+            <div style="width:${leaderPct}%;height:100%;background:#c9a85c;transition:width 0.4s ease"></div>
+            <div style="width:${100 - leaderPct}%;height:100%;background:#7ea88a;transition:width 0.4s ease"></div>
+          </div>
+          <div style="text-align:center;margin-top:8px;font-size:10px;color:#5d6e63;letter-spacing:0.05em">
+            ${diff === 0 ? "GLEICHSTAND" : `${diff} ${unit} Differenz`}
+          </div>
+        </div>`;
+      }
+    }
+
+    // Individual standings
+    html += `<div class="card">
+      <div class="eyebrow">${isTeamMode ? "Einzelpunkte" : "Rangliste"}</div>`;
+    sorted.forEach((s, i) => {
+      const uschiTotal = uschiResult && uschiResult.totals[s.p.id]
+        ? uschiResult.totals[s.p.id].total : 0;
+      const isCrown = i === 0;
+      const teamLetter = isTeamMode ? teamMap[s.p.id] : null;
+      const teamColor = teamLetter === "A" ? "#c9a85c" : teamLetter === "B" ? "#7ea88a" : null;
+
+      let mainVal, mainLabel, mainColor;
+      if (isUschi) {
+        mainVal = uschiTotal > 0 ? `+${uschiTotal}` : uschiTotal;
+        mainLabel = "USCHI";
+        mainColor = uschiTotal >= 0 ? "#c9a85c" : "#d67a5c";
+      } else {
+        mainVal = s.sfNT;
+        mainLabel = "SF NETTO";
+        mainColor = "#c9a85c";
+      }
+
+      html += `
+        <div class="player-row">
+          ${teamColor
+            ? `<div class="team-dot" style="background:${teamColor}; width:32px; height:32px; font-size:13px">${teamLetter}</div>`
+            : `<div class="avatar">${escapeHtml(s.p.name.charAt(0).toUpperCase())}</div>`}
+          <div style="flex:1; min-width:0">
+            <div class="player-name">
+              ${escapeHtml(s.p.name)}
+              ${isCrown && isUschi ? `<span class="crown">👑</span>` : ""}
+            </div>
+            <div class="player-meta">
+              HCP ${s.p.hcp} · Vorgabe ${s.ph} · Brutto ${s.bT || "—"}${s.strichCount > 0 ? "*" : ""} · SF ${s.sfNT}${s.ladyCount > 0 ? ` · 👯 ${s.ladyCount}` : ""}
+            </div>
+          </div>
+          <div class="player-pts">
+            <div class="player-pts-main" style="color:${mainColor}">${mainVal}</div>
+            <div class="player-pts-label">${mainLabel}</div>
+          </div>
+        </div>
+      `;
+    });
+    html += `</div>`;
+
+    // Uschi breakdown per hole (only in Uschi mode)
+    if (isUschi && uschiResult && uschiResult.perHole) {
+      html += `<div class="card" style="padding:0; overflow:hidden">
+        <div class="eyebrow" style="padding:14px 14px 10px">Loch-für-Loch</div>
+        <div style="overflow-x:auto">
+        <table class="breakdown-table">
+          <thead>
+            <tr>
+              <th style="text-align:left; padding-left:10px">L</th>
+              <th>Par</th>
+              ${players.map(p => `<th>${escapeHtml(p.name.slice(0, 4))}</th>`).join("")}
+            </tr>
+          </thead>
+          <tbody>`;
+      holes.forEach((h, i) => {
+        const ph = uschiResult.perHole.find(x => x.holeIdx === i);
+        if (!ph) return;
+        const anyPlayed = players.some(p => {
+          const g = scores[p.id] && scores[p.id][i];
+          return isValid(g) || isStrich(g);
+        });
+        if (!anyPlayed) return;
+        html += `<tr>
+          <td class="hole-num">${i + 1}</td>
+          <td class="par">${h.par}</td>`;
+        players.forEach(p => {
+          const g = scores[p.id] && scores[p.id][i];
+          const points = (ph.holePoints && ph.holePoints[p.id]) || 0;
+          const bd = (ph.holeBreakdown && ph.holeBreakdown[p.id]) || {};
+          if (!isValid(g) && !isStrich(g)) {
+            html += `<td style="text-align:center; color:#5d6e63">—</td>`;
+            return;
+          }
+          if (isStrich(g)) {
+            html += `<td style="text-align:center; color:#5d6e63">✗</td>`;
+            return;
+          }
+          // Build icons
+          const icons = [];
+          if (bd.best)   icons.push("🏆");
+          if (bd.birdie) icons.push("🎯");
+          if (bd.uschi > 0) icons.push(bd.uschi > 1 ? `💧${bd.uschi}` : "💧");
+          if (bd.worst)  icons.push("🔻");
+          const isPuffer = points === 0 && icons.length === 0;
+          const color = points > 0 ? "#c9a85c" : points < 0 ? "#d67a5c" : "#a2bfa2";
+          const sign = points > 0 ? "+" : "";
+          html += `<td style="text-align:center">
+            <div class="mono" style="font-size:13px; font-weight:700; color:${color}; line-height:1">${sign}${points}</div>
+            <div style="font-size:10px; margin-top:2px; letter-spacing:-0.5px">
+              ${isPuffer ? '<span style="color:#5d6e63">·</span>' : icons.join("")}
+            </div>
+          </td>`;
+        });
+        html += `</tr>`;
+      });
+      html += `</tbody></table></div>
+        <div style="font-size:10px; color:#5d6e63; padding:8px 12px; display:flex; flex-wrap:wrap; gap:10px; justify-content:center; border-top:1px solid #213629">
+          <span>🏆 Bester</span>
+          <span>🔻 Schlechtester</span>
+          <span>🎯 Birdie</span>
+          <span>💧 Uschi</span>
+          <span>· Puffer</span>
+        </div>
+      </div>`;
+    }
+
+    // Scorecard table
+    html += `<div class="card" style="padding:0; overflow:hidden">
+      <div class="eyebrow" style="padding:14px 14px 10px">Scorekarte</div>
+      <table>
+        <thead>
+          <tr>
+            <th style="text-align:left; padding-left:10px">L</th>
+            <th>Par</th>
+            <th>SI</th>
+            ${players.map(p => `<th>${escapeHtml(p.name.slice(0, 3))}</th>`).join("")}
+          </tr>
+        </thead>
+        <tbody>`;
+    holes.forEach((h, i) => {
+      html += `<tr>
+        <td class="hole-num">${i + 1}</td>
+        <td class="par">${h.par}</td>
+        <td class="si">${h.si}</td>`;
+      players.forEach(p => {
+        const g = scores[p.id] && scores[p.id][i];
+        const cls = scoreColorClass(g, h.par);
+        let display = "—";
+        if (isStrich(g)) display = "✗";
+        else if (isValid(g)) display = g;
+        html += `<td class="score"><span class="score-pill ${cls}">${display}</span></td>`;
+      });
+      html += `</tr>`;
+    });
+    html += `</tbody></table></div>`;
+
+    // Footer
+    html += `
+      <div class="footer">
+        Fairway · Golf Scorecard<br>
+        <span style="font-size:10px; color:#5d6e63; font-family:Inter,sans-serif; font-style:normal">
+          Live-Link läuft nach 48h ab
+        </span>
+      </div>
+    `;
+
+    return html;
+  }
+
+  async function refresh() {
+    // Check: are Supabase credentials properly injected?
+    // We use string concatenation so the build-time replace doesn't match this check itself.
+    const placeholderUrl = "__" + "SUPABASE_URL" + "__";
+    const placeholderKey = "__" + "SUPABASE_KEY" + "__";
+    if (!SUPABASE_URL || SUPABASE_URL === placeholderUrl || !SUPABASE_KEY || SUPABASE_KEY === placeholderKey) {
+      root.innerHTML = `<div class="error">
+        <b>Konfiguration unvollständig.</b><br>
+        Die Supabase-Zugangsdaten wurden beim Build nicht eingefügt.<br>
+        Bitte prüfe, dass <code>VITE_SUPABASE_URL</code> und <code>VITE_SUPABASE_ANON_KEY</code><br>
+        in Vercel als Environment Variables gesetzt sind und neu deployed wird.
+      </div>`;
+      return;
+    }
+    if (!code) {
+      root.innerHTML = `<div class="error">
+        <b>Kein Live-Code angegeben.</b><br>
+        Diese Seite muss mit einem Live-Code aufgerufen werden,<br>
+        z.B. <code>/live.html#ABCD1234</code>.
+      </div>`;
+      return;
+    }
+    const row = await fetchLive();
+    if (!row) {
+      // Not found OR error
+      if (lastData) {
+        // We had data before, keep showing it but mark as stale
+        return;
+      }
+      root.innerHTML = `<div class="error">
+        <b>Live-Ticker nicht gefunden.</b><br>
+        Der Link ist entweder falsch oder schon abgelaufen<br>
+        (Live-Ticker laufen nach 48 Stunden ab).
+      </div>`;
+      return;
+    }
+    lastData = row;
+    lastUpdate = new Date();
+    // Wrap render in try/catch — if rendering fails, show error instead of leaving the loading screen
+    try {
+      const html = renderData(row);
+      root.innerHTML = html;
+    } catch (e) {
+      console.error("Render error:", e, "Data:", row);
+      root.innerHTML = `
+        <div style="padding:60px 20px;text-align:center;color:#7a9281;font-family:Inter,sans-serif;max-width:520px;margin:0 auto">
+          <div style="font-size:48px;margin-bottom:20px">⚠️</div>
+          <h2 style="color:#cdd5c8;font-size:22px;margin-bottom:12px">Anzeige-Fehler</h2>
+          <p style="font-size:14px;line-height:1.5;margin-bottom:20px">
+            Die Live-Daten konnten nicht angezeigt werden.
+          </p>
+          <div style="font-size:11px;color:#5d6e63;padding:12px;background:#1a2620;border-radius:8px;text-align:left;font-family:monospace;word-break:break-word;line-height:1.6">
+            <b>Fehler:</b> ${(e.message || String(e)).slice(0, 200)}<br><br>
+            <b>Stack:</b> ${(e.stack || "").slice(0, 300)}<br><br>
+            <b>Daten-Keys:</b> ${row && row.data ? Object.keys(row.data).join(", ") : "(keine data)"}<br>
+            <b>Spieler:</b> ${row && row.data && row.data.players ? row.data.players.length : "?"}<br>
+            <b>Holes:</b> ${row && row.data && row.data.holes ? row.data.holes.length : "?"}
+          </div>
+        </div>`;
+    }
+  }
+
+  // Initial load + auto-refresh every 15s
+  refresh();
+  setInterval(refresh, 15000);
+
+  // Also refresh when tab becomes visible again
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refresh();
   });
-  html += `</tbody></table></div>
-    <div style="font-size:10px; color:#5d6e63; padding:8px 12px; display:flex; flex-wrap:wrap; gap:10px; justify-content:center; border-top:1px solid #213629">
-      <span>🏆 Bester</span>
-      <span>🔻 Schlechtester</span>
-      <span>🎯 Birdie</span>
-      <span>💧 Uschi</span>
-      <span>· Puffer</span>
-    </div>
-  </div>`;
-}
-
-// Scorecard table
-html += `<div class="card" style="padding:0; overflow:hidden">
-  <div class="eyebrow" style="padding:14px 14px 10px">Scorekarte</div>
-  <table>
-    <thead>
-      <tr>
-        <th style="text-align:left; padding-left:10px">L</th>
-        <th>Par</th>
-        <th>SI</th>
-        ${players.map(p => `<th>${escapeHtml(p.name.slice(0, 3))}</th>`).join("")}
-      </tr>
-    </thead>
-    <tbody>`;
-holes.forEach((h, i) => {
-  html += `<tr>
-    <td class="hole-num">${i + 1}</td>
-    <td class="par">${h.par}</td>
-    <td class="si">${h.si}</td>`;
-  players.forEach(p => {
-    const g = scores[p.id] && scores[p.id][i];
-    const cls = scoreColorClass(g, h.par);
-    let display = "—";
-    if (isStrich(g)) display = "✗";
-    else if (isValid(g)) display = g;
-    html += `<td class="score"><span class="score-pill ${cls}">${display}</span></td>`;
-  });
-  html += `</tr>`;
-});
-html += `</tbody></table></div>`;
-
-// Footer
-html += `
-  <div class="footer">
-    Fairway · Golf Scorecard<br>
-    <span style="font-size:10px; color:#5d6e63; font-family:Inter,sans-serif; font-style:normal">
-      Live-Link läuft nach 48h ab
-    </span>
-  </div>
-`;
-
-return html;
-```
-
-}
-
-async function refresh() {
-// Check: are Supabase credentials properly injected?
-// We use string concatenation so the build-time replace doesn’t match this check itself.
-const placeholderUrl = “**” + “SUPABASE_URL” + “**”;
-const placeholderKey = “**” + “SUPABASE_KEY” + “**”;
-if (!SUPABASE_URL || SUPABASE_URL === placeholderUrl || !SUPABASE_KEY || SUPABASE_KEY === placeholderKey) {
-root.innerHTML = `<div class="error"> <b>Konfiguration unvollständig.</b><br> Die Supabase-Zugangsdaten wurden beim Build nicht eingefügt.<br> Bitte prüfe, dass <code>VITE_SUPABASE_URL</code> und <code>VITE_SUPABASE_ANON_KEY</code><br> in Vercel als Environment Variables gesetzt sind und neu deployed wird. </div>`;
-return;
-}
-if (!code) {
-root.innerHTML = `<div class="error"> <b>Kein Live-Code angegeben.</b><br> Diese Seite muss mit einem Live-Code aufgerufen werden,<br> z.B. <code>/live.html#ABCD1234</code>. </div>`;
-return;
-}
-const row = await fetchLive();
-if (!row) {
-// Not found OR error
-if (lastData) {
-// We had data before, keep showing it but mark as stale
-return;
-}
-root.innerHTML = `<div class="error"> <b>Live-Ticker nicht gefunden.</b><br> Der Link ist entweder falsch oder schon abgelaufen<br> (Live-Ticker laufen nach 48 Stunden ab). </div>`;
-return;
-}
-lastData = row;
-lastUpdate = new Date();
-// Wrap render in try/catch — if rendering fails, show error instead of leaving the loading screen
-try {
-const html = renderData(row);
-root.innerHTML = html;
-} catch (e) {
-console.error(“Render error:”, e, “Data:”, row);
-root.innerHTML = ` <div style="padding:60px 20px;text-align:center;color:#7a9281;font-family:Inter,sans-serif;max-width:520px;margin:0 auto"> <div style="font-size:48px;margin-bottom:20px">⚠️</div> <h2 style="color:#cdd5c8;font-size:22px;margin-bottom:12px">Anzeige-Fehler</h2> <p style="font-size:14px;line-height:1.5;margin-bottom:20px"> Die Live-Daten konnten nicht angezeigt werden. </p> <div style="font-size:11px;color:#5d6e63;padding:12px;background:#1a2620;border-radius:8px;text-align:left;font-family:monospace;word-break:break-word;line-height:1.6"> <b>Fehler:</b> ${(e.message || String(e)).slice(0, 200)}<br><br> <b>Stack:</b> ${(e.stack || "").slice(0, 300)}<br><br> <b>Daten-Keys:</b> ${row && row.data ? Object.keys(row.data).join(", ") : "(keine data)"}<br> <b>Spieler:</b> ${row && row.data && row.data.players ? row.data.players.length : "?"}<br> <b>Holes:</b> ${row && row.data && row.data.holes ? row.data.holes.length : "?"} </div> </div>`;
-}
-}
-
-// Initial load + auto-refresh every 15s
-refresh();
-setInterval(refresh, 15000);
-
-// Also refresh when tab becomes visible again
-document.addEventListener(“visibilitychange”, () => {
-if (!document.hidden) refresh();
-});
 </script>
-
 </body>
 </html>
