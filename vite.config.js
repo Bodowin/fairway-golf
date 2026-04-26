@@ -20,9 +20,12 @@ function injectLiveEnv(env) {
       }
       try {
         let html = readFileSync(distPath, "utf-8");
+        // Use JSON.stringify to safely serialize values as JS literals.
+        // This protects against any unexpected characters (quotes, backslashes,
+        // newlines) that could break the HTML or JS context.
         html = html
-          .replace(/__SUPABASE_URL__/g, url)
-          .replace(/__SUPABASE_KEY__/g, key);
+          .replace(/"__SUPABASE_URL__"/g, JSON.stringify(url))
+          .replace(/"__SUPABASE_KEY__"/g, JSON.stringify(key));
         writeFileSync(distPath, html);
         console.log(`✓ live.html: Supabase credentials injected (URL=${url ? "set" : "EMPTY"}, KEY=${key ? "set" : "EMPTY"})`);
       } catch (e) {
