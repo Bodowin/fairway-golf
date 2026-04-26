@@ -82,16 +82,37 @@
 </div>
 
 <script>
-  // Config: read Supabase credentials injected at build time
-  // We inline these so the viewer doesn't need a build step
-  // Note: trim() protects against accidental whitespace/newlines in env vars
-  const SUPABASE_URL = ("__SUPABASE_URL__").trim();
-  const SUPABASE_KEY = ("__SUPABASE_KEY__").trim();
+  // Config: read Supabase credentials injected at build time.
+  // Placeholders are replaced with JSON.stringify-quoted strings by vite.config.js.
+  const SUPABASE_URL = "__SUPABASE_URL__";
+  const SUPABASE_KEY = "__SUPABASE_KEY__";
+
+  // Detect if build placeholders weren't replaced (broken deploy / dev mode without env vars).
+  // Show a friendly error rather than silently failing with cryptic network errors.
+  const CONFIG_OK = !!(SUPABASE_URL && SUPABASE_KEY
+    && !SUPABASE_URL.includes("__SUPABASE")
+    && !SUPABASE_KEY.includes("__SUPABASE"));
 
   // Parse code from URL hash (e.g. /live.html#K3M9X7NP)
   const code = (window.location.hash || "").replace(/^#/, "").trim().toUpperCase();
 
   const root = document.getElementById("root");
+
+  // Early bail-out: missing config
+  if (!CONFIG_OK) {
+    root.innerHTML = `
+      <div style="padding:60px 20px;text-align:center;color:#7a9281;font-family:Inter,sans-serif">
+        <div style="font-size:48px;margin-bottom:20px">⚙️</div>
+        <h2 style="color:#cdd5c8;font-size:22px;margin-bottom:12px">Live-Ticker nicht konfiguriert</h2>
+        <p style="font-size:14px;line-height:1.5;max-width:400px;margin:0 auto">
+          Diese Live-Viewer-Seite erwartet Supabase-Zugangsdaten,
+          die beim Build eingespielt werden.
+          Bitte VITE_SUPABASE_URL und VITE_SUPABASE_ANON_KEY in den Vercel Environment Variables setzen.
+        </p>
+      </div>`;
+    throw new Error("live.html: Supabase config missing");
+  }
+
   let lastData = null;
   let lastUpdate = null;
 
