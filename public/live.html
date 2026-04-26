@@ -130,7 +130,8 @@
     <div style="padding:60px 20px;text-align:center;color:#7a9281;font-family:Inter,sans-serif">
       <div style="font-size:48px;margin-bottom:20px;animation:pulse 1.5s ease-in-out infinite">📡</div>
       <h2 style="color:#cdd5c8;font-size:22px;margin-bottom:8px">Lade Live-Ticker...</h2>
-      <p style="font-size:13px;color:#5d6e63">Code: ${code || "(kein Code)"}</p>
+      <p style="font-size:13px;color:#5d6e63;margin-bottom:8px">Code: ${code || "(kein Code)"}</p>
+      <p id="live-status" style="font-size:11px;color:#5d6e63;font-style:italic">Initialisiere...</p>
     </div>
     <style>@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.5 } }</style>`;
 
@@ -141,18 +142,51 @@
   async function fetchLive() {
     if (!code) return null;
     const url = `${SUPABASE_URL}/rest/v1/live_rounds?code=eq.${encodeURIComponent(code)}&select=*`;
+    // Update visible status
+    const statusEl = document.getElementById("live-status");
+    if (statusEl) statusEl.textContent = "Verbinde mit Supabase...";
     try {
       const res = await fetch(url, {
         headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` }
       });
+      if (statusEl) statusEl.textContent = `Antwort: HTTP ${res.status}`;
       if (!res.ok) {
         console.error(`Live fetch failed: HTTP ${res.status} from ${url}`);
+        // Show error visibly
+        root.innerHTML = `
+          <div style="padding:60px 20px;text-align:center;color:#7a9281;font-family:Inter,sans-serif;max-width:500px;margin:0 auto">
+            <div style="font-size:48px;margin-bottom:20px">⚠️</div>
+            <h2 style="color:#cdd5c8;font-size:22px;margin-bottom:12px">Verbindungs-Fehler</h2>
+            <p style="font-size:14px;line-height:1.5;margin-bottom:20px">
+              HTTP ${res.status} ${res.statusText || ""}
+            </p>
+            <div style="font-size:11px;color:#5d6e63;padding:12px;background:#1a2620;border-radius:8px;text-align:left;font-family:monospace">
+              URL: ${SUPABASE_URL.slice(0, 40)}...<br>
+              Code: ${code}<br>
+              Status: ${res.status}
+            </div>
+          </div>`;
         return null;
       }
       const rows = await res.json();
+      if (statusEl) statusEl.textContent = `${rows.length} Treffer`;
       return rows[0] || null;
     } catch (e) {
       console.error("Live fetch error:", e.message, "URL:", url);
+      // Show network/CORS error visibly
+      root.innerHTML = `
+        <div style="padding:60px 20px;text-align:center;color:#7a9281;font-family:Inter,sans-serif;max-width:500px;margin:0 auto">
+          <div style="font-size:48px;margin-bottom:20px">📡</div>
+          <h2 style="color:#cdd5c8;font-size:22px;margin-bottom:12px">Netzwerk-Fehler</h2>
+          <p style="font-size:14px;line-height:1.5;margin-bottom:20px">
+            Konnte Supabase nicht erreichen.
+          </p>
+          <div style="font-size:11px;color:#5d6e63;padding:12px;background:#1a2620;border-radius:8px;text-align:left;font-family:monospace">
+            Fehler: ${(e.message || "?").slice(0, 100)}<br>
+            URL: ${SUPABASE_URL.slice(0, 40)}...<br>
+            Code: ${code}
+          </div>
+        </div>`;
       return null;
     }
   }
