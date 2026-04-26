@@ -832,6 +832,37 @@ function SwipeHandle({ onClose }) {
   );
 }
 
+// ─── Race status helper ──────────────────────────────────────────────────
+// Determines if a round's outcome is mathematically secured (winner cannot be caught)
+// or "open" (close race with holes remaining).
+//
+// Returns { status: "secured" | "open" | "normal", winnerName?, leadDiff?, holesLeft? }
+// - "secured": leader cannot be caught even if every remaining hole is a max-points hole for chasers
+// - "open":    diff between top 2 ≤ 3 SF AND > 3 holes remaining
+// - "normal":  neither case applies
+//
+// Stableford: max gain per hole = par + 2 strokes ahead = 4 SF (theoretical max with all strokes)
+// Conservative estimate uses 3 SF per hole as max realistic gain.
+function getRaceStatus(rankedStats, holesLeft) {
+  if (!Array.isArray(rankedStats) || rankedStats.length < 2) {
+    return { status: "normal" };
+  }
+  const leader = rankedStats[0];
+  const second = rankedStats[1];
+  const leadDiff = leader.sfNT - second.sfNT;
+  // Maximum possible gain per remaining hole for a chaser = 4 SF (theoretical max).
+  // Use 4 to be safe — if we can prove "even with max points each remaining hole" they can't catch up, lead is secured.
+  const maxRemainingGain = holesLeft * 4;
+
+  if (leadDiff > maxRemainingGain && holesLeft >= 0) {
+    return { status: "secured", winnerName: leader.p.name, leadDiff, holesLeft };
+  }
+  if (leadDiff <= 3 && holesLeft > 3) {
+    return { status: "open", leadDiff, holesLeft };
+  }
+  return { status: "normal", leadDiff, holesLeft };
+}
+
 function aggregateClubStats(clubName, allRounds) {
   const rounds = allRounds.filter(r => r.cfg?.clubName === clubName);
   if (rounds.length === 0) return null;
@@ -961,9 +992,13 @@ function aggregateClubStats(clubName, allRounds) {
       // Aggregate ladies for this player from this round's ladies map
       const rLadies = r.ladies || {};
       const playerLadies = rLadies[p.id] || [];
-      pm.ladiesTotal += playerLadies.length;
+      // Defensive: validate indices are valid integers in range before counting
+      const validLadies = playerLadies.filter(holeIdx =>
+        Number.isInteger(holeIdx) && holeIdx >= 0 && holeIdx < holes.length
+      );
+      pm.ladiesTotal += validLadies.length;
       // Increment per-hole counts (both for the player and the global hole stats)
-      playerLadies.forEach(holeIdx => {
+      validLadies.forEach(holeIdx => {
         if (holeIdx < pm.perHole.length) pm.perHole[holeIdx].ladyCount++;
         if (holeIdx < holeStats.length) holeStats[holeIdx].ladyCount++;
       });
@@ -1956,6 +1991,10 @@ export default function GolfApp() {
   const [rounds, setRounds] = useState([]);
   const [friends, setFriends] = useState([]);
   const [customClubs, setCustomClubs] = useState([]);
+  // Owner profile: the user's own player profile { name, hcp }.
+  // Auto-added as first player in new rounds. Stored separately so the user
+  // never needs to search themselves in friends list.
+  const [ownerProfile, setOwnerProfile] = useState(null);
   // Loaded flag - prevents sync-loop on initial data load
   const [loaded, setLoaded] = useState(false);
   const [showWelcome, setShowWelcome] = useState(false);
@@ -2006,7 +2045,7 @@ export default function GolfApp() {
   const [currentHole, setCurrentHole] = useState(0);
   // Game mode (Uschi)
   const [gameMode, setGameMode] = useState("stableford"); // "stableford" | "uschi-single" | "uschi-team"
-  const [teams, setTeams] = useState(null); // { A: [pid], B: [pid] } | null (null = not split yet)
+  const [teams, setTeams] = useState(null); // { A: [pid], B: [pid], nameA?, nameB? } | null
   const [par3Data, setPar3Data] = useState({}); // { [holeIdx]: { greenHits: [pid], closest: pid } }
   const [uschiPromptHole, setUschiPromptHole] = useState(null); // holeIdx currently prompting for par-3 data
   const [showUschiReview, setShowUschiReview] = useState(false); // Uschi protocol review screen
@@ -2094,6 +2133,10 @@ export default function GolfApp() {
       } catch {}
       try { const f = await window.storage.get("golf-friends");      if (f) setFriends(JSON.parse(f.value)); } catch {}
       try { const c = await window.storage.get("golf-custom-clubs"); if (c) setCustomClubs(JSON.parse(c.value)); } catch {}
+      try {
+        const o = await window.storage.get("golf-owner-profile");
+        if (o) setOwnerProfile(JSON.parse(o.value));
+      } catch {}
       try { const s = await window.storage.get("golf-sync-code");    if (s?.value) setSyncCode(s.value); } catch {}
 
       // Pull from cloud if sync code exists — with safety checks
@@ -2362,6 +2405,26 @@ export default function GolfApp() {
   // ── Players
   const par = sumPar(holes);
 
+  // Auto-sort players by handicap ascending (lower HCP = better player tees off first).
+  // Used after adding a player to maintain proper tee-off order.
+  const sortByHcp = (list) => [...list].sort((a, b) => (a.hcp ?? 99) - (b.hcp ?? 99));
+
+  // Suggest a team name from member initials (e.g. ["Bodo","Niki"] → "BoNi")
+  // Falls back to "Team A"/"Team B" if no player IDs match.
+  const suggestTeamName = (memberIds, allPlayers, fallback) => {
+    if (!Array.isArray(memberIds) || memberIds.length === 0) return fallback;
+    const parts = memberIds.map(pid => {
+      const p = allPlayers.find(x => x.id === pid);
+      if (!p?.name) return "";
+      // Take first 2 chars of name, capitalize first
+      const cleaned = p.name.trim().replace(/[^a-zA-ZäöüÄÖÜß]/g, "");
+      return cleaned.charAt(0).toUpperCase() + cleaned.charAt(1).toLowerCase();
+    }).filter(Boolean);
+    return parts.length > 0 ? parts.join("") : fallback;
+  };
+  const teamNameA = (teams?.nameA) || suggestTeamName(teams?.A, players, "Team A");
+  const teamNameB = (teams?.nameB) || suggestTeamName(teams?.B, players, "Team B");
+
   const addPlayer = useCallback(() => {
     const name = newP.name.trim(); if (!name) return;
     const hcp = parseFloat(newP.hcp);
@@ -2371,7 +2434,7 @@ export default function GolfApp() {
       teeName: cfg.defaultTeeName || "",
       cr: tee?.cr, slope: tee?.slope, par: tee?.par,
     };
-    setPlayers(p => [...p, playerData]);
+    setPlayers(p => sortByHcp([...p, playerData]));
     setNewP({ name: "", hcp: "" });
   }, [newP, selectedClub, cfg.defaultTeeName]);
 
@@ -2383,11 +2446,11 @@ export default function GolfApp() {
         ? f.lastTeeName
         : (cfg.defaultTeeName || "");
       const tee = selectedClub && teeName ? selectedClub.tees[teeName] : null;
-      return [...p, {
+      return sortByHcp([...p, {
         id: uid(), name: f.name, hcp: f.hcp,
         teeName,
         cr: tee?.cr, slope: tee?.slope, par: tee?.par,
-      }];
+      }]);
     });
   }, [selectedClub, cfg.defaultTeeName]);
 
@@ -2480,6 +2543,21 @@ export default function GolfApp() {
     const ps = { ...(s[pid] || {}) }; delete ps[hi];
     return { ...s, [pid]: ps };
   });
+
+  // Owner profile: persist + update friends list to keep owner in sync
+  const saveOwnerProfile = async (profile) => {
+    setOwnerProfile(profile);
+    try { await window.storage.set("golf-owner-profile", JSON.stringify(profile)); } catch {}
+    // Also ensure owner is in friends list (so they appear in suggestion dropdown)
+    if (profile?.name) {
+      const exists = friends.find(f => f.name === profile.name);
+      if (!exists) {
+        const updated = [...friends, { name: profile.name, hcp: profile.hcp, isOwner: true }];
+        setFriends(updated);
+        try { await window.storage.set("golf-friends", JSON.stringify(updated)); } catch {}
+      }
+    }
+  };
 
   // Toggle the "Lady" status for a player on a hole.
   // A "Lady" = player did not pass the women's tee on tee shot (German tradition: pays a beer).
@@ -2767,7 +2845,19 @@ export default function GolfApp() {
   const newRound = () => {
     setLoadedRoundId(null);
     setCfg({ name: "", date: toDay(), numHoles: 18, clubName: "", defaultTeeName: "" });
-    setHoles(makeHoles(72, 18)); setPlayers([]); setScores({});
+    setHoles(makeHoles(72, 18));
+    // Auto-add owner as first player so the user doesn't have to search themselves
+    if (ownerProfile?.name) {
+      setPlayers([{
+        id: uid(),
+        name: ownerProfile.name,
+        hcp: ownerProfile.hcp,
+        teeName: "",
+      }]);
+    } else {
+      setPlayers([]);
+    }
+    setScores({});
     setGameMode("stableford"); setTeams(null); setPar3Data({});
     setLadies({});
     setClubQ(""); setPickedClub(null);
@@ -4301,9 +4391,30 @@ export default function GolfApp() {
           Tap auf einen Spieler um sein Team zu wechseln.
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
-          {[["A", teamA], ["B", teamB]].map(([label, members]) => (
+          {[["A", teamA, teamNameA], ["B", teamB, teamNameB]].map(([label, members, displayName]) => (
             <div key={label} style={{ background: T.surface2, border: `1px solid ${T.line}`, borderRadius: "8px", padding: "10px", minHeight: "80px" }}>
-              <div style={{ ...S.eyebrow, color: label === "A" ? T.gold : T.sage, marginBottom: "6px" }}>Team {label}</div>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "6px" }}>
+                <div style={{ ...S.eyebrow, color: label === "A" ? T.gold : T.sage, margin: 0 }}>
+                  {displayName}
+                </div>
+                <button
+                  onClick={() => {
+                    const current = label === "A" ? (teams?.nameA || teamNameA) : (teams?.nameB || teamNameB);
+                    const next = prompt(`Team-Name für ${displayName}:`, current);
+                    if (next === null) return; // cancelled
+                    const cleaned = next.trim();
+                    setTeams(t => ({
+                      ...t,
+                      [label === "A" ? "nameA" : "nameB"]: cleaned || undefined,
+                    }));
+                  }}
+                  aria-label="Team-Name bearbeiten"
+                  style={{
+                    background: "transparent", border: "none",
+                    color: T.textDim, cursor: "pointer",
+                    padding: "0 4px", fontSize: "11px",
+                  }}>✏️</button>
+              </div>
               {members.length === 0 && (
                 <div style={{ fontSize: "11px", color: T.textDim, fontStyle: "italic" }}>leer</div>
               )}
@@ -4854,6 +4965,73 @@ export default function GolfApp() {
               )}
             </button>
           </div>
+
+          {/* Race status banner — secured win or open race */}
+          {(() => {
+            // Only show in stableford mode for now (Uschi has its own logic)
+            if (gameMode !== "stableford") return null;
+            const ranked = players.map(p => ({ p, ...getStats(p) })).sort((a, b) => b.sfNT - a.sfNT);
+            // Compute holes left: max holes minus the highest hole index that has any score across players
+            let maxScored = 0;
+            players.forEach(p => {
+              holes.forEach((_, i) => {
+                const g = scores[p.id]?.[i];
+                if (typeof g === "number" || g === null) maxScored = Math.max(maxScored, i + 1);
+              });
+            });
+            const holesLeft = Math.max(0, holes.length - maxScored);
+            // Don't show before the round starts or when fully done
+            if (maxScored < 3 || holesLeft === 0) return null;
+            const race = getRaceStatus(ranked, holesLeft);
+            if (race.status === "secured") {
+              return (
+                <div style={{
+                  marginTop: "12px", marginBottom: "4px",
+                  padding: "12px 16px",
+                  background: `linear-gradient(135deg, ${T.gold}30 0%, ${T.gold}15 100%)`,
+                  border: `1.5px solid ${T.gold}`,
+                  borderRadius: "12px",
+                  display: "flex", alignItems: "center", gap: "12px",
+                }}>
+                  <span style={{ fontSize: "26px" }}>🏆</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: "11px", color: T.gold, fontWeight: 700, letterSpacing: "0.05em", marginBottom: "2px" }}>
+                      SIEG MATHEMATISCH FIX
+                    </div>
+                    <div style={{ fontSize: "14px", color: T.text, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {race.winnerName} ist nicht mehr einholbar
+                    </div>
+                    <div style={{ fontSize: "10px", color: T.textSoft, marginTop: "1px" }}>
+                      {race.leadDiff} SF Vorsprung · {race.holesLeft} {race.holesLeft === 1 ? "Loch" : "Löcher"} verbleibend
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+            if (race.status === "open") {
+              return (
+                <div style={{
+                  marginTop: "12px", marginBottom: "4px",
+                  padding: "10px 14px",
+                  background: `${T.double}15`,
+                  border: `1.5px solid ${T.double}80`,
+                  borderRadius: "12px",
+                  display: "flex", alignItems: "center", gap: "10px",
+                }}>
+                  <span style={{ fontSize: "20px" }}>🔥</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: "11px", color: T.double, fontWeight: 700, letterSpacing: "0.05em", marginBottom: "2px" }}>
+                      OFFENES RENNEN
+                    </div>
+                    <div style={{ fontSize: "12px", color: T.textSoft }}>
+                      Nur {race.leadDiff} SF Differenz · {race.holesLeft} Löcher übrig — alles möglich!
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+            return null;
+          })()}
 
           {scoringMode === "batch" ? renderBatchMode() : renderLiveMode()}
 
@@ -7317,6 +7495,111 @@ WICHTIG:
   };
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // OWNER SETUP MODAL — first-time prompt to capture user's own player profile
+  // so they're auto-added to every new round.
+  // Also reachable from Settings for editing.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const [ownerSetupOpen, setOwnerSetupOpen] = useState(false);
+  const [ownerForm, setOwnerForm] = useState({ name: "", hcp: "" });
+
+  const renderOwnerSetup = () => {
+    if (!ownerSetupOpen) return null;
+    const isEditing = !!ownerProfile;
+    return (
+      <div onClick={() => setOwnerSetupOpen(false)}
+        style={{
+          position: "fixed", inset: 0, background: "#000000dd", zIndex: 1180,
+          display: "flex", alignItems: "center", justifyContent: "center", padding: "16px",
+        }}>
+        <div onClick={e => e.stopPropagation()}
+          style={{
+            width: "100%", maxWidth: "420px",
+            background: T.surface1, borderRadius: "16px",
+            border: `1px solid ${T.line}`, padding: "22px",
+          }}>
+          <div style={{ fontSize: "32px", textAlign: "center", marginBottom: "12px" }}>👤</div>
+          <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 6px", color: T.text, textAlign: "center" }}>
+            {isEditing ? "Mein Profil" : "Wer bist du?"}
+          </h3>
+          <p style={{ fontSize: "12px", color: T.textSoft, textAlign: "center", marginBottom: "18px", lineHeight: 1.5 }}>
+            {isEditing
+              ? "Dein Profil — wird bei jeder neuen Runde automatisch eingetragen."
+              : "Wenn du dich einmal einträgst, wirst du bei jeder neuen Runde automatisch als erster Spieler hinzugefügt."}
+          </p>
+          <div style={{ marginBottom: "12px" }}>
+            <label style={{ ...S.eyebrow, marginBottom: "6px", display: "block" }}>Name</label>
+            <input
+              type="text"
+              value={ownerForm.name}
+              onChange={e => setOwnerForm(f => ({ ...f, name: e.target.value }))}
+              placeholder="Bodo"
+              autoFocus
+              style={{ ...S.input, width: "100%" }}/>
+          </div>
+          <div style={{ marginBottom: "16px" }}>
+            <label style={{ ...S.eyebrow, marginBottom: "6px", display: "block" }}>Stammvorgabe (HCP)</label>
+            <input
+              type="number" step="0.1"
+              value={ownerForm.hcp}
+              onChange={e => setOwnerForm(f => ({ ...f, hcp: e.target.value }))}
+              placeholder="29.1"
+              style={{ ...S.input, width: "100%" }}/>
+          </div>
+          <div style={{ display: "flex", gap: "8px" }}>
+            {isEditing && (
+              <button
+                onClick={async () => {
+                  if (!confirm("Mein Profil wirklich entfernen?")) return;
+                  setOwnerProfile(null);
+                  try { await window.storage.delete("golf-owner-profile"); } catch {}
+                  setOwnerSetupOpen(false);
+                }}
+                style={{ ...S.btnSecondary, flex: 1, padding: "11px", fontSize: "12px", color: T.double, borderColor: `${T.double}40` }}>
+                Entfernen
+              </button>
+            )}
+            <button onClick={async () => {
+              setOwnerSetupOpen(false);
+              try { await window.storage.set("golf-owner-setup-skipped", "1"); } catch {}
+            }}
+              style={{ ...S.btnSecondary, flex: 1, padding: "11px", fontSize: "13px" }}>
+              {isEditing ? "Abbrechen" : "Später"}
+            </button>
+            <button
+              onClick={async () => {
+                const name = ownerForm.name.trim();
+                if (!name) { alert("Bitte einen Namen eingeben."); return; }
+                const hcp = parseFloat(ownerForm.hcp);
+                await saveOwnerProfile({ name, hcp: isNaN(hcp) ? 0 : hcp });
+                setOwnerSetupOpen(false);
+              }}
+              className="gold-hover"
+              style={{ ...S.btnPrimary, flex: 2, padding: "11px", fontSize: "13px" }}>
+              {isEditing ? "Speichern" : "Los geht's"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // Open owner setup automatically once after welcome, if not yet set
+  useEffect(() => {
+    if (loaded && !ownerProfile && !showWelcome && !ownerSetupOpen) {
+      // Check if user has dismissed this prompt before
+      (async () => {
+        try {
+          const skipped = await window.storage.get("golf-owner-setup-skipped");
+          if (!skipped?.value) {
+            setOwnerSetupOpen(true);
+            setOwnerForm({ name: "", hcp: "" });
+          }
+        } catch {}
+      })();
+    }
+  }, [loaded, showWelcome]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // SYNC CONFLICT MODAL — protects against accidental data loss when cloud
   // has fewer rounds than local (e.g., someone else pushed empty state)
   // ═══════════════════════════════════════════════════════════════════════════
@@ -8012,6 +8295,39 @@ WICHTIG:
           <SwipeHandle onClose={() => setShowSyncModal(false)} />
           <h3 className="serif" style={{ fontSize: "24px", margin: "0 0 6px", color: T.text }}>☁️ Cloud Sync</h3>
 
+          {/* Owner profile section — appears at the top of sync settings */}
+          <div style={{ marginTop: "12px", marginBottom: "16px", padding: "14px", background: T.surface2, borderRadius: "10px", border: `1px solid ${T.line}` }}>
+            <div style={{ ...S.eyebrow, marginBottom: "8px" }}>👤 Mein Profil</div>
+            {ownerProfile ? (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px" }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: "14px", fontWeight: 600, color: T.text }}>{ownerProfile.name}</div>
+                  <div style={{ fontSize: "11px", color: T.textSoft, marginTop: "2px" }}>HCP {ownerProfile.hcp}</div>
+                </div>
+                <button
+                  onClick={() => {
+                    setOwnerForm({ name: ownerProfile.name, hcp: String(ownerProfile.hcp ?? "") });
+                    setOwnerSetupOpen(true);
+                  }}
+                  style={{ ...S.btnGhost, padding: "6px 10px", fontSize: "11px" }}>
+                  ✏️ Bearbeiten
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => {
+                  setOwnerForm({ name: "", hcp: "" });
+                  setOwnerSetupOpen(true);
+                }}
+                style={{ ...S.btnSecondary, width: "100%", fontSize: "12px", padding: "10px" }}>
+                + Mein Profil einrichten
+              </button>
+            )}
+            <p style={{ fontSize: "10px", color: T.textDim, marginTop: "8px", lineHeight: 1.4, fontStyle: "italic" }}>
+              Wenn gesetzt, wirst du bei jeder neuen Runde automatisch als erster Spieler eingetragen.
+            </p>
+          </div>
+
           {!SYNC_ENABLED ? (
             <div style={{ background: `${T.bogey}15`, border: `1px solid ${T.bogey}50`, borderRadius: "10px", padding: "14px", fontSize: "13px", color: T.bogey, marginTop: "12px" }}>
               <div style={{ fontWeight: 700, marginBottom: "6px" }}>Nicht konfiguriert</div>
@@ -8221,6 +8537,13 @@ WICHTIG:
                     const cloudFriends = cloud.data.friends || [];
                     const cloudClubs = cloud.data.customClubs || [];
                     if (!confirm(`Aus Cloud holen: ${cloudRounds.length} Runden, ${cloudFriends.length} Freunde, ${cloudClubs.length} Clubs.\n\nLokaler Stand wird durch den Cloud-Stand ersetzt!\n\nSicher?`)) return;
+                    // Snapshot the current local state before overwriting — recoverable!
+                    try {
+                      await window.storage.set(
+                        `golf-backup-before-cloud-pull-${Date.now()}`,
+                        JSON.stringify({ rounds, friends, customClubs })
+                      );
+                    } catch {}
                     setRounds(cloudRounds);
                     setFriends(cloudFriends);
                     setCustomClubs(cloudClubs);
@@ -8228,7 +8551,7 @@ WICHTIG:
                     try { await window.storage.set("golf-friends", JSON.stringify(cloudFriends)); } catch {}
                     try { await window.storage.set("golf-custom-clubs", JSON.stringify(cloudClubs)); } catch {}
                     try { await window.storage.set("golf-last-sync", String(new Date(cloud.updated_at).getTime())); } catch {}
-                    alert(`✓ ${cloudRounds.length} Runden aus Cloud geladen`);
+                    alert(`✓ ${cloudRounds.length} Runden aus Cloud geladen\n(Backup deines vorherigen Standes gespeichert)`);
                   }}
                   style={{ ...S.btnSecondary, flex: 1, fontSize: "11px", padding: "8px", color: T.sage, borderColor: `${T.sage}40` }}>
                   ▼ Cloud holen
@@ -8378,6 +8701,7 @@ WICHTIG:
       {renderRoundAnalysis()}
       {renderSyncConflict()}
       {renderDeleteConfirm()}
+      {renderOwnerSetup()}
       {renderUndoToast()}
     </div>
   );
