@@ -751,7 +751,28 @@
     }
     lastData = row;
     lastUpdate = new Date();
-    root.innerHTML = renderData(row);
+    // Wrap render in try/catch — if rendering fails, show error instead of leaving the loading screen
+    try {
+      const html = renderData(row);
+      root.innerHTML = html;
+    } catch (e) {
+      console.error("Render error:", e, "Data:", row);
+      root.innerHTML = `
+        <div style="padding:60px 20px;text-align:center;color:#7a9281;font-family:Inter,sans-serif;max-width:520px;margin:0 auto">
+          <div style="font-size:48px;margin-bottom:20px">⚠️</div>
+          <h2 style="color:#cdd5c8;font-size:22px;margin-bottom:12px">Anzeige-Fehler</h2>
+          <p style="font-size:14px;line-height:1.5;margin-bottom:20px">
+            Die Live-Daten konnten nicht angezeigt werden.
+          </p>
+          <div style="font-size:11px;color:#5d6e63;padding:12px;background:#1a2620;border-radius:8px;text-align:left;font-family:monospace;word-break:break-word;line-height:1.6">
+            <b>Fehler:</b> ${(e.message || String(e)).slice(0, 200)}<br><br>
+            <b>Stack:</b> ${(e.stack || "").slice(0, 300)}<br><br>
+            <b>Daten-Keys:</b> ${row && row.data ? Object.keys(row.data).join(", ") : "(keine data)"}<br>
+            <b>Spieler:</b> ${row && row.data && row.data.players ? row.data.players.length : "?"}<br>
+            <b>Holes:</b> ${row && row.data && row.data.holes ? row.data.holes.length : "?"}
+          </div>
+        </div>`;
+    }
   }
 
   // Initial load + auto-refresh every 15s
