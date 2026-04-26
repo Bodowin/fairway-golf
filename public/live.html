@@ -83,35 +83,56 @@
 
 <script>
   // Config: read Supabase credentials injected at build time.
-  // Placeholders are replaced with JSON.stringify-quoted strings by vite.config.js.
+  // We support both injection patterns:
+  // - Old (raw replace): __SUPABASE_URL__ → https://....supabase.co
+  // - New (JSON.stringify): "__SUPABASE_URL__" → "https://....supabase.co"
+  // The actual values below get replaced by vite.config.js during build.
   const SUPABASE_URL = "__SUPABASE_URL__";
   const SUPABASE_KEY = "__SUPABASE_KEY__";
 
   // Detect if build placeholders weren't replaced (broken deploy / dev mode without env vars).
-  // Show a friendly error rather than silently failing with cryptic network errors.
+  // We check for any of: empty string, contains "__SUPABASE" (placeholder leftover),
+  // or doesn't look like a real URL/key.
   const CONFIG_OK = !!(SUPABASE_URL && SUPABASE_KEY
     && !SUPABASE_URL.includes("__SUPABASE")
-    && !SUPABASE_KEY.includes("__SUPABASE"));
+    && !SUPABASE_KEY.includes("__SUPABASE")
+    && SUPABASE_URL.startsWith("http")
+    && SUPABASE_KEY.length > 10);
 
   // Parse code from URL hash (e.g. /live.html#K3M9X7NP)
   const code = (window.location.hash || "").replace(/^#/, "").trim().toUpperCase();
 
   const root = document.getElementById("root");
 
-  // Early bail-out: missing config
+  // Early bail-out: missing config — show explicit error instead of infinite loading
   if (!CONFIG_OK) {
     root.innerHTML = `
-      <div style="padding:60px 20px;text-align:center;color:#7a9281;font-family:Inter,sans-serif">
+      <div style="padding:60px 20px;text-align:center;color:#7a9281;font-family:Inter,sans-serif;max-width:500px;margin:0 auto">
         <div style="font-size:48px;margin-bottom:20px">⚙️</div>
         <h2 style="color:#cdd5c8;font-size:22px;margin-bottom:12px">Live-Ticker nicht konfiguriert</h2>
-        <p style="font-size:14px;line-height:1.5;max-width:400px;margin:0 auto">
-          Diese Live-Viewer-Seite erwartet Supabase-Zugangsdaten,
-          die beim Build eingespielt werden.
-          Bitte VITE_SUPABASE_URL und VITE_SUPABASE_ANON_KEY in den Vercel Environment Variables setzen.
+        <p style="font-size:14px;line-height:1.5;margin-bottom:20px">
+          Die Supabase-Zugangsdaten wurden nicht eingespielt.
+          Bitte VITE_SUPABASE_URL und VITE_SUPABASE_ANON_KEY in den Vercel
+          Environment Variables setzen und neu deployen.
         </p>
+        <div style="font-size:11px;color:#5d6e63;margin-top:20px;padding:12px;background:#1a2620;border-radius:8px;text-align:left;font-family:monospace">
+          DEBUG INFO:<br>
+          URL: ${SUPABASE_URL ? (SUPABASE_URL.length > 30 ? SUPABASE_URL.slice(0, 30) + "..." : SUPABASE_URL) : "(leer)"}<br>
+          KEY length: ${SUPABASE_KEY ? SUPABASE_KEY.length : 0}<br>
+          Has placeholder: ${SUPABASE_URL.includes("__SUPABASE") || SUPABASE_KEY.includes("__SUPABASE")}
+        </div>
       </div>`;
     throw new Error("live.html: Supabase config missing");
   }
+
+  // Show initial loading state immediately (before fetch starts)
+  root.innerHTML = `
+    <div style="padding:60px 20px;text-align:center;color:#7a9281;font-family:Inter,sans-serif">
+      <div style="font-size:48px;margin-bottom:20px;animation:pulse 1.5s ease-in-out infinite">📡</div>
+      <h2 style="color:#cdd5c8;font-size:22px;margin-bottom:8px">Lade Live-Ticker...</h2>
+      <p style="font-size:13px;color:#5d6e63">Code: ${code || "(kein Code)"}</p>
+    </div>
+    <style>@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.5 } }</style>`;
 
   let lastData = null;
   let lastUpdate = null;
@@ -439,6 +460,70 @@
         `;
       });
       html += `</div>`;
+    }
+
+    // ─── TensionBar: visual gap between top 2 ─────────────────────────────────
+    // Compute holes played to gate the bar (only show after 3+ holes scored).
+    let livMaxScored = 0;
+    players.forEach(p => {
+      holes.forEach((h, i) => {
+        const g = scores[p.id] && scores[p.id][i];
+        if (typeof g === "number" || g === null) livMaxScored = Math.max(livMaxScored, i + 1);
+      });
+    });
+    if (livMaxScored >= 3) {
+      let topName, topScore, secondName, secondScore, unit;
+      if (isTeamMode && uschiResult && uschiResult.team) {
+        const teamA = uschiResult.team.A || 0;
+        const teamB = uschiResult.team.B || 0;
+        const aFirst = teamA >= teamB;
+        topName = aFirst ? (teams.nameA || "Team A") : (teams.nameB || "Team B");
+        topScore = Math.max(teamA, teamB);
+        secondName = aFirst ? (teams.nameB || "Team B") : (teams.nameA || "Team A");
+        secondScore = Math.min(teamA, teamB);
+        unit = "Pkt";
+      } else if (sorted.length >= 2) {
+        const t = sorted[0];
+        const s2 = sorted[1];
+        if (isUschi) {
+          topScore = uschiResult && uschiResult.totals[t.p.id] ? uschiResult.totals[t.p.id].total : 0;
+          secondScore = uschiResult && uschiResult.totals[s2.p.id] ? uschiResult.totals[s2.p.id].total : 0;
+          unit = "Pkt";
+        } else {
+          topScore = t.sfNT;
+          secondScore = s2.sfNT;
+          unit = "SF";
+        }
+        topName = t.p.name;
+        secondName = s2.p.name;
+      }
+      if (topName !== undefined && secondName !== undefined) {
+        const diff = Math.abs(topScore - secondScore);
+        let leaderPct;
+        if (topScore === 0 && secondScore === 0) leaderPct = 50;
+        else {
+          const sum = topScore + Math.max(0, secondScore);
+          leaderPct = sum > 0 ? Math.max(20, Math.min(80, (topScore / sum) * 100)) : 50;
+        }
+        html += `
+        <div class="card" style="padding:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:12px;font-weight:700">
+            <div style="color:#c9a85c;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0">
+              ${escapeHtml(topName)} <span style="font-family:'JetBrains Mono',monospace">${topScore}</span>
+            </div>
+            <div style="color:#7ea88a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;text-align:right">
+              <span style="font-family:'JetBrains Mono',monospace">${secondScore}</span> ${escapeHtml(secondName)}
+            </div>
+          </div>
+          <div style="width:100%;height:10px;background:#3a4a40;border-radius:5px;overflow:hidden;display:flex">
+            <div style="width:${leaderPct}%;height:100%;background:#c9a85c;transition:width 0.4s ease"></div>
+            <div style="width:${100 - leaderPct}%;height:100%;background:#7ea88a;transition:width 0.4s ease"></div>
+          </div>
+          <div style="text-align:center;margin-top:8px;font-size:10px;color:#5d6e63;letter-spacing:0.05em">
+            ${diff === 0 ? "GLEICHSTAND" : `${diff} ${unit} Differenz`}
+          </div>
+        </div>`;
+      }
     }
 
     // Individual standings
