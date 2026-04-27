@@ -1,4 +1,111 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, Component } from "react";
+
+// ═════════════════════════════════════════════════════════════════════════════
+// v40: ErrorBoundary — fängt React-Crashes ab statt Schwarzbild
+// ═════════════════════════════════════════════════════════════════════════════
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null, errorInfo: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, errorInfo) {
+    console.error("Fairway crash:", error, errorInfo);
+    this.setState({ errorInfo });
+  }
+  handleReset = () => {
+    this.setState({ hasError: false, error: null, errorInfo: null });
+  };
+  handleClearAndReload = async () => {
+    // Sicherheits-Reset: Aktive Runde verwerfen, Daten bleiben
+    try {
+      // Nur "lebende" Werte löschen, keine Master-Daten
+      // (rounds, friends, customClubs bleiben unangetastet)
+      window.location.reload();
+    } catch {}
+  };
+  handleCopyError = () => {
+    const errText = `Fairway Crash Report
+─────────────────────────────────
+Version: ${typeof APP_VERSION !== "undefined" ? APP_VERSION : "unknown"}
+Build:   ${typeof APP_BUILD_DATE !== "undefined" ? APP_BUILD_DATE : "unknown"}
+Time:    ${new Date().toISOString()}
+Browser: ${typeof navigator !== "undefined" ? navigator.userAgent : "unknown"}
+
+Error:   ${this.state.error?.message || this.state.error || "unknown"}
+
+Stack:
+${this.state.error?.stack || "no stack"}
+
+ComponentStack:
+${this.state.errorInfo?.componentStack || "no component stack"}`;
+    try {
+      navigator.clipboard?.writeText(errText);
+      alert("✓ Fehler-Bericht kopiert. Im Chat einfügen!");
+    } catch {
+      alert("Konnte Fehler nicht in Zwischenablage kopieren. Mache einen Screenshot.");
+    }
+  };
+  render() {
+    if (!this.state.hasError) return this.props.children;
+    return (
+      <div style={{
+        minHeight: "100vh", background: "#0a1410", color: "#cdd5c8",
+        fontFamily: "system-ui, sans-serif", padding: "24px",
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+      }}>
+        <div style={{
+          maxWidth: "480px", width: "100%",
+          background: "#0f1e15", border: "1px solid #d67a5c50",
+          borderRadius: "16px", padding: "24px",
+        }}>
+          <h1 style={{ fontSize: "22px", marginTop: 0, color: "#d67a5c" }}>
+            ⚠️ Hoppla — die App ist abgestürzt
+          </h1>
+          <p style={{ fontSize: "13px", lineHeight: 1.6, color: "#a2bfa2" }}>
+            Keine Sorge, deine Daten sind sicher. Die letzten Runden, Freunde und Clubs sind unverändert gespeichert.
+          </p>
+          <div style={{
+            background: "#0a1410", border: "1px solid #3a4a40", borderRadius: "8px",
+            padding: "10px 12px", marginTop: "12px", marginBottom: "16px",
+            fontFamily: "JetBrains Mono, monospace", fontSize: "11px", color: "#d67a5c",
+            wordBreak: "break-word",
+          }}>
+            {this.state.error?.message || String(this.state.error || "Unbekannter Fehler")}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+            <button onClick={this.handleClearAndReload}
+              style={{
+                background: "#c9a85c", color: "#0a1410", border: "none",
+                borderRadius: "10px", padding: "12px", fontSize: "14px", fontWeight: 700, cursor: "pointer",
+              }}>
+              🔄 App neu starten
+            </button>
+            <button onClick={this.handleCopyError}
+              style={{
+                background: "transparent", color: "#7ea88a", border: "1px solid #7ea88a40",
+                borderRadius: "10px", padding: "10px", fontSize: "13px", cursor: "pointer",
+              }}>
+              📋 Fehler-Bericht kopieren
+            </button>
+            <button onClick={this.handleReset}
+              style={{
+                background: "transparent", color: "#5d6e63", border: "1px solid #3a4a40",
+                borderRadius: "10px", padding: "10px", fontSize: "12px", cursor: "pointer",
+              }}>
+              Versuch's nochmal
+            </button>
+          </div>
+          <p style={{ fontSize: "10px", color: "#5d6e63", marginTop: "16px", lineHeight: 1.5, textAlign: "center" }}>
+            Falls's wiederholt passiert: Fehler-Bericht kopieren + im Chat einfügen, dann finde ich den Bug.
+          </p>
+        </div>
+      </div>
+    );
+  }
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // FONTS
@@ -171,6 +278,39 @@ async function liveUpdate(code, data) {
     );
     return res.ok;
   } catch (e) { console.error("Live update failed", e); return false; }
+}
+
+// ─── v40: Stable Device-ID ──────────────────────────────────────────────────
+// Jedes Gerät bekommt eine zufällige ID die persistent gespeichert wird.
+// Wird genutzt um in Live-Rounds zu erkennen welches Gerät der "Scorer" ist.
+async function getOrCreateDeviceId() {
+  try {
+    const existing = await window.storage.get("golf-device-id");
+    if (existing?.value) return existing.value;
+  } catch {}
+  const newId = "dev_" + Math.random().toString(36).slice(2, 11);
+  try { await window.storage.set("golf-device-id", newId); } catch {}
+  return newId;
+}
+
+// Pull aktuellen Scorer einer Live-Round (kurz, nur scorerId + scorerName)
+async function liveCheckScorer(code) {
+  if (!SYNC_ENABLED || !code) return null;
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/live_rounds?code=eq.${encodeURIComponent(code)}&select=data,updated_at`,
+      { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
+    );
+    if (!res.ok) return null;
+    const rows = await res.json();
+    if (!rows?.length) return null;
+    const d = rows[0].data || {};
+    return {
+      scorerId: d.scorerId || null,
+      scorerName: d.scorerName || null,
+      updatedAt: rows[0].updated_at,
+    };
+  } catch (e) { console.error("Live check scorer failed", e); return null; }
 }
 
 // Pull the current snapshot of a live ticker (used by the viewer page).
@@ -801,6 +941,10 @@ const BUILT_IN_CLUBS = [
 // CALCULATIONS
 // ═════════════════════════════════════════════════════════════════════════════
 const STRICH = null;
+
+// ─── v40: Versions-Marker — sichtbar im App-Footer ──────────────────────────
+const APP_VERSION = "v40";
+const APP_BUILD_DATE = "2026-04-27";
 
 function makeHoles(totalPar, numHoles) {
   const si18 = [1,3,5,7,9,11,13,15,17,2,4,6,8,10,12,14,16,18];
@@ -2344,7 +2488,15 @@ const EmptyState = ({ icon, title, sub }) => (
 // ═════════════════════════════════════════════════════════════════════════════
 // MAIN APP
 // ═════════════════════════════════════════════════════════════════════════════
-export default function GolfApp() {
+export default function GolfAppWithBoundary(props) {
+  return (
+    <ErrorBoundary>
+      <GolfAppInner {...props} />
+    </ErrorBoundary>
+  );
+}
+
+function GolfAppInner() {
   // Navigation
   const [view, setView] = useState("home");
   const [tab, setTab] = useState("rounds");
@@ -2423,6 +2575,9 @@ export default function GolfApp() {
   // Live ticker
   const [liveCode, setLiveCode] = useState(null); // current live ticker code, if active
   const [liveStatus, setLiveStatus] = useState("idle"); // "idle" | "creating" | "active" | "error"
+  // v40: Device-ID + Scorer-Konflikt
+  const [deviceId, setDeviceId] = useState(null);
+  const [scorerConflict, setScorerConflict] = useState(null); // { existingScorer: "Bodos iPhone", code: "ABCD1234" }
   const [showLiveModal, setShowLiveModal] = useState(false); // controls the Live-Share modal
   // List of live rounds from anyone in the wider community (refreshed every minute)
   const [activeLiveRounds, setActiveLiveRounds] = useState([]);
@@ -2595,6 +2750,11 @@ export default function GolfApp() {
         const la = await window.storage.get("golf-last-archive");
         if (la?.value) setLastCloudArchive(parseInt(la.value) || 0);
       } catch {}
+      // v40: Device-ID laden / erstellen
+      try {
+        const dId = await getOrCreateDeviceId();
+        setDeviceId(dId);
+      } catch {}
 
       // Pull from cloud if sync code exists — with safety checks
       try {
@@ -2756,6 +2916,10 @@ export default function GolfApp() {
         ladies,
         clubName: cfg.clubName,
         syncCode: syncCode || null,
+        // v40: Scorer-Info — wer ist der aktive Scorer (Schreib-Berechtigung)
+        scorerId: deviceId,
+        scorerName: ownerProfile?.name || "Anonymes Gerät",
+        scorerSince: new Date().toISOString(),
         selectedClubSnapshot: selectedClub ? {
           name: selectedClub.name,
           region: selectedClub.region,
@@ -2767,7 +2931,25 @@ export default function GolfApp() {
       await liveUpdate(liveCode, payload);
     }, 2500);
     return () => clearTimeout(livePushTimerRef.current);
-  }, [liveCode, liveStatus, cfg, holes, players, scores, gameMode, teams, par3Data, selectedClub, syncCode, ladies]);
+  }, [liveCode, liveStatus, cfg, holes, players, scores, gameMode, teams, par3Data, selectedClub, syncCode, ladies, deviceId, ownerProfile]);
+
+  // ── v40: Periodic Scorer-Conflict Check ──
+  // Alle 30s prüfen ob ein anderes Gerät den Scorer-Status übernommen hat.
+  // Falls ja → Modal anzeigen, User muss aktiv entscheiden ob er übernimmt.
+  useEffect(() => {
+    if (!liveCode || liveStatus !== "active" || !deviceId) return;
+    const checkInterval = setInterval(async () => {
+      const cloudScorer = await liveCheckScorer(liveCode);
+      if (cloudScorer?.scorerId && cloudScorer.scorerId !== deviceId) {
+        setScorerConflict({
+          existingScorer: cloudScorer.scorerName || "Anderes Gerät",
+          existingScorerId: cloudScorer.scorerId,
+          code: liveCode,
+        });
+      }
+    }, 30000);
+    return () => clearInterval(checkInterval);
+  }, [liveCode, liveStatus, deviceId]);
 
   // ── Stable callbacks (prevent remounts) ───────────────────────────────────
   const onClubQ   = useCallback(e => { setClubQ(e.target.value); setShowDD(true); }, []);
@@ -7838,6 +8020,10 @@ WICHTIG:
       // Tag this live entry with the user's sync code so that only
       // friends with the same sync code can see it on their home screen.
       syncCode: syncCode || null,
+      // v40: Scorer-Lock — dieses Gerät übernimmt Schreib-Verantwortung
+      scorerId: deviceId,
+      scorerName: ownerProfile?.name || "Anonymes Gerät",
+      scorerSince: new Date().toISOString(),
       selectedClubSnapshot: selectedClub ? {
         name: selectedClub.name,
         region: selectedClub.region,
@@ -8902,6 +9088,48 @@ WICHTIG:
             </div>
           );
         })()}
+      </div>
+    );
+  };
+
+  // ── v40: Scorer-Conflict-Modal — wenn anderes Gerät den Scorer-Status übernommen hat
+  const renderScorerConflict = () => {
+    if (!scorerConflict) return null;
+    return (
+      <div onClick={e => e.stopPropagation()}
+        style={{ position: "fixed", inset: 0, background: "#000000ee", zIndex: 1300, display: "flex", alignItems: "center", justifyContent: "center", padding: "20px" }}>
+        <div style={{ ...S.card, maxWidth: "440px", width: "100%", padding: "20px", borderColor: T.double }}>
+          <h4 className="serif" style={{ fontSize: "20px", margin: "0 0 8px", color: T.double }}>⚠️ Scorer-Konflikt</h4>
+          <p style={{ fontSize: "13px", color: T.text, lineHeight: 1.6, marginBottom: "12px" }}>
+            <strong>{scorerConflict.existingScorer}</strong> ist gerade als Scorer für diese Runde aktiv (Code: <span className="mono">{scorerConflict.code}</span>).
+          </p>
+          <p style={{ fontSize: "12px", color: T.textSoft, lineHeight: 1.5, marginBottom: "16px" }}>
+            Wenn du jetzt scorest, überschreibst du seine Eingaben. Damit das nicht passiert: nur ein Gerät pro Runde sollte aktiv scoren.
+          </p>
+          <ul style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.6, marginBottom: "16px", paddingLeft: "18px" }}>
+            <li><strong>Beobachten</strong>: Du gehst auf den Live-Ticker (Read-Only) und siehst nur zu</li>
+            <li><strong>Übernehmen</strong>: Du wirst Scorer, der andere wird zum Read-Only</li>
+          </ul>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+            <button onClick={() => {
+              // Stoppe Live-Push, gehe zum Live-Viewer
+              setLiveStatus("idle");
+              setLiveCode(null);
+              setScorerConflict(null);
+              window.open(`/live.html#${scorerConflict.code}`, "_blank");
+            }}
+              style={{ ...S.btnSecondary, color: T.sage, borderColor: `${T.sage}40` }}>
+              👁️ Beobachten (Live-Ticker öffnen)
+            </button>
+            <button onClick={() => {
+              // Behalte aktive Live-Round → nächster Push überschreibt scorerId
+              setScorerConflict(null);
+            }}
+              style={{ ...S.btnPrimary, background: T.double }}>
+              ⚡ Scorer übernehmen
+            </button>
+          </div>
+        </div>
       </div>
     );
   };
@@ -10887,11 +11115,25 @@ Wichtig:
       {renderLiveViewerModal()}
       {renderBackupRestore()}
       {renderTrash()}
+      {renderScorerConflict()}
       {renderPlayerManager()}
       {renderHoleJump()}
       {renderStatDrilldown()}
       {renderOwnerSetup()}
       {renderUndoToast()}
+
+      {/* v40: Versions-Footer — sichtbar in jeder Crew, hilft beim Bug-Reporting */}
+      <div style={{
+        textAlign: "center",
+        padding: "16px 16px 24px",
+        fontSize: "10px",
+        color: T.textDim,
+        letterSpacing: "0.04em",
+        fontFamily: "JetBrains Mono, monospace",
+        opacity: 0.5,
+      }}>
+        Fairway {APP_VERSION} · {APP_BUILD_DATE}
+      </div>
     </div>
   );
 }
