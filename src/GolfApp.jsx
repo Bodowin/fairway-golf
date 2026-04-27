@@ -1081,6 +1081,80 @@ function getRaceStatus(rankedStats, holesLeft) {
   return { status: "normal", leadDiff, holesLeft };
 }
 
+// ─── v35: Simuliertes Handicap (Trend-HCP) ──────────────────────────────────
+// Berechnet ein "Sim-HCP" basierend auf den letzten N Runden eines Spielers.
+// Faustregel: 36 SF-Punkte = HCP genau richtig.
+// Avg < 36 → Spieler aktuell schlechter als sein HCP → Sim-HCP höher
+// Avg > 36 → Spieler aktuell besser als sein HCP → Sim-HCP niedriger
+const SIM_HCP_ROUNDS = 5;       // letzte N Runden zur Berechnung
+const SIM_HCP_MIN_ROUNDS = 3;   // mindestens N Runden nötig sonst keine Anzeige
+
+function computeSimHcp(playerName, allRounds) {
+  if (!playerName || !allRounds?.length) return null;
+  // Find all rounds where this player participated, sorted newest first
+  const playerRounds = allRounds
+    .filter(r => (r.players || []).some(p => p.name === playerName))
+    .sort((a, b) => {
+      const da = new Date(a.cfg?.date || a.savedAt || 0).getTime();
+      const db = new Date(b.cfg?.date || b.savedAt || 0).getTime();
+      return db - da;
+    })
+    .slice(0, SIM_HCP_ROUNDS);
+
+  if (playerRounds.length < SIM_HCP_MIN_ROUNDS) {
+    return { simHcp: null, baseHcp: null, diff: null, roundsUsed: playerRounds.length, hasEnoughData: false };
+  }
+
+  // Calculate SF-Netto for each round
+  const sfList = [];
+  let baseHcp = null;
+  for (const r of playerRounds) {
+    const player = (r.players || []).find(p => p.name === playerName);
+    if (!player) continue;
+    if (baseHcp === null) baseHcp = parseFloat(player.hcp) || 0; // newest round = current HCP
+    const holes = r.holes || [];
+    if (holes.length === 0) continue;
+    const par = holes.reduce((s, h) => s + h.par, 0);
+    const { ph } = resolvePlayerPH(player, r.cfg, r.selectedClubSnapshot, par);
+    let sfTotal = 0;
+    let played = 0;
+    holes.forEach((h, i) => {
+      const g = r.scores?.[player.id]?.[i];
+      if (!isValid(g) && !isStrich(g)) return;
+      played++;
+      const hs = holeHS(ph, h.si, holes.length);
+      sfTotal += sfNetto(g, hs, h.par) || 0;
+    });
+    // Only count rounds with significant data (≥ 50% holes played)
+    if (played >= holes.length * 0.5) {
+      // Normalize to 18 holes if 9-hole round
+      const normalizedSf = holes.length === 9 ? sfTotal * 2 : sfTotal;
+      sfList.push(normalizedSf);
+    }
+  }
+
+  if (sfList.length < SIM_HCP_MIN_ROUNDS || baseHcp === null) {
+    return { simHcp: null, baseHcp, diff: null, roundsUsed: sfList.length, hasEnoughData: false };
+  }
+
+  const avgSf = sfList.reduce((s, v) => s + v, 0) / sfList.length;
+  // Diff: how far below/above 36 the player is averaging
+  // < 36 → playing worse → sim-HCP higher
+  // > 36 → playing better → sim-HCP lower
+  const sfDiff = 36 - avgSf;
+  const simHcp = Math.round((baseHcp + sfDiff) * 10) / 10; // rounded to 1 decimal
+  const diff = Math.round((simHcp - baseHcp) * 10) / 10;
+
+  return {
+    simHcp,
+    baseHcp,
+    diff,            // positive = playing worse, negative = playing better
+    avgSf: Math.round(avgSf * 10) / 10,
+    roundsUsed: sfList.length,
+    hasEnoughData: true,
+  };
+}
+
 function aggregateClubStats(clubName, allRounds) {
   const rounds = allRounds.filter(r => r.cfg?.clubName === clubName);
   if (rounds.length === 0) return null;
@@ -1251,6 +1325,8 @@ function aggregateClubStats(clubName, allRounds) {
   // Finalize player stats
   const playerStats = Object.values(playerMap).map(pm => {
     const sfScores = pm.sfList.map(x => x.score);
+    // v35: Sim-HCP über ALLE Runden des Spielers (nicht nur dieser Club)
+    const simHcp = computeSimHcp(pm.name, allRounds);
     return {
       name: pm.name,
       roundsPlayed: pm.roundsPlayed,
@@ -1264,6 +1340,7 @@ function aggregateClubStats(clubName, allRounds) {
       doubles: pm.doubles,
       strichCount: pm.strichCount,
       uschi: pm.uschi,
+      simHcp, // v35
       perHole: pm.perHole.map(ph => ({
         ...ph,
         avgGross: ph.grossList.length ? ph.grossList.reduce((s, v) => s + v, 0) / ph.grossList.length : 0,
@@ -3878,6 +3955,28 @@ export default function GolfApp() {
                       <span>💀 {p.doubles}</span>
                       {p.strichCount > 0 && <span style={{ color: T.double }}>✗ {p.strichCount}</span>}
                     </div>
+                    {/* v35: Sim-HCP-Zeile */}
+                    {p.simHcp?.hasEnoughData && (
+                      <div style={{
+                        marginTop: "8px", paddingTop: "8px",
+                        borderTop: `1px dashed ${T.line}`,
+                        display: "flex", alignItems: "center", gap: "8px",
+                        fontSize: "11px",
+                      }}>
+                        <span style={{ color: T.textDim }}>HCP</span>
+                        <span className="mono" style={{ color: T.textSoft, fontWeight: 600 }}>{p.simHcp.baseHcp}</span>
+                        <span style={{ color: T.textDim }}>·</span>
+                        <span style={{ color: T.textDim }}>Sim</span>
+                        <span className="mono" style={{ color: T.gold, fontWeight: 700 }}>{p.simHcp.simHcp}</span>
+                        <span style={{
+                          color: p.simHcp.diff > 0 ? T.double : p.simHcp.diff < 0 ? T.sage : T.textDim,
+                          fontWeight: 600,
+                          marginLeft: "auto",
+                        }}>
+                          {p.simHcp.diff > 0 ? "📈" : p.simHcp.diff < 0 ? "📉" : "≈"} {p.simHcp.diff > 0 ? "+" : ""}{p.simHcp.diff}
+                        </span>
+                      </div>
+                    )}
                   </button>
                 ))}
               </div>
@@ -3908,6 +4007,46 @@ export default function GolfApp() {
                   <span>💀 {focusPlayerData.doubles} Doubles+</span>
                   {focusPlayerData.strichCount > 0 && <span style={{ color: T.double }}>✗ {focusPlayerData.strichCount} Striche</span>}
                 </div>
+                {/* v35: Sim-HCP-Box im Focus-Detail */}
+                {focusPlayerData.simHcp?.hasEnoughData ? (
+                  <div style={{
+                    marginTop: "12px", paddingTop: "12px",
+                    borderTop: `1px dashed ${T.line}`,
+                  }}>
+                    <div style={{ ...S.eyebrow, marginBottom: "8px", fontSize: "9px" }}>📈 Form-Trend</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px" }}>
+                      <div style={{ textAlign: "center", padding: "8px 4px", background: T.surface2, borderRadius: "6px" }}>
+                        <div className="mono" style={{ fontSize: "16px", fontWeight: 700, color: T.textSoft }}>{focusPlayerData.simHcp.baseHcp}</div>
+                        <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>OFFIZIELL</div>
+                      </div>
+                      <div style={{ textAlign: "center", padding: "8px 4px", background: T.surface2, borderRadius: "6px" }}>
+                        <div className="mono" style={{ fontSize: "16px", fontWeight: 700, color: T.gold }}>{focusPlayerData.simHcp.simHcp}</div>
+                        <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>SIM</div>
+                      </div>
+                      <div style={{ textAlign: "center", padding: "8px 4px", background: T.surface2, borderRadius: "6px" }}>
+                        <div className="mono" style={{
+                          fontSize: "16px", fontWeight: 700,
+                          color: focusPlayerData.simHcp.diff > 0 ? T.double : focusPlayerData.simHcp.diff < 0 ? T.sage : T.textDim,
+                        }}>
+                          {focusPlayerData.simHcp.diff > 0 ? "📈" : focusPlayerData.simHcp.diff < 0 ? "📉" : "≈"} {focusPlayerData.simHcp.diff > 0 ? "+" : ""}{focusPlayerData.simHcp.diff}
+                        </div>
+                        <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>TREND</div>
+                      </div>
+                    </div>
+                    <p style={{ fontSize: "10px", color: T.textDim, marginTop: "8px", lineHeight: 1.4, fontStyle: "italic" }}>
+                      Berechnet aus den letzten {focusPlayerData.simHcp.roundsUsed} Runden · ⌀ {focusPlayerData.simHcp.avgSf} SF.
+                      {focusPlayerData.simHcp.diff > 0 ? " Aktuelle Form schlechter als HCP." : focusPlayerData.simHcp.diff < 0 ? " Aktuelle Form besser als HCP — Form steigt." : " Aktuelle Form genau auf HCP-Niveau."}
+                    </p>
+                  </div>
+                ) : focusPlayerData.simHcp && (
+                  <div style={{
+                    marginTop: "12px", paddingTop: "12px",
+                    borderTop: `1px dashed ${T.line}`,
+                    fontSize: "10px", color: T.textDim, fontStyle: "italic", textAlign: "center", lineHeight: 1.4,
+                  }}>
+                    📈 Sim-HCP erscheint ab {SIM_HCP_MIN_ROUNDS} aufgezeichneten Runden ({focusPlayerData.simHcp.roundsUsed}/{SIM_HCP_MIN_ROUNDS}).
+                  </div>
+                )}
               </div>
             )}
 
@@ -5063,6 +5202,22 @@ export default function GolfApp() {
                           {phSource === "table" && (
                             <span style={{ fontSize: "9px", color: T.sage, background: `${T.sage}15`, padding: "1px 5px", borderRadius: "3px", fontWeight: 600, letterSpacing: "0.04em" }}>OFFIZIELL</span>
                           )}
+                          {/* v35: Sim-HCP-Hint */}
+                          {(() => {
+                            const sim = computeSimHcp(p.name, rounds);
+                            if (!sim?.hasEnoughData || Math.abs(sim.diff) < 1) return null;
+                            return (
+                              <span style={{
+                                fontSize: "9px",
+                                color: sim.diff > 0 ? T.double : T.sage,
+                                background: sim.diff > 0 ? `${T.double}15` : `${T.sage}15`,
+                                padding: "1px 5px", borderRadius: "3px", fontWeight: 600, letterSpacing: "0.04em",
+                              }}
+                              title={`Form-Trend aus letzten ${sim.roundsUsed} Runden: spielt aktuell wie HCP ${sim.simHcp}`}>
+                                {sim.diff > 0 ? "📈" : "📉"} SIM {sim.simHcp}
+                              </span>
+                            );
+                          })()}
                           <button onClick={() => setPhEditingFor(isEditing ? null : p.id)}
                             title="Vorgabe manuell anpassen"
                             style={{ background: "transparent", border: "none", color: T.textDim, fontSize: "11px", padding: "1px 3px", cursor: "pointer" }}>
