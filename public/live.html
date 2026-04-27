@@ -194,9 +194,12 @@
   // ─── Helpers (mirrors main app logic) ──────────────────────────────────────
   function isStrich(v) { return v === null; }
   function isValid(v) { return typeof v === "number" && v > 0; }
+  // v34: Cap-Wert (Pick-Up-Regel) — Par + Vorgabeschläge + 2
+  function capValue(par, hs) { return par + hs + 2; }
   function sfNetto(g, hs, par) {
     if (isStrich(g)) return 0;
     if (!isValid(g)) return null;
+    if (g >= capValue(par, hs)) return 0; // v34: Auto-Strich für SF
     return Math.max(0, par - (g - hs) + 2);
   }
   function sfBrutto(g, par) {
@@ -400,19 +403,24 @@
       const ph = (typeof p.phOverride === "number")
         ? p.phOverride
         : (tee ? calcPH(hcpNum, tee.slope, tee.cr, tee.par) : 0);
-      let bT = 0, sfNT = 0, sfBT = 0, strichCount = 0;
+      let bT = 0, sfNT = 0, sfBT = 0, strichCount = 0, totalStr = 0;
       holes.forEach((h, i) => {
         const g = scores[p.id] && scores[p.id][i];
-        if (isStrich(g)) { strichCount++; return; }
+        const hs = holeHS(ph, h.si, holes.length);
+        if (isStrich(g)) {
+          strichCount++;
+          totalStr += capValue(h.par, hs); // v34: Strich zählt mit Cap-Wert
+          return;
+        }
         if (!isValid(g)) return;
         bT += g;
-        const hs = holeHS(ph, h.si, holes.length);
+        totalStr += g; // v34: echte Eingabe zählt mit ihrem Wert
         sfNT += sfNetto(g, hs, h.par) || 0;
         sfBT += sfBrutto(g, h.par) || 0;
       });
       // Lady count for this player from the live data — defensive against missing/invalid arrays
       const ladyCount = Array.isArray((d.ladies || {})[p.id]) ? d.ladies[p.id].length : 0;
-      return { p, ph, bT, sfNT, sfBT, strichCount, ladyCount, teeName };
+      return { p, ph, bT, sfNT, sfBT, strichCount, ladyCount, totalStr, teeName };
     });
 
     const isUschi = gameMode !== "stableford";
@@ -592,7 +600,7 @@
               ${isCrown && isUschi ? `<span class="crown">👑</span>` : ""}
             </div>
             <div class="player-meta">
-              HCP ${s.p.hcp} · Vorgabe ${s.ph} · Brutto ${s.bT || "—"}${s.strichCount > 0 ? "*" : ""} · SF ${s.sfNT}${s.ladyCount > 0 ? ` · 👯 ${s.ladyCount}` : ""}
+              HCP ${s.p.hcp} · Vorgabe ${s.ph} · Brutto ${s.bT || "—"}${s.strichCount > 0 ? "*" : ""} · SF ${s.sfNT} · Schläge ${s.totalStr || "—"}${s.ladyCount > 0 ? ` · 👯 ${s.ladyCount}` : ""}
             </div>
           </div>
           <div class="player-pts">
@@ -692,7 +700,19 @@
         const g = scores[p.id] && scores[p.id][i];
         const cls = scoreColorClass(g, h.par);
         let display = "—";
-        if (isStrich(g)) display = "✗";
+        if (isStrich(g)) {
+          // v34: Strich zeigt Cap-Wert in Klammern
+          const teeName = p.teeName || cfg.defaultTeeName;
+          const tee = club && club.tees && teeName && club.tees[teeName]
+            ? club.tees[teeName]
+            : (club && club.tees ? Object.values(club.tees)[0] : null);
+          const hcpNum = typeof p.hcp === "number" ? p.hcp : parseFloat(p.hcp) || 0;
+          const ph = (typeof p.phOverride === "number")
+            ? p.phOverride
+            : (tee ? calcPH(hcpNum, tee.slope, tee.cr, tee.par) : 0);
+          const hs = holeHS(ph, h.si, holes.length);
+          display = `(${capValue(h.par, hs)})`;
+        }
         else if (isValid(g)) display = g;
         html += `<td class="score"><span class="score-pill ${cls}">${display}</span></td>`;
       });
