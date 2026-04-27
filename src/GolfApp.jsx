@@ -2374,7 +2374,16 @@ export default function GolfApp() {
   const livePushTimerRef = useRef(null);
 
   const allClubs = useMemo(() => [...customClubs, ...BUILT_IN_CLUBS], [customClubs]);
-  const selectedClub = useMemo(() => allClubs.find(c => c.name === cfg.clubName), [allClubs, cfg.clubName]);
+  // v36: Bei geladener Runde priorisieren wir den Club-Snapshot aus der Runde,
+  // damit die Anzeige (SF, PH) konsistent bleibt — auch wenn sich die Club-Daten
+  // seitdem geändert haben (z.B. ÖGV-Tabelle aktualisiert in einem Code-Update).
+  const selectedClub = useMemo(() => {
+    if (loadedRoundId) {
+      const loaded = rounds.find(r => r.id === loadedRoundId);
+      if (loaded?.selectedClubSnapshot) return loaded.selectedClubSnapshot;
+    }
+    return allClubs.find(c => c.name === cfg.clubName);
+  }, [allClubs, cfg.clubName, loadedRoundId, rounds]);
 
   // ── Online / offline detection ────────────────────────────────────────────
   useEffect(() => {
@@ -3124,12 +3133,22 @@ export default function GolfApp() {
   const saveRound = async () => {
     let u;
     let savedRound;
-    const extra = { gameMode, teams, par3Data, ladies };
+    // v36: Club-Snapshot mitspeichern für Konsistenz auch bei späteren Code-Updates
+    const clubSnapshot = selectedClub ? {
+      name: selectedClub.name,
+      region: selectedClub.region,
+      numHoles: selectedClub.numHoles,
+      tees: selectedClub.tees,
+      holes: selectedClub.holes,
+    } : null;
+    const extra = { gameMode, teams, par3Data, ladies, selectedClubSnapshot: clubSnapshot };
     if (loadedRoundId) {
       savedRound = null;
       u = rounds.map(r => {
         if (r.id === loadedRoundId) {
-          savedRound = { ...r, cfg, holes, players, scores, ...extra, savedAt: new Date().toISOString() };
+          // Behalte vorhandenen Snapshot wenn schon da, sonst nimm neuen
+          const keepSnapshot = r.selectedClubSnapshot || clubSnapshot;
+          savedRound = { ...r, cfg, holes, players, scores, ...extra, selectedClubSnapshot: keepSnapshot, savedAt: new Date().toISOString() };
           return savedRound;
         }
         return r;
@@ -4161,11 +4180,13 @@ export default function GolfApp() {
     const totalRounds = rounds.length;
     const clubsPlayed = new Set(rounds.map(r => r.cfg.clubName).filter(Boolean)).size;
     const bestSF = rounds.reduce((max, r) => {
-      const rClub = allClubs.find(c => c.name === r.cfg.clubName);
+      const rClub = r.selectedClubSnapshot || allClubs.find(c => c.name === r.cfg.clubName);
+      const par = sumPar(r.holes);
       const stats = r.players.map(p => {
         const tee = playerTee(p, r.cfg, rClub);
         if (!tee) return 0;
-        const ph = calcPH(p.hcp, tee.slope, tee.cr, tee.par || sumPar(r.holes));
+        // v36: resolvePlayerPH konsistent zu allen anderen Stellen
+        const ph = resolvePlayerPH(p, r.cfg, rClub, par).ph;
         return r.holes.reduce((s, h, i) => {
           const g = r.scores[p.id]?.[i];
           const hs = holeHS(ph, h.si, r.cfg.numHoles);
@@ -4595,11 +4616,13 @@ export default function GolfApp() {
 
   // Round card (inline, not a sub-component to avoid remounts)
   const renderRoundCard = (r, showFull) => {
-    const rClub = allClubs.find(c => c.name === r.cfg.clubName);
+    const rClub = r.selectedClubSnapshot || allClubs.find(c => c.name === r.cfg.clubName);
     const progress = getRoundProgress(r);
+    const par = sumPar(r.holes);
     const sortedPlayers = r.players.map(p => {
       const tee = playerTee(p, r.cfg, rClub);
-      const ph = tee ? calcPH(p.hcp, tee.slope, tee.cr, tee.par || sumPar(r.holes)) : 0;
+      // v36: resolvePlayerPH (mit Manual-Override + ÖGV-Tabelle) statt nur calcPH
+      const ph = tee ? resolvePlayerPH(p, r.cfg, rClub, par).ph : 0;
       const sfNT = r.holes.reduce((s, h, i) => {
         const g = r.scores[p.id]?.[i];
         const hs = holeHS(ph, h.si, r.cfg.numHoles);
