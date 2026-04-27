@@ -222,6 +222,118 @@ async function liveListActive() {
   } catch (e) { console.error("Live list failed", e); return []; }
 }
 
+// ─── v33: Cloud Archive (Soft-Delete + Recovery) ─────────────────────────────
+// Persistent archive of completed rounds. Survives local deletion.
+// Owner-email-filtered so only the owner sees their archived rounds.
+// Soft-delete = round is hidden in app but still in cloud for N days.
+const ARCHIVE_OWNER_EMAIL = "bodowin@gmail.com";
+const ARCHIVE_RETENTION_DAYS = 30;
+
+async function archivePush(round, syncCode) {
+  if (!SYNC_ENABLED || !round?.id) return false;
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rounds_archive`, {
+      method: "POST",
+      headers: {
+        "apikey": SUPABASE_KEY,
+        "Authorization": `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates",
+      },
+      body: JSON.stringify({
+        id: round.id,
+        owner_email: ARCHIVE_OWNER_EMAIL,
+        sync_code: syncCode || "",
+        round_data: round,
+        last_modified: new Date().toISOString(),
+      }),
+    });
+    return res.ok;
+  } catch (e) { console.error("Archive push failed", e); return false; }
+}
+
+async function archivePushBatch(roundsArr, syncCode) {
+  if (!SYNC_ENABLED || !roundsArr?.length) return { ok: false, count: 0 };
+  let okCount = 0;
+  for (const r of roundsArr) {
+    if (await archivePush(r, syncCode)) okCount++;
+  }
+  return { ok: okCount === roundsArr.length, count: okCount };
+}
+
+// Soft-delete: mark a round as deleted in cloud (still recoverable).
+async function archiveSoftDelete(roundId) {
+  if (!SYNC_ENABLED || !roundId) return false;
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/rounds_archive?id=eq.${encodeURIComponent(roundId)}`,
+      {
+        method: "PATCH",
+        headers: {
+          "apikey": SUPABASE_KEY,
+          "Authorization": `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          deleted_at: new Date().toISOString(),
+          last_modified: new Date().toISOString(),
+        }),
+      }
+    );
+    return res.ok;
+  } catch (e) { console.error("Archive soft-delete failed", e); return false; }
+}
+
+// Restore: clear deleted_at to bring round back.
+async function archiveRestore(roundId) {
+  if (!SYNC_ENABLED || !roundId) return false;
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/rounds_archive?id=eq.${encodeURIComponent(roundId)}`,
+      {
+        method: "PATCH",
+        headers: {
+          "apikey": SUPABASE_KEY,
+          "Authorization": `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          deleted_at: null,
+          last_modified: new Date().toISOString(),
+        }),
+      }
+    );
+    return res.ok;
+  } catch (e) { console.error("Archive restore failed", e); return false; }
+}
+
+// List soft-deleted (= "trashed") rounds for the owner. Filtered to retention window.
+async function archiveListTrashed() {
+  if (!SYNC_ENABLED) return [];
+  try {
+    const cutoff = new Date(Date.now() - ARCHIVE_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/rounds_archive?owner_email=eq.${encodeURIComponent(ARCHIVE_OWNER_EMAIL)}&deleted_at=not.is.null&deleted_at=gte.${encodeURIComponent(cutoff)}&order=deleted_at.desc&select=*`,
+      { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
+    );
+    if (!res.ok) return [];
+    return await res.json();
+  } catch (e) { console.error("Archive list trashed failed", e); return []; }
+}
+
+// List ALL archived rounds (for sync diagnostics)
+async function archiveListAll() {
+  if (!SYNC_ENABLED) return [];
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/rounds_archive?owner_email=eq.${encodeURIComponent(ARCHIVE_OWNER_EMAIL)}&select=*`,
+      { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
+    );
+    if (!res.ok) return [];
+    return await res.json();
+  } catch (e) { console.error("Archive list all failed", e); return []; }
+}
+
 // List ALL live rounds without filtering (for cleanup purposes).
 // Returns full data so we can match against local rounds by content fingerprint.
 async function liveListAll() {
@@ -2112,6 +2224,12 @@ export default function GolfApp() {
   // Backup-restore modal: list of available backups with preview + restore action
   const [showBackupRestore, setShowBackupRestore] = useState(false);
   const [backupList, setBackupList] = useState([]); // [{ key, label, count, friends, clubs, type }]
+  // ── v33: Cloud Archive State ──
+  const [lastCloudArchive, setLastCloudArchive] = useState(0); // unix ms — last successful archive push
+  const [archiveStatus, setArchiveStatus] = useState("idle"); // idle | saving | success | error
+  const [showTrash, setShowTrash] = useState(false);
+  const [trashedRounds, setTrashedRounds] = useState([]); // [{ id, round_data, deleted_at, ... }]
+  const [trashLoading, setTrashLoading] = useState(false);
   // Last-score-undo: tracks the most recent score entry so user can undo it
   // { playerId, holeIdx, prevValue } — prevValue is undefined if hole was previously empty
   const [lastScoreEntry, setLastScoreEntry] = useState(null);
@@ -2224,6 +2342,11 @@ export default function GolfApp() {
         if (o) setOwnerProfile(JSON.parse(o.value));
       } catch {}
       try { const s = await window.storage.get("golf-sync-code");    if (s?.value) setSyncCode(s.value); } catch {}
+      // v33: Last cloud archive timestamp
+      try {
+        const la = await window.storage.get("golf-last-archive");
+        if (la?.value) setLastCloudArchive(parseInt(la.value) || 0);
+      } catch {}
 
       // Pull from cloud if sync code exists — with safety checks
       try {
@@ -2846,18 +2969,108 @@ export default function GolfApp() {
   // ── Rounds
   const saveRound = async () => {
     let u;
+    let savedRound;
     const extra = { gameMode, teams, par3Data, ladies };
     if (loadedRoundId) {
-      u = rounds.map(r => r.id === loadedRoundId
-        ? { ...r, cfg, holes, players, scores, ...extra, savedAt: new Date().toISOString() }
-        : r);
+      savedRound = null;
+      u = rounds.map(r => {
+        if (r.id === loadedRoundId) {
+          savedRound = { ...r, cfg, holes, players, scores, ...extra, savedAt: new Date().toISOString() };
+          return savedRound;
+        }
+        return r;
+      });
     } else {
       const newR = { id: uid(), cfg, holes, players, scores, ...extra, savedAt: new Date().toISOString() };
+      savedRound = newR;
       u = [newR, ...rounds].slice(0, 50);
       setLoadedRoundId(newR.id);
     }
     setRounds(u);
     try { await window.storage.set("golf-rounds", JSON.stringify(u)); } catch {}
+
+    // ── v33: Auto-Push to cloud archive ──────────────────────────────────────
+    // Only push completed rounds (or rounds with at least 1 hole scored).
+    // Fire-and-forget — never block the UI.
+    if (savedRound && SYNC_ENABLED) {
+      const hasAnyScore = Object.values(savedRound.scores || {})
+        .some(ps => Object.values(ps || {}).some(v => v !== undefined));
+      if (hasAnyScore) {
+        archivePush(savedRound, syncCode).then(ok => {
+          if (ok) {
+            const ts = Date.now();
+            setLastCloudArchive(ts);
+            try { window.storage.set("golf-last-archive", String(ts)); } catch {}
+          }
+        });
+      }
+    }
+  };
+
+  // ── v33: Manual full archive — pushes ALL local rounds to cloud archive ──
+  const manualArchiveAll = async () => {
+    if (!SYNC_ENABLED) {
+      alert("Cloud-Sync ist nicht konfiguriert.");
+      return;
+    }
+    if (!rounds.length) {
+      alert("Keine Runden zum Sichern vorhanden.");
+      return;
+    }
+    setArchiveStatus("saving");
+    const result = await archivePushBatch(rounds, syncCode);
+    if (result.ok) {
+      const ts = Date.now();
+      setLastCloudArchive(ts);
+      try { await window.storage.set("golf-last-archive", String(ts)); } catch {}
+      setArchiveStatus("success");
+      setTimeout(() => setArchiveStatus("idle"), 3000);
+      alert(`✓ ${result.count} Runden ins Cloud-Archiv gesichert`);
+    } else {
+      setArchiveStatus("error");
+      setTimeout(() => setArchiveStatus("idle"), 3000);
+      alert(`⚠ Nur ${result.count}/${rounds.length} Runden konnten gesichert werden. Online?`);
+    }
+  };
+
+  // ── v33: Open trash modal — load soft-deleted rounds from cloud ──
+  const openTrash = async () => {
+    if (!SYNC_ENABLED) {
+      alert("Cloud-Sync ist nicht konfiguriert. Papierkorb braucht eine Verbindung.");
+      return;
+    }
+    setShowTrash(true);
+    setTrashLoading(true);
+    const list = await archiveListTrashed();
+    setTrashedRounds(list);
+    setTrashLoading(false);
+  };
+
+  // ── v33: Restore round from trash ──
+  const restoreFromTrash = async (entry) => {
+    if (!entry?.round_data) return;
+    const round = entry.round_data;
+    // Check if round already exists locally (e.g. user accidentally restored twice)
+    if (rounds.find(r => r.id === round.id)) {
+      alert("Diese Runde ist bereits in deiner lokalen Liste.");
+      return;
+    }
+    // Snapshot first
+    try {
+      await window.storage.set(
+        `golf-backup-before-restore-${Date.now()}`,
+        JSON.stringify({ rounds, friends, customClubs })
+      );
+    } catch {}
+    // Add back to local list (newest first)
+    const updated = [round, ...rounds].slice(0, 50);
+    setRounds(updated);
+    try { await window.storage.set("golf-rounds", JSON.stringify(updated)); } catch {}
+    // Clear deleted_at in cloud
+    await archiveRestore(round.id);
+    // Refresh trash list
+    setTrashedRounds(prev => prev.filter(t => t.id !== entry.id));
+    showUndoToast(`✓ Runde "${round.cfg?.clubName || "Runde"}" wiederhergestellt`, null);
   };
 
   // ── Navigation: go home, but auto-save any in-progress setup ──
@@ -2917,12 +3130,22 @@ export default function GolfApp() {
     if (id === loadedRoundId) setLoadedRoundId(null);
     try { await window.storage.set("golf-rounds", JSON.stringify(updated)); } catch {}
 
+    // ── v33: Soft-delete in cloud archive (recoverable for 30 days) ──────────
+    // First push current state (in case it wasn't archived yet), then mark deleted.
+    if (deletedRound && SYNC_ENABLED) {
+      archivePush(deletedRound, syncCode).then(() => {
+        archiveSoftDelete(deletedRound.id);
+      });
+    }
+
     // Show undo toast
     if (deletedRound) {
-      showUndoToast(`Runde "${deletedRound.cfg?.clubName || "Runde"}" gelöscht`, async () => {
+      showUndoToast(`Runde "${deletedRound.cfg?.clubName || "Runde"}" gelöscht · 30 Tage im Papierkorb`, async () => {
         const restored = [deletedRound, ...updated].slice(0, 50);
         setRounds(restored);
         try { await window.storage.set("golf-rounds", JSON.stringify(restored)); } catch {}
+        // Also undo the soft-delete in cloud
+        if (SYNC_ENABLED) archiveRestore(deletedRound.id);
         setUndoAction(null);
       });
     }
@@ -7593,6 +7816,80 @@ WICHTIG:
   // ═══════════════════════════════════════════════════════════════════════════
   // BACKUP RESTORE MODAL — list of all available backups with preview + restore
   // ═══════════════════════════════════════════════════════════════════════════
+  // ── v33: Trash modal — soft-deleted rounds recoverable for 30 days ──
+  const renderTrash = () => {
+    if (!showTrash) return null;
+    return (
+      <div onClick={() => setShowTrash(false)}
+        style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+        <div onClick={e => e.stopPropagation()} className="slide-up"
+          style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
+          <SwipeHandle onClose={() => setShowTrash(false)} />
+          <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>
+            🗑️ Papierkorb
+          </h3>
+          <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "16px", lineHeight: 1.5 }}>
+            Gelöschte Runden bleiben 30 Tage hier wiederherstellbar. Danach werden sie endgültig entfernt.
+          </p>
+
+          {trashLoading ? (
+            <div style={{ textAlign: "center", padding: "40px 0", color: T.textDim, fontSize: "13px" }}>
+              ⏳ Lade aus Cloud...
+            </div>
+          ) : trashedRounds.length === 0 ? (
+            <EmptyState icon="🗑️" title="Papierkorb ist leer" sub="Hier landen gelöschte Runden — automatisch 30 Tage geschützt." />
+          ) : (
+            trashedRounds.map(entry => {
+              const r = entry.round_data || {};
+              const deletedAt = entry.deleted_at ? new Date(entry.deleted_at) : null;
+              const daysLeft = deletedAt
+                ? Math.max(0, ARCHIVE_RETENTION_DAYS - Math.floor((Date.now() - deletedAt.getTime()) / (24 * 60 * 60 * 1000)))
+                : ARCHIVE_RETENTION_DAYS;
+              const playerNames = (r.players || []).map(p => p.name).join(", ") || "—";
+              const numHoles = (r.holes || []).length;
+              return (
+                <div key={entry.id} style={{ ...S.card, padding: "14px", marginBottom: "10px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "10px", marginBottom: "8px" }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: "14px", fontWeight: 600, color: T.text, marginBottom: "2px" }}>
+                        {r.cfg?.clubName || "Runde"}
+                      </div>
+                      <div style={{ fontSize: "11px", color: T.textSoft, marginBottom: "4px" }}>
+                        {fmtDate(r.cfg?.date)} · {numHoles} Loch
+                      </div>
+                      <div style={{ fontSize: "11px", color: T.textDim }}>
+                        👥 {playerNames}
+                      </div>
+                    </div>
+                    <span style={{
+                      fontSize: "10px",
+                      padding: "3px 8px",
+                      borderRadius: "10px",
+                      background: daysLeft <= 5 ? `${T.double}25` : `${T.sage}20`,
+                      color: daysLeft <= 5 ? T.double : T.sage,
+                      whiteSpace: "nowrap",
+                      fontWeight: 600,
+                    }}>
+                      {daysLeft}T übrig
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => restoreFromTrash(entry)}
+                    style={{ ...S.btnPrimary, width: "100%", fontSize: "12px", padding: "10px", marginTop: "6px" }}>
+                    ↩️ Wiederherstellen
+                  </button>
+                </div>
+              );
+            })
+          )}
+
+          <button onClick={() => setShowTrash(false)}
+            style={{ ...S.btnGhost, width: "100%", marginTop: "14px", fontSize: "13px" }}>Schließen</button>
+        </div>
+      </div>
+    );
+  };
+
   const renderBackupRestore = () => {
     if (!showBackupRestore) return null;
 
@@ -8821,6 +9118,56 @@ WICHTIG:
             </>
           )}
 
+          {/* v33: Cloud Archive (Soft-Delete + Recovery) */}
+          {SYNC_ENABLED && (
+            <div style={{ marginTop: "22px", paddingTop: "18px", borderTop: `1px solid ${T.line}` }}>
+              <div style={{ ...S.eyebrow, marginBottom: "10px", color: T.gold }}>🛡️ Cloud-Archiv</div>
+              <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, marginBottom: "10px" }}>
+                Abgeschlossene Runden werden automatisch sicher gespeichert. Gelöschte Runden bleiben 30 Tage im Papierkorb.
+              </p>
+
+              {/* Last archive timestamp */}
+              <div style={{ background: T.surface2, borderRadius: "10px", padding: "10px 12px", marginBottom: "10px", fontSize: "11px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+                <span style={{ color: T.textSoft }}>Letzte Sicherung:</span>
+                <span className="mono" style={{ color: lastCloudArchive ? T.sage : T.textDim }}>
+                  {(() => {
+                    if (!lastCloudArchive) return "noch nie";
+                    const ageMs = Date.now() - lastCloudArchive;
+                    const ageMin = Math.floor(ageMs / 60000);
+                    const ageHr = Math.floor(ageMin / 60);
+                    const ageDay = Math.floor(ageHr / 24);
+                    if (ageMin < 1) return "gerade eben ✓";
+                    if (ageMin < 60) return `vor ${ageMin} Min ✓`;
+                    if (ageHr < 24) return `vor ${ageHr} Std ✓`;
+                    return `vor ${ageDay} Tag${ageDay === 1 ? "" : "en"} ✓`;
+                  })()}
+                </span>
+              </div>
+
+              {/* Manual save + Trash */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+                <button
+                  onClick={manualArchiveAll}
+                  disabled={archiveStatus === "saving"}
+                  style={{
+                    ...S.btnSecondary, fontSize: "12px", padding: "10px",
+                    color: T.gold, borderColor: `${T.gold}40`,
+                    opacity: archiveStatus === "saving" ? 0.5 : 1,
+                  }}>
+                  {archiveStatus === "saving" ? "⏳ Sichere..." : archiveStatus === "success" ? "✓ Gesichert" : archiveStatus === "error" ? "⚠ Fehler" : "💾 Jetzt sichern"}
+                </button>
+                <button
+                  onClick={openTrash}
+                  style={{ ...S.btnSecondary, fontSize: "12px", padding: "10px", color: T.sage, borderColor: `${T.sage}40` }}>
+                  🗑️ Papierkorb
+                </button>
+              </div>
+              <p style={{ fontSize: "10px", color: T.textDim, marginTop: "8px", lineHeight: 1.4, fontStyle: "italic" }}>
+                Owner-Filter: nur {ARCHIVE_OWNER_EMAIL} sieht deine archivierten Runden.
+              </p>
+            </div>
+          )}
+
           {/* Backup via JSON export/import — independent of cloud */}
           <div style={{ marginTop: "22px", paddingTop: "18px", borderTop: `1px solid ${T.line}` }}>
             <div style={{ ...S.eyebrow, marginBottom: "10px" }}>Lokales Backup</div>
@@ -9150,6 +9497,7 @@ WICHTIG:
       {renderDeleteConfirm()}
       {renderLiveViewerModal()}
       {renderBackupRestore()}
+      {renderTrash()}
       {renderOwnerSetup()}
       {renderUndoToast()}
     </div>
