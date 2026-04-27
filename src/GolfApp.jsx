@@ -943,7 +943,7 @@ const BUILT_IN_CLUBS = [
 const STRICH = null;
 
 // ─── v40: Versions-Marker — sichtbar im App-Footer ──────────────────────────
-const APP_VERSION = "v40";
+const APP_VERSION = "v41";
 const APP_BUILD_DATE = "2026-04-27";
 
 function makeHoles(totalPar, numHoles) {
@@ -3313,14 +3313,42 @@ function GolfAppInner() {
   });
 
   // Owner profile: persist + update friends list to keep owner in sync
+  // v41 BUG-FIX: Owner-HCP-Änderungen werden jetzt IMMER in die Friends-Liste
+  // übernommen (nicht nur beim Anlegen). HCP-History wird mitgepflegt.
   const saveOwnerProfile = async (profile) => {
     setOwnerProfile(profile);
     try { await window.storage.set("golf-owner-profile", JSON.stringify(profile)); } catch {}
-    // Also ensure owner is in friends list (so they appear in suggestion dropdown)
     if (profile?.name) {
-      const exists = friends.find(f => f.name === profile.name);
-      if (!exists) {
-        const updated = [...friends, { name: profile.name, hcp: profile.hcp, isOwner: true }];
+      const newHcp = parseFloat(profile.hcp) || 0;
+      const existing = friends.find(f => f.name === profile.name);
+      if (!existing) {
+        // v39: Neuer Friend mit Identity + History
+        const newFriend = {
+          name: profile.name,
+          hcp: newHcp,
+          isOwner: true,
+          playerId: newPlayerId(),
+          aliases: [],
+          hcpHistory: [{ date: toDay(), hcp: newHcp }],
+        };
+        const updated = [...friends, newFriend];
+        setFriends(updated);
+        try { await window.storage.set("golf-friends", JSON.stringify(updated)); } catch {}
+      } else {
+        // v41: HCP-Update mit History-Tracking
+        const lastEntry = (existing.hcpHistory || []).slice(-1)[0];
+        const hcpChanged = !lastEntry || lastEntry.hcp !== newHcp;
+        const updated = friends.map(f => {
+          if (f.name !== profile.name) return f;
+          return {
+            ...f,
+            hcp: newHcp,
+            isOwner: true, // sicherstellen
+            hcpHistory: hcpChanged
+              ? [...(f.hcpHistory || []), { date: toDay(), hcp: newHcp }]
+              : (f.hcpHistory || []),
+          };
+        });
         setFriends(updated);
         try { await window.storage.set("golf-friends", JSON.stringify(updated)); } catch {}
       }
@@ -4943,7 +4971,7 @@ function GolfAppInner() {
 
         {/* Tabs */}
         <div style={{ padding: "0 16px 16px", display: "flex", gap: "4px" }}>
-          {[{k:"rounds",l:"Runden"},{k:"friends",l:"Freunde"},{k:"stats",l:"📊 Stats"},{k:"history",l:"Verlauf"}].map(({k,l}) => (
+          {[{k:"rounds",l:"Runden"},{k:"friends",l:"Freunde"},{k:"stats",l:"📊 Stats"},{k:"history",l:"📈 Form"}].map(({k,l}) => (
             <button key={k} onClick={() => setTab(k)} style={{
               flex: 1, padding: "10px 0",
               background: tab === k ? T.surface2 : "transparent",
@@ -5075,11 +5103,243 @@ function GolfAppInner() {
 
           {tab === "stats" && renderStatsTab()}
 
-          {tab === "history" && (
-            rounds.length === 0
-              ? <EmptyState icon="📊" title="Kein Verlauf" sub="Sobald du Runden gespielt hast, siehst du hier deine Entwicklung." />
-              : rounds.map(r => renderRoundCard(r, true))
-          )}
+          {tab === "history" && (() => {
+            // ── v41: Form-Tab — Deine Form / Crew / Highlights ──
+            if (rounds.length === 0) {
+              return <EmptyState icon="📈" title="Noch keine Form-Daten" sub="Sobald du Runden gespielt hast, siehst du hier deine Entwicklung und HCP-Trends." />;
+            }
+
+            // Owner-Block: Deine Form
+            const ownerName = ownerProfile?.name;
+            const ownerSim = ownerName ? computeSimHcp(ownerName, rounds) : null;
+            const ownerLastFiveSf = ownerName ? rounds
+              .filter(r => (r.players || []).some(p => normName(p.name) === normName(ownerName)))
+              .slice(0, 5)
+              .map(r => {
+                const player = (r.players || []).find(p => normName(p.name) === normName(ownerName));
+                if (!player || !r.holes?.length) return null;
+                const par = r.holes.reduce((s, h) => s + h.par, 0);
+                const { ph } = resolvePlayerPH(player, r.cfg, r.selectedClubSnapshot, par);
+                let sfTotal = 0;
+                let played = 0;
+                r.holes.forEach((h, i) => {
+                  const g = r.scores?.[player.id]?.[i];
+                  if (!isValid(g) && !isStrich(g)) return;
+                  played++;
+                  const hs = holeHS(ph, h.si, r.holes.length);
+                  sfTotal += sfNetto(g, hs, h.par) || 0;
+                });
+                if (played < r.holes.length * 0.5) return null;
+                const normalized = r.holes.length === 9 ? sfTotal * 2 : sfTotal;
+                return { sf: normalized, date: r.cfg?.date || r.savedAt, club: r.cfg?.clubName };
+              })
+              .filter(Boolean) : [];
+
+            // Crew-Block: Alle Friends mit ≥ 3 Runden, sortiert nach Trend (größte Abweichung zuerst)
+            const crewData = friends.map(f => {
+              const sim = computeSimHcp(f.playerId || f.name, rounds);
+              return { friend: f, sim };
+            })
+            .filter(x => x.sim?.hasEnoughData)
+            .sort((a, b) => Math.abs(b.sim.diff) - Math.abs(a.sim.diff));
+
+            // Highlights-Block
+            const allRoundSfStats = rounds.flatMap(r => {
+              const par = r.holes?.reduce((s, h) => s + h.par, 0) || 0;
+              return (r.players || []).map(p => {
+                const tee = playerTee(p, r.cfg, r.selectedClubSnapshot);
+                if (!tee || !r.holes?.length) return null;
+                const { ph } = resolvePlayerPH(p, r.cfg, r.selectedClubSnapshot, par);
+                let sf = 0, played = 0;
+                r.holes.forEach((h, i) => {
+                  const g = r.scores?.[p.id]?.[i];
+                  if (!isValid(g) && !isStrich(g)) return;
+                  played++;
+                  const hs = holeHS(ph, h.si, r.holes.length);
+                  sf += sfNetto(g, hs, h.par) || 0;
+                });
+                if (played < r.holes.length * 0.5) return null;
+                return {
+                  sf, name: p.name, date: r.cfg?.date,
+                  club: r.cfg?.clubName,
+                  normalizedSf: r.holes.length === 9 ? sf * 2 : sf,
+                };
+              });
+            }).filter(Boolean);
+
+            const bestRound = allRoundSfStats.length > 0
+              ? allRoundSfStats.reduce((b, c) => (c.sf > b.sf ? c : b), allRoundSfStats[0])
+              : null;
+
+            // Form-Sieger: Spieler mit niedrigster (also bestester) Sim-HCP-Diff
+            const bestForm = crewData.length > 0
+              ? [...crewData].sort((a, b) => a.sim.diff - b.sim.diff)[0]
+              : null;
+            // Form-Verlierer: höchste positive Diff
+            const worstForm = crewData.length > 0
+              ? [...crewData].sort((a, b) => b.sim.diff - a.sim.diff)[0]
+              : null;
+
+            return (
+              <>
+                {/* ── Top: Deine Form ── */}
+                {ownerName && (
+                  <div style={{ ...S.card, padding: "16px", marginBottom: "14px", borderColor: `${T.gold}30` }}>
+                    <div style={{ ...S.eyebrow, marginBottom: "12px", color: T.gold }}>📊 Deine Form</div>
+
+                    {ownerSim?.hasEnoughData ? (
+                      <>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px", marginBottom: "12px" }}>
+                          <div style={{ textAlign: "center", padding: "10px 6px", background: T.surface2, borderRadius: "8px" }}>
+                            <div className="mono" style={{ fontSize: "20px", fontWeight: 700, color: T.textSoft, lineHeight: 1 }}>{ownerSim.baseHcp}</div>
+                            <div style={{ fontSize: "9px", color: T.textDim, marginTop: "4px", letterSpacing: "0.06em" }}>OFFIZIELL</div>
+                          </div>
+                          <div style={{ textAlign: "center", padding: "10px 6px", background: `${T.gold}10`, borderRadius: "8px", border: `1px solid ${T.gold}40` }}>
+                            <div className="mono" style={{ fontSize: "20px", fontWeight: 700, color: T.gold, lineHeight: 1 }}>{ownerSim.simHcp}</div>
+                            <div style={{ fontSize: "9px", color: T.textDim, marginTop: "4px", letterSpacing: "0.06em" }}>AKTUELL</div>
+                          </div>
+                          <div style={{ textAlign: "center", padding: "10px 6px", background: T.surface2, borderRadius: "8px" }}>
+                            <div className="mono" style={{
+                              fontSize: "20px", fontWeight: 700, lineHeight: 1,
+                              color: ownerSim.diff > 0 ? T.double : ownerSim.diff < 0 ? T.sage : T.textDim,
+                            }}>
+                              {ownerSim.diff > 0 ? "📈" : ownerSim.diff < 0 ? "📉" : "≈"} {ownerSim.diff > 0 ? "+" : ""}{ownerSim.diff}
+                            </div>
+                            <div style={{ fontSize: "9px", color: T.textDim, marginTop: "4px", letterSpacing: "0.06em" }}>TREND</div>
+                          </div>
+                        </div>
+
+                        {/* Letzte SF-Werte */}
+                        {ownerLastFiveSf.length > 0 && (
+                          <div style={{ paddingTop: "10px", borderTop: `1px solid ${T.line}` }}>
+                            <div style={{ fontSize: "10px", color: T.textDim, letterSpacing: "0.06em", fontWeight: 600, marginBottom: "8px" }}>
+                              LETZTE {ownerLastFiveSf.length} RUNDEN — SF NETTO
+                            </div>
+                            <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                              {ownerLastFiveSf.map((r, i) => (
+                                <div key={i} style={{
+                                  flex: 1,
+                                  minWidth: "0",
+                                  textAlign: "center",
+                                  padding: "8px 4px",
+                                  background: T.surface2,
+                                  borderRadius: "6px",
+                                  border: `1px solid ${r.sf >= 36 ? T.sage + "40" : T.line}`,
+                                }}>
+                                  <div className="mono" style={{
+                                    fontSize: "16px", fontWeight: 700, lineHeight: 1,
+                                    color: r.sf >= 36 ? T.sage : r.sf >= 30 ? T.gold : T.textSoft,
+                                  }}>{r.sf}</div>
+                                  <div style={{ fontSize: "9px", color: T.textDim, marginTop: "3px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                    {r.club ? r.club.slice(0, 10) : "—"}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                            <div style={{ fontSize: "10px", color: T.textDim, marginTop: "8px", lineHeight: 1.4, fontStyle: "italic" }}>
+                              ⌀ {ownerSim.avgSf} SF · {ownerSim.diff > 0 ? "Form unter HCP" : ownerSim.diff < 0 ? "Form über HCP — du bist heiß!" : "Genau auf HCP-Niveau"}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <p style={{ fontSize: "12px", color: T.textDim, lineHeight: 1.5, fontStyle: "italic" }}>
+                        Sim-HCP erscheint ab {SIM_HCP_MIN_ROUNDS} aufgezeichneten Runden. Aktuell: {ownerSim?.roundsUsed || 0} von {SIM_HCP_MIN_ROUNDS}.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* ── Crew-Block ── */}
+                {crewData.length > 0 && (
+                  <div style={{ ...S.card, padding: "16px", marginBottom: "14px" }}>
+                    <div style={{ ...S.eyebrow, marginBottom: "12px" }}>👥 Crew · Form-Trends</div>
+                    <p style={{ fontSize: "10px", color: T.textDim, marginBottom: "10px", lineHeight: 1.4, fontStyle: "italic" }}>
+                      Sortiert nach größter Form-Abweichung. 📈 = aktuell schlechter als HCP, 📉 = besser.
+                    </p>
+                    {crewData.map(({ friend, sim }) => (
+                      <div key={friend.playerId || friend.name}
+                        style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 0", borderTop: `1px solid ${T.line}` }}>
+                        <div style={{ width: "30px", height: "30px", borderRadius: "50%", background: `${T.gold}20`, border: `1px solid ${T.gold}40`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", fontWeight: 700, color: T.gold }}>
+                          {(friend.name || "?").charAt(0).toUpperCase()}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: "13px", fontWeight: 600, color: T.text, marginBottom: "2px", display: "flex", alignItems: "center", gap: "6px" }}>
+                            {friend.name}
+                            {friend.isOwner && <span style={{ fontSize: "9px", color: T.gold, background: `${T.gold}15`, padding: "1px 5px", borderRadius: "3px", fontWeight: 700, letterSpacing: "0.04em" }}>DU</span>}
+                          </div>
+                          <div style={{ fontSize: "10px", color: T.textSoft }}>
+                            HCP <span className="mono">{sim.baseHcp}</span> · Sim <span className="mono" style={{ color: T.gold, fontWeight: 700 }}>{sim.simHcp}</span> · {sim.roundsUsed} Runden
+                          </div>
+                        </div>
+                        <span style={{
+                          fontSize: "12px",
+                          fontWeight: 700,
+                          color: sim.diff > 0 ? T.double : sim.diff < 0 ? T.sage : T.textDim,
+                          minWidth: "60px",
+                          textAlign: "right",
+                          fontFamily: "JetBrains Mono, monospace",
+                        }}>
+                          {sim.diff > 0 ? "📈" : sim.diff < 0 ? "📉" : "≈"} {sim.diff > 0 ? "+" : ""}{sim.diff}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* ── Highlights-Block ── */}
+                {(bestRound || bestForm || worstForm) && (
+                  <div style={{ ...S.card, padding: "16px", marginBottom: "14px" }}>
+                    <div style={{ ...S.eyebrow, marginBottom: "12px" }}>🏆 Highlights</div>
+
+                    {bestRound && (
+                      <div style={{ display: "flex", alignItems: "center", gap: "10px", padding: "8px 0", borderBottom: `1px solid ${T.line}` }}>
+                        <span style={{ fontSize: "20px" }}>🥇</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: "10px", color: T.textDim, letterSpacing: "0.06em", fontWeight: 600 }}>BESTE RUNDE</div>
+                          <div style={{ fontSize: "13px", color: T.text, fontWeight: 600 }}>
+                            {bestRound.name} — <span className="mono" style={{ color: T.gold, fontWeight: 700 }}>{bestRound.sf} SF</span>
+                          </div>
+                          <div style={{ fontSize: "10px", color: T.textSoft }}>{bestRound.club} · {fmtDate(bestRound.date)}</div>
+                        </div>
+                      </div>
+                    )}
+
+                    {bestForm && bestForm.sim.diff < 0 && (
+                      <div style={{ display: "flex", alignItems: "center", gap: "10px", padding: "8px 0", borderBottom: worstForm && worstForm !== bestForm ? `1px solid ${T.line}` : "none" }}>
+                        <span style={{ fontSize: "20px" }}>📉</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: "10px", color: T.textDim, letterSpacing: "0.06em", fontWeight: 600 }}>FORM-SIEGER</div>
+                          <div style={{ fontSize: "13px", color: T.text, fontWeight: 600 }}>
+                            {bestForm.friend.name} — <span style={{ color: T.sage, fontWeight: 700 }}>{bestForm.sim.diff}</span>
+                          </div>
+                          <div style={{ fontSize: "10px", color: T.textSoft }}>spielt aktuell wie HCP {bestForm.sim.simHcp}</div>
+                        </div>
+                      </div>
+                    )}
+
+                    {worstForm && worstForm !== bestForm && worstForm.sim.diff > 0 && (
+                      <div style={{ display: "flex", alignItems: "center", gap: "10px", padding: "8px 0" }}>
+                        <span style={{ fontSize: "20px" }}>📈</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: "10px", color: T.textDim, letterSpacing: "0.06em", fontWeight: 600 }}>FORM-LADER</div>
+                          <div style={{ fontSize: "13px", color: T.text, fontWeight: 600 }}>
+                            {worstForm.friend.name} — <span style={{ color: T.double, fontWeight: 700 }}>+{worstForm.sim.diff}</span>
+                          </div>
+                          <div style={{ fontSize: "10px", color: T.textSoft }}>spielt aktuell wie HCP {worstForm.sim.simHcp}</div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Hinweis falls noch nichts da */}
+                {!ownerName && crewData.length === 0 && (
+                  <EmptyState icon="📈" title="Noch zu wenig Daten" sub={`Form-Trends erscheinen ab ${SIM_HCP_MIN_ROUNDS} Runden pro Spieler. Spiele weiter — ${rounds.length} ${rounds.length === 1 ? "Runde" : "Runden"} schon im System!`} />
+                )}
+              </>
+            );
+          })()}
         </div>
 
         {/* Feedback footer */}
