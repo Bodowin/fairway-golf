@@ -2391,6 +2391,8 @@ export default function GolfApp() {
   // Scoring mode
   const [scoringMode, setScoringMode] = useState("batch"); // batch | live
   const [currentHole, setCurrentHole] = useState(0);
+  // v38: Loch-Schnellsprung-Modal
+  const [showHoleJump, setShowHoleJump] = useState(false);
   // Game mode (Uschi)
   const [gameMode, setGameMode] = useState("stableford"); // "stableford" | "uschi-single" | "uschi-team"
   const [teams, setTeams] = useState(null); // { A: [pid], B: [pid], nameA?, nameB? } | null
@@ -2400,6 +2402,9 @@ export default function GolfApp() {
   const touchStartX = useRef(null);
   const syncTimerRef = useRef(null);
   const livePushTimerRef = useRef(null);
+  // v38: Long-press auf Score-Feld → Strich direkt
+  const longPressTimerRef = useRef(null);
+  const longPressTriggered = useRef(false);
 
   const allClubs = useMemo(() => [...customClubs, ...BUILT_IN_CLUBS], [customClubs]);
   // v36: Bei geladener Runde priorisieren wir den Club-Snapshot aus der Runde,
@@ -3778,23 +3783,64 @@ export default function GolfApp() {
     </div>
   );
 
-  // Progress bar
-  const renderProgressBar = () => (
-    <div style={{ padding: "12px 16px", background: T.canvas, borderBottom: `1px solid ${T.line}` }}>
-      <div style={{ display: "flex", gap: "4px" }}>
-        {["Setup", "Löcher", "Scores", "Ergebnis"].map((label, i) => {
-          const active = stepIdx === i + 1;
-          const done = stepIdx > i + 1;
-          return (
-            <div key={label} style={{ flex: 1 }}>
-              <div style={{ height: "2px", borderRadius: "2px", background: done ? T.gold : active ? `${T.gold}aa` : T.line, marginBottom: "6px", transition: "background 0.3s" }}/>
-              <div style={{ fontSize: "10px", color: active ? T.gold : done ? T.textSoft : T.textDim, fontWeight: active ? 600 : 500 }}>{label}</div>
-            </div>
-          );
-        })}
+  // Progress bar (v38: clickable steps with smart guards)
+  const renderProgressBar = () => {
+    const targets = ["setup", "holes", "scoring", "results"];
+    // Welche Schritte sind erreichbar — abhängig von Setup-Stand
+    const hasClub = !!cfg?.clubName;
+    const hasPlayers = players && players.length > 0;
+    const hasAnyScore = Object.values(scores || {}).some(ps => Object.values(ps || {}).some(v => v !== undefined));
+    const canGoTo = (target) => {
+      if (target === "setup") return true;
+      if (target === "holes") return hasClub;
+      if (target === "scoring") return hasClub && hasPlayers;
+      if (target === "results") return hasClub && hasPlayers && hasAnyScore;
+      return false;
+    };
+    return (
+      <div style={{ padding: "12px 16px", background: T.canvas, borderBottom: `1px solid ${T.line}` }}>
+        <div style={{ display: "flex", gap: "4px" }}>
+          {["Setup", "Löcher", "Scores", "Ergebnis"].map((label, i) => {
+            const target = targets[i];
+            const active = stepIdx === i + 1;
+            const done = stepIdx > i + 1;
+            const reachable = canGoTo(target);
+            return (
+              <button
+                key={label}
+                onClick={() => { if (reachable) setView(target); }}
+                disabled={!reachable}
+                style={{
+                  flex: 1,
+                  background: "transparent",
+                  border: "none",
+                  padding: "0",
+                  cursor: reachable ? "pointer" : "default",
+                  opacity: reachable ? 1 : 0.5,
+                  textAlign: "left",
+                  // hover-state via inline simulator: leichter Background-Effekt
+                }}
+                title={reachable ? `Zu „${label}" springen` : "Erst vorherige Schritte abschließen"}>
+                <div style={{
+                  height: "2px",
+                  borderRadius: "2px",
+                  background: done ? T.gold : active ? `${T.gold}aa` : T.line,
+                  marginBottom: "6px",
+                  transition: "background 0.3s",
+                }}/>
+                <div style={{
+                  fontSize: "10px",
+                  color: active ? T.gold : done ? T.textSoft : T.textDim,
+                  fontWeight: active ? 600 : 500,
+                  textAlign: "left",
+                }}>{label}</div>
+              </button>
+            );
+          })}
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   // ═══════════════════════════════════════════════════════════════════════════
   // HOME SCREEN
@@ -5282,7 +5328,53 @@ export default function GolfApp() {
           )}
 
           {players.length === 0
-            ? <EmptyState icon="👤" title="Noch keine Spieler" sub="Füge Freunde hinzu oder tippe unten einen Namen ein." />
+            ? (
+              <>
+                <EmptyState icon="👤" title="Noch keine Spieler" sub="Füge Freunde hinzu oder tippe unten einen Namen ein." />
+                {/* v38: Letzte Crew nochmal — schneller Crew-Setup für Stamm-Crew */}
+                {rounds.length > 0 && (() => {
+                  const last = rounds[0];
+                  const lastPlayers = last?.players || [];
+                  if (lastPlayers.length === 0) return null;
+                  return (
+                    <button
+                      onClick={() => {
+                        // Refresh HCPs aus aktueller Friends-Liste falls vorhanden
+                        const refreshed = lastPlayers.map(p => {
+                          const friend = friends.find(f => f.name === p.name);
+                          return {
+                            id: uid(),
+                            name: p.name,
+                            hcp: friend ? friend.hcp : p.hcp,
+                            teeName: p.teeName,
+                          };
+                        });
+                        setPlayers(refreshed);
+                        showUndoToast(`✓ ${refreshed.length} Spieler übernommen aus „${last.cfg?.clubName || "letzter Runde"}"`, () => setPlayers([]));
+                      }}
+                      className="card-hover"
+                      style={{
+                        ...S.card, width: "100%", padding: "14px 16px",
+                        marginBottom: "12px", textAlign: "left", cursor: "pointer",
+                        border: `1px solid ${T.gold}40`,
+                      }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                        <div style={{ fontSize: "24px" }}>👥</div>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: "13px", fontWeight: 700, color: T.gold, marginBottom: "2px" }}>
+                            Letzte Crew nochmal
+                          </div>
+                          <div style={{ fontSize: "11px", color: T.textSoft, lineHeight: 1.4 }}>
+                            {lastPlayers.map(p => p.name).join(" · ")}
+                          </div>
+                        </div>
+                        <div style={{ color: T.gold, fontSize: "20px" }}>›</div>
+                      </div>
+                    </button>
+                  );
+                })()}
+              </>
+            )
             : players.map(p => {
                 const tee = playerTee(p, cfg, selectedClub);
                 const phResult = tee ? resolvePlayerPH(p, cfg, selectedClub, par) : { ph: "—", source: "formula" };
@@ -5542,23 +5634,28 @@ export default function GolfApp() {
             </div>
           </div>
 
-          {/* Mode toggle */}
-          <div style={{ display: "flex", background: T.surface1, border: `1px solid ${T.line}`, borderRadius: "12px", padding: "3px", marginBottom: "14px" }}>
+          {/* v38: Mode toggle — größer, mit Icons, klarer */}
+          <div style={{ display: "flex", background: T.surface1, border: `1px solid ${T.line}`, borderRadius: "14px", padding: "4px", marginBottom: "14px", gap: "4px" }}>
             {[
-              { k: "batch", l: "Gesamt", sub: "Alle Löcher" },
-              { k: "live",  l: "Live",   sub: "Loch für Loch" },
-            ].map(({k,l,sub}) => (
+              { k: "batch", l: "Tabelle",  icon: "📋", sub: "Alle Löcher auf einmal" },
+              { k: "live",  l: "Live",     icon: "🎯", sub: "Loch für Loch" },
+            ].map(({k,l,icon,sub}) => (
               <button key={k} onClick={() => setScoringMode(k)}
                 style={{
-                  flex: 1, padding: "9px 10px",
+                  flex: 1, padding: "12px 10px",
                   background: scoringMode === k ? T.gold : "transparent",
                   color: scoringMode === k ? T.canvas : T.textSoft,
-                  border: "none", borderRadius: "9px",
-                  fontSize: "13px", fontWeight: scoringMode === k ? 700 : 500,
-                  display: "flex", flexDirection: "column", alignItems: "center", gap: "1px",
+                  border: "none", borderRadius: "10px",
+                  fontWeight: scoringMode === k ? 700 : 500,
+                  display: "flex", flexDirection: "column", alignItems: "center", gap: "3px",
+                  transition: "all 0.2s ease",
+                  cursor: "pointer",
                 }}>
-                <span>{l}</span>
-                <span style={{ fontSize: "9px", opacity: 0.7, fontWeight: 500 }}>{sub}</span>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                  <span style={{ fontSize: "18px" }}>{icon}</span>
+                  <span style={{ fontSize: "14px" }}>{l}</span>
+                </div>
+                <span style={{ fontSize: "9px", opacity: 0.75, fontWeight: 500, letterSpacing: "0.02em" }}>{sub}</span>
               </button>
             ))}
           </div>
@@ -5853,7 +5950,7 @@ export default function GolfApp() {
     <>
       <div style={{ padding: "10px 14px", background: `${T.gold}10`, border: `1px solid ${T.gold}30`, borderRadius: "10px", marginBottom: "14px", fontSize: "12px", color: T.gold, display: "flex", alignItems: "center", gap: "8px" }}>
         <span>👆</span>
-        <span>Tippe ein Feld um den Score einzugeben</span>
+        <span>Tippen → Score-Pad · Lang drücken → Strich (Pick-Up)</span>
       </div>
       <div className="scroll-hide" style={{ overflowX: "auto", borderRadius: "12px", border: `1px solid ${T.line}`, background: T.surface1 }}>
         <table style={{ borderCollapse: "collapse", minWidth: "100%" }}>
@@ -5912,7 +6009,40 @@ export default function GolfApp() {
                   const display = isStrich(g) ? `(${capValue(hole.par, hs)})` : isValid(g) ? g : "—";
                   return (
                     <td key={p.id} style={{ padding: "5px 6px", textAlign: "center" }}>
-                      <button onClick={() => { setCurrentHole(i); setPadOpen({ playerId: p.id, holeIdx: i }); }}
+                      <button
+                        onClick={() => {
+                          if (longPressTriggered.current) {
+                            longPressTriggered.current = false;
+                            return;
+                          }
+                          setCurrentHole(i);
+                          setPadOpen({ playerId: p.id, holeIdx: i });
+                        }}
+                        onTouchStart={() => {
+                          longPressTriggered.current = false;
+                          longPressTimerRef.current = setTimeout(() => {
+                            longPressTriggered.current = true;
+                            if (navigator.vibrate) navigator.vibrate(50);
+                            setScore(p.id, i, STRICH);
+                            showUndoToast(`✗ ${p.name}: Strich · Loch ${i + 1}`,
+                              () => clearScore(p.id, i), "Rückgängig");
+                          }, 600);
+                        }}
+                        onTouchEnd={() => clearTimeout(longPressTimerRef.current)}
+                        onTouchCancel={() => clearTimeout(longPressTimerRef.current)}
+                        onTouchMove={() => clearTimeout(longPressTimerRef.current)}
+                        onMouseDown={() => {
+                          longPressTriggered.current = false;
+                          longPressTimerRef.current = setTimeout(() => {
+                            longPressTriggered.current = true;
+                            setScore(p.id, i, STRICH);
+                            showUndoToast(`✗ ${p.name}: Strich · Loch ${i + 1}`,
+                              () => clearScore(p.id, i), "Rückgängig");
+                          }, 600);
+                        }}
+                        onMouseUp={() => clearTimeout(longPressTimerRef.current)}
+                        onMouseLeave={() => clearTimeout(longPressTimerRef.current)}
+                        title="Tippen für Pad · Lang drücken für Strich"
                         style={{
                           position: "relative", width: "56px", height: "40px",
                           background: isEmpty ? T.surface1 : `${col}12`,
@@ -5921,6 +6051,10 @@ export default function GolfApp() {
                           borderRadius: "8px", fontSize: "16px",
                           fontWeight: isEmpty ? 400 : 700,
                           fontFamily: "JetBrains Mono, monospace",
+                          cursor: "pointer",
+                          userSelect: "none",
+                          WebkitUserSelect: "none",
+                          WebkitTouchCallout: "none",
                         }}>
                         {hs > 0 && !isEmpty && (
                           <span style={{ position: "absolute", top: "-4px", right: "-3px", fontSize: "8px", fontWeight: 700, background: T.gold, color: T.canvas, borderRadius: "4px", padding: "1px 3px", lineHeight: 1 }}>+{hs}</span>
@@ -5953,12 +6087,20 @@ export default function GolfApp() {
         <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" }}>
           <button onClick={() => goToHole(currentHole - 1)} disabled={currentHole === 0}
             style={{ background: T.surface1, border: `1px solid ${T.line}`, borderRadius: "10px", width: "44px", height: "44px", color: T.text, fontSize: "18px", opacity: currentHole === 0 ? 0.3 : 1 }}>←</button>
-          <div style={{ flex: 1, textAlign: "center" }}>
-            <div style={{ ...S.eyebrow, fontSize: "10px" }}>Loch</div>
+          <button
+            onClick={() => setShowHoleJump(true)}
+            style={{
+              flex: 1, textAlign: "center",
+              background: "transparent", border: "none",
+              padding: "4px 0", cursor: "pointer",
+              borderRadius: "10px",
+            }}
+            title="Tippen zum Springen">
+            <div style={{ ...S.eyebrow, fontSize: "10px" }}>Loch · tippen zum Springen</div>
             <div className="serif mono" style={{ fontSize: "36px", color: T.gold, fontWeight: 400, lineHeight: 1 }}>
               {currentHole + 1}<span style={{ color: T.textDim, fontSize: "18px" }}>/{cfg.numHoles}</span>
             </div>
-          </div>
+          </button>
           <button onClick={() => goToHole(currentHole + 1)} disabled={currentHole >= cfg.numHoles - 1}
             style={{ background: T.surface1, border: `1px solid ${T.line}`, borderRadius: "10px", width: "44px", height: "44px", color: T.text, fontSize: "18px", opacity: currentHole >= cfg.numHoles - 1 ? 0.3 : 1 }}>→</button>
         </div>
@@ -6040,7 +6182,13 @@ export default function GolfApp() {
                   </div>
                 </div>
 
-                <button onClick={() => {
+                <button
+                  onClick={() => {
+                    // Long-press wurde bereits gehandelt → click ignorieren wenn long-press getriggered
+                    if (longPressTriggered.current) {
+                      longPressTriggered.current = false;
+                      return;
+                    }
                     // Correction mode: entering this hole when it's already fully scored?
                     const isFullyScored = players.every(pp => {
                       const g = scores[pp.id]?.[currentHole];
@@ -6048,6 +6196,32 @@ export default function GolfApp() {
                     });
                     setPadOpen({ playerId: p.id, holeIdx: currentHole, correctionMode: isFullyScored });
                   }}
+                  onTouchStart={() => {
+                    longPressTriggered.current = false;
+                    longPressTimerRef.current = setTimeout(() => {
+                      longPressTriggered.current = true;
+                      // Haptic via vibrate-API
+                      if (navigator.vibrate) navigator.vibrate(50);
+                      setScore(p.id, currentHole, STRICH);
+                      showUndoToast(`✗ ${p.name}: Strich · Loch ${currentHole + 1}`,
+                        () => clearScore(p.id, currentHole), "Rückgängig");
+                    }, 600);
+                  }}
+                  onTouchEnd={() => clearTimeout(longPressTimerRef.current)}
+                  onTouchCancel={() => clearTimeout(longPressTimerRef.current)}
+                  onTouchMove={() => clearTimeout(longPressTimerRef.current)}
+                  onMouseDown={() => {
+                    longPressTriggered.current = false;
+                    longPressTimerRef.current = setTimeout(() => {
+                      longPressTriggered.current = true;
+                      setScore(p.id, currentHole, STRICH);
+                      showUndoToast(`✗ ${p.name}: Strich · Loch ${currentHole + 1}`,
+                        () => clearScore(p.id, currentHole), "Rückgängig");
+                    }, 600);
+                  }}
+                  onMouseUp={() => clearTimeout(longPressTimerRef.current)}
+                  onMouseLeave={() => clearTimeout(longPressTimerRef.current)}
+                  title="Tippen für Pad · Lang drücken für Strich"
                   style={{
                     width: "100%", height: "64px",
                     background: isEmpty ? T.surface2 : `${col}15`,
@@ -6057,6 +6231,10 @@ export default function GolfApp() {
                     fontWeight: 700,
                     fontFamily: "JetBrains Mono, monospace",
                     display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "2px",
+                    cursor: "pointer",
+                    userSelect: "none",
+                    WebkitUserSelect: "none",
+                    WebkitTouchCallout: "none",
                   }}>
                   <span>{isStrich(g) ? `(${capValue(hole.par, hs)})` : isValid(g) ? g : "Tippen"}</span>
                   {!isEmpty && (
@@ -8250,6 +8428,78 @@ WICHTIG:
     );
   };
 
+  // ── v38: Loch-Schnellsprung-Modal ──
+  const renderHoleJump = () => {
+    if (!showHoleJump) return null;
+    return (
+      <div onClick={() => setShowHoleJump(false)}
+        style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+        <div onClick={e => e.stopPropagation()} className="slide-up"
+          style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "85vh", overflowY: "auto" }}>
+          <SwipeHandle onClose={() => setShowHoleJump(false)} />
+          <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>
+            🎯 Loch wählen
+          </h3>
+          <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "16px" }}>
+            Tippen zum Springen · gold = aktuell · gefüllt = bereits gespielt
+          </p>
+
+          {/* Front 9 / Back 9 */}
+          {(() => {
+            const numHoles = cfg.numHoles || holes.length;
+            const showSplit = numHoles === 18;
+            const grids = showSplit
+              ? [{ label: "Front 9",  range: [0, 9] }, { label: "Back 9", range: [9, 18] }]
+              : [{ label: null, range: [0, numHoles] }];
+            return grids.map((g, gi) => (
+              <div key={gi} style={{ marginBottom: "16px" }}>
+                {g.label && (
+                  <div style={{ ...S.eyebrow, marginBottom: "8px", fontSize: "10px" }}>{g.label}</div>
+                )}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "8px" }}>
+                  {Array.from({ length: g.range[1] - g.range[0] }, (_, k) => g.range[0] + k).map(i => {
+                    const h = holes[i];
+                    const isCurrent = i === currentHole;
+                    const allDone = players.every(p => {
+                      const v = scores[p.id]?.[i];
+                      return isValid(v) || isStrich(v);
+                    });
+                    return (
+                      <button
+                        key={i}
+                        onClick={() => { goToHole(i); setShowHoleJump(false); }}
+                        style={{
+                          padding: "12px 8px",
+                          background: isCurrent ? T.gold : allDone ? `${T.sage}15` : T.surface2,
+                          color: isCurrent ? T.canvas : allDone ? T.sage : T.textSoft,
+                          border: `1px solid ${isCurrent ? T.gold : allDone ? `${T.sage}50` : T.line}`,
+                          borderRadius: "10px",
+                          fontSize: "12px",
+                          fontWeight: 600,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "3px",
+                          alignItems: "center",
+                          cursor: "pointer",
+                        }}>
+                        <span className="mono" style={{ fontSize: "18px", fontWeight: 700 }}>L{i + 1}</span>
+                        <span style={{ fontSize: "10px", opacity: 0.8 }}>Par {h?.par || "—"} · SI {h?.si || "—"}</span>
+                        {allDone && <span style={{ fontSize: "10px", color: isCurrent ? T.canvas : T.sage, fontWeight: 700 }}>✓</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ));
+          })()}
+
+          <button onClick={() => setShowHoleJump(false)}
+            style={{ ...S.btnGhost, width: "100%", marginTop: "8px", fontSize: "13px" }}>Schließen</button>
+        </div>
+      </div>
+    );
+  };
+
   // ── v33: Trash modal — soft-deleted rounds recoverable for 30 days ──
   const renderTrash = () => {
     if (!showTrash) return null;
@@ -10219,6 +10469,7 @@ Wichtig:
       {renderLiveViewerModal()}
       {renderBackupRestore()}
       {renderTrash()}
+      {renderHoleJump()}
       {renderStatDrilldown()}
       {renderOwnerSetup()}
       {renderUndoToast()}
