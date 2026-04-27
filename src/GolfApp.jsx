@@ -1089,11 +1089,14 @@ function getRaceStatus(rankedStats, holesLeft) {
 const SIM_HCP_ROUNDS = 5;       // letzte N Runden zur Berechnung
 const SIM_HCP_MIN_ROUNDS = 3;   // mindestens N Runden nötig sonst keine Anzeige
 
-function computeSimHcp(playerName, allRounds) {
-  if (!playerName || !allRounds?.length) return null;
-  // Find all rounds where this player participated, sorted newest first
+function computeSimHcp(playerNameOrId, allRounds) {
+  if (!playerNameOrId || !allRounds?.length) return null;
+  const isId = typeof playerNameOrId === "string" && playerNameOrId.startsWith(PLAYER_ID_PREFIX);
+  // v39: Match auf playerId ODER Name (Backwards-Compat)
   const playerRounds = allRounds
-    .filter(r => (r.players || []).some(p => p.name === playerName))
+    .filter(r => (r.players || []).some(p =>
+      isId ? p.playerId === playerNameOrId : (p.name === playerNameOrId || normName(p.name) === normName(playerNameOrId))
+    ))
     .sort((a, b) => {
       const da = new Date(a.cfg?.date || a.savedAt || 0).getTime();
       const db = new Date(b.cfg?.date || b.savedAt || 0).getTime();
@@ -1105,13 +1108,14 @@ function computeSimHcp(playerName, allRounds) {
     return { simHcp: null, baseHcp: null, diff: null, roundsUsed: playerRounds.length, hasEnoughData: false };
   }
 
-  // Calculate SF-Netto for each round
   const sfList = [];
   let baseHcp = null;
   for (const r of playerRounds) {
-    const player = (r.players || []).find(p => p.name === playerName);
+    const player = (r.players || []).find(p =>
+      isId ? p.playerId === playerNameOrId : (p.name === playerNameOrId || normName(p.name) === normName(playerNameOrId))
+    );
     if (!player) continue;
-    if (baseHcp === null) baseHcp = parseFloat(player.hcp) || 0; // newest round = current HCP
+    if (baseHcp === null) baseHcp = parseFloat(player.hcp) || 0;
     const holes = r.holes || [];
     if (holes.length === 0) continue;
     const par = holes.reduce((s, h) => s + h.par, 0);
@@ -1125,9 +1129,7 @@ function computeSimHcp(playerName, allRounds) {
       const hs = holeHS(ph, h.si, holes.length);
       sfTotal += sfNetto(g, hs, h.par) || 0;
     });
-    // Only count rounds with significant data (≥ 50% holes played)
     if (played >= holes.length * 0.5) {
-      // Normalize to 18 holes if 9-hole round
       const normalizedSf = holes.length === 9 ? sfTotal * 2 : sfTotal;
       sfList.push(normalizedSf);
     }
@@ -1138,17 +1140,14 @@ function computeSimHcp(playerName, allRounds) {
   }
 
   const avgSf = sfList.reduce((s, v) => s + v, 0) / sfList.length;
-  // Diff: how far below/above 36 the player is averaging
-  // < 36 → playing worse → sim-HCP higher
-  // > 36 → playing better → sim-HCP lower
   const sfDiff = 36 - avgSf;
-  const simHcp = Math.round((baseHcp + sfDiff) * 10) / 10; // rounded to 1 decimal
+  const simHcp = Math.round((baseHcp + sfDiff) * 10) / 10;
   const diff = Math.round((simHcp - baseHcp) * 10) / 10;
 
   return {
     simHcp,
     baseHcp,
-    diff,            // positive = playing worse, negative = playing better
+    diff,
     avgSf: Math.round(avgSf * 10) / 10,
     roundsUsed: sfList.length,
     hasEnoughData: true,
@@ -1185,15 +1184,17 @@ function aggregateClubStats(clubName, allRounds) {
     const rClub = r.selectedClubSnapshot || null;
 
     rPlayers.forEach(p => {
-      if (!playerMap[p.name]) {
-        playerMap[p.name] = {
-          name: p.name,
+      // v39: Identity-Schlüssel — playerId wenn vorhanden, sonst normalisierter Name
+      const idKey = p.playerId || `name:${normName(p.name)}`;
+      if (!playerMap[idKey]) {
+        playerMap[idKey] = {
+          name: p.name, // letzter bekannter Name als Anzeigename
+          playerId: p.playerId || null,
           roundsPlayed: 0,
           sfList: [], // {score, date, clubName} per round
           birdies: 0, pars: 0, bogeys: 0, doubles: 0, strichCount: 0,
           ladiesTotal: 0, // total # ladies across all rounds at this club
           uschi: { total: 0, par3Wins: 0, bestCarry: 0, burntCount: 0 },
-          // v37: Drilldown-Listen pro Stat-Kategorie — { holeIdx, gross, par, date, clubName }
           birdiesList: [],
           parsList: [],
           bogeysList: [],
@@ -1201,15 +1202,15 @@ function aggregateClubStats(clubName, allRounds) {
           strichList: [],
           perHole: holes.map((h, i) => ({
             holeIdx: i, par: h.par, si: h.si,
-            grossList: [], // strikes treated as par+3
-            realGrossList: [], // only played scores
+            grossList: [],
+            realGrossList: [],
             birdieCount: 0, parCount: 0, bogeyCount: 0, doubleCount: 0, strichCount: 0,
             ladyCount: 0,
-            scores: [], // { gross, date, isStrich }
+            scores: [],
           })),
         };
       }
-      const pm = playerMap[p.name];
+      const pm = playerMap[idKey];
       pm.roundsPlayed++;
 
       // Determine tee for PH calculation
@@ -1430,6 +1431,60 @@ const scoreLabel = (gross, par) => {
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 const toDay = () => new Date().toISOString().slice(0, 10);
+
+// ─── v39: Player Identity & HCP-History System ──────────────────────────────
+// Friends bekommen playerId (stable über Namensänderungen), aliases (alle
+// jemals verwendeten Namen) und hcpHistory (HCP-Werte mit Datum).
+const PLAYER_ID_PREFIX = "ply_";
+const newPlayerId = () => PLAYER_ID_PREFIX + Math.random().toString(36).slice(2, 11);
+
+function normName(n) {
+  return String(n || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function findFriendByNameOrAlias(friends, name) {
+  if (!friends || !name) return null;
+  const nn = normName(name);
+  for (const f of friends) {
+    if (normName(f.name) === nn) return f;
+    const aliases = f.aliases || [];
+    for (const a of aliases) if (normName(a) === nn) return f;
+  }
+  return null;
+}
+
+function migrateFriends(friends) {
+  if (!Array.isArray(friends)) return [];
+  return friends.map(f => {
+    if (!f) return f;
+    const initialHcp = typeof f.hcp === "number" ? f.hcp : parseFloat(f.hcp);
+    const validHcp = Number.isFinite(initialHcp) ? initialHcp : 0;
+    return {
+      ...f,
+      playerId: f.playerId || newPlayerId(),
+      aliases: Array.isArray(f.aliases) ? f.aliases : [],
+      hcpHistory: Array.isArray(f.hcpHistory) && f.hcpHistory.length > 0
+        ? f.hcpHistory
+        : [{ date: toDay(), hcp: validHcp }],
+    };
+  });
+}
+
+function attachPlayerIdsToRounds(rounds, friends) {
+  if (!Array.isArray(rounds)) return [];
+  return rounds.map(r => {
+    if (!r?.players) return r;
+    return {
+      ...r,
+      players: r.players.map(p => {
+        if (p.playerId) return p;
+        const friend = findFriendByNameOrAlias(friends, p.name);
+        return friend ? { ...p, playerId: friend.playerId } : p;
+      }),
+    };
+  });
+}
+
 const fmtDate = d => {
   try {
     return new Date(d).toLocaleDateString("de-AT", { day:"numeric", month:"short", year:"numeric" });
@@ -2335,6 +2390,11 @@ export default function GolfApp() {
   const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | error
   const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
   const [showSyncModal, setShowSyncModal] = useState(false);
+  // v39: Player-Manager
+  const [showPlayerManager, setShowPlayerManager] = useState(false);
+  const [playerManagerFocus, setPlayerManagerFocus] = useState(null); // playerId
+  const [mergeTarget, setMergeTarget] = useState(null); // { fromId, toId }
+  const [aliasInput, setAliasInput] = useState("");
   // UI state
   const [clubQ, setClubQ] = useState("");
   const [showDD, setShowDD] = useState(false);
@@ -2502,7 +2562,28 @@ export default function GolfApp() {
           setRounds(loadedRounds);
         }
       } catch {}
-      try { const f = await window.storage.get("golf-friends");      if (f) setFriends(JSON.parse(f.value)); } catch {}
+      // v39: Friends laden + zu neuem Datenmodell migrieren (playerId, aliases, hcpHistory)
+      try {
+        const f = await window.storage.get("golf-friends");
+        if (f) {
+          const raw = JSON.parse(f.value);
+          const needsMigration = Array.isArray(raw) && raw.some(x => !x.playerId || !Array.isArray(x.aliases) || !Array.isArray(x.hcpHistory));
+          if (needsMigration) {
+            // Auto-Backup vor Migration
+            try {
+              await window.storage.set(
+                `golf-backup-pre-v39-${Date.now()}`,
+                JSON.stringify({ friends: raw, ts: new Date().toISOString() })
+              );
+            } catch {}
+            const migrated = migrateFriends(raw);
+            setFriends(migrated);
+            try { await window.storage.set("golf-friends", JSON.stringify(migrated)); } catch {}
+          } else {
+            setFriends(raw);
+          }
+        }
+      } catch {}
       try { const c = await window.storage.get("golf-custom-clubs"); if (c) setCustomClubs(JSON.parse(c.value)); } catch {}
       try {
         const o = await window.storage.get("golf-owner-profile");
@@ -2805,18 +2886,22 @@ export default function GolfApp() {
     const name = newP.name.trim(); if (!name) return;
     const hcp = parseFloat(newP.hcp);
     const tee = selectedClub && cfg.defaultTeeName ? selectedClub.tees[cfg.defaultTeeName] : null;
+    // v39: Match auf bestehenden Friend via Alias-System
+    const matchedFriend = findFriendByNameOrAlias(friends, name);
     const playerData = {
       id: uid(), name, hcp: isNaN(hcp) ? 0 : hcp,
       teeName: cfg.defaultTeeName || "",
       cr: tee?.cr, slope: tee?.slope, par: tee?.par,
+      // v39: Stable identity — wenn Friend gefunden, übernehmen wir dessen ID
+      playerId: matchedFriend ? matchedFriend.playerId : newPlayerId(),
     };
     setPlayers(p => sortByHcp([...p, playerData]));
     setNewP({ name: "", hcp: "" });
-  }, [newP, selectedClub, cfg.defaultTeeName]);
+  }, [newP, selectedClub, cfg.defaultTeeName, friends]);
 
   const addFromFriend = useCallback(f => {
     setPlayers(p => {
-      if (p.find(x => x.name === f.name)) return p;
+      if (p.find(x => x.playerId === f.playerId || normName(x.name) === normName(f.name))) return p;
       // Use friend's remembered tee if it exists for this club, else cfg default
       const teeName = (f.lastTeeName && selectedClub?.tees?.[f.lastTeeName])
         ? f.lastTeeName
@@ -2826,13 +2911,22 @@ export default function GolfApp() {
         id: uid(), name: f.name, hcp: f.hcp,
         teeName,
         cr: tee?.cr, slope: tee?.slope, par: tee?.par,
+        playerId: f.playerId, // v39: Identity übernehmen
       }]);
     });
   }, [selectedClub, cfg.defaultTeeName]);
 
   const saveFriend = async (player) => {
     if (friends.find(f => f.name === player.name)) return;
-    const updated = [...friends, { name: player.name, hcp: player.hcp }];
+    // v39: Neuer Friend mit Identity-System
+    const newFriend = {
+      name: player.name,
+      hcp: player.hcp,
+      playerId: player.playerId || newPlayerId(),
+      aliases: [],
+      hcpHistory: [{ date: toDay(), hcp: player.hcp }],
+    };
+    const updated = [...friends, newFriend];
     setFriends(updated);
     try { await window.storage.set("golf-friends", JSON.stringify(updated)); } catch {}
   };
@@ -2851,16 +2945,108 @@ export default function GolfApp() {
     }
   };
   const updateFriendHcp = async (name, hcp) => {
-    const updated = friends.map(f => f.name === name ? { ...f, hcp: parseFloat(hcp) || 0 } : f);
+    const newHcp = parseFloat(hcp) || 0;
+    const updated = friends.map(f => {
+      if (f.name !== name) return f;
+      // v39: HCP-History pflegen — nur wenn Wert sich geändert hat
+      const lastEntry = (f.hcpHistory || []).slice(-1)[0];
+      const newHistory = (lastEntry && lastEntry.hcp === newHcp)
+        ? (f.hcpHistory || [])
+        : [...(f.hcpHistory || []), { date: toDay(), hcp: newHcp }];
+      return { ...f, hcp: newHcp, hcpHistory: newHistory };
+    });
     setFriends(updated);
     try { await window.storage.set("golf-friends", JSON.stringify(updated)); } catch {}
   };
   const addFriendDirect = async () => {
     const name = newP.name.trim(); if (!name) return;
     const hcp = parseFloat(newP.hcp) || 0;
-    const updated = [...friends, { name, hcp }];
+    // v39: Neuer Friend bekommt sofort playerId + initiale History
+    const updated = [...friends, {
+      name, hcp,
+      playerId: newPlayerId(),
+      aliases: [],
+      hcpHistory: [{ date: toDay(), hcp }],
+    }];
     setFriends(updated); setNewP({ name: "", hcp: "" });
     try { await window.storage.set("golf-friends", JSON.stringify(updated)); } catch {}
+  };
+
+  // ── v39: Player-Manager-Funktionen ──
+  // Alias hinzufügen / entfernen
+  const addAlias = async (playerId, alias) => {
+    const aliasTrimmed = alias.trim();
+    if (!aliasTrimmed) return;
+    const updated = friends.map(f => {
+      if (f.playerId !== playerId) return f;
+      const existing = f.aliases || [];
+      if (existing.some(a => normName(a) === normName(aliasTrimmed))) return f;
+      return { ...f, aliases: [...existing, aliasTrimmed] };
+    });
+    setFriends(updated);
+    try { await window.storage.set("golf-friends", JSON.stringify(updated)); } catch {}
+  };
+
+  const removeAlias = async (playerId, alias) => {
+    const updated = friends.map(f => {
+      if (f.playerId !== playerId) return f;
+      return { ...f, aliases: (f.aliases || []).filter(a => a !== alias) };
+    });
+    setFriends(updated);
+    try { await window.storage.set("golf-friends", JSON.stringify(updated)); } catch {}
+  };
+
+  // Player-Merge: Spieler "fromId" wird in "toId" eingegliedert.
+  // - Alias des "from"-Namens wird zu "to" hinzugefügt
+  // - Alle Runden-Spieler mit fromId werden auf toId umgeschrieben
+  // - HCP-Historien werden zusammengeführt (chronologisch)
+  // - "from"-Friend wird gelöscht
+  const mergePlayer = async (fromId, toId) => {
+    if (!fromId || !toId || fromId === toId) return false;
+    const fromFriend = friends.find(f => f.playerId === fromId);
+    const toFriend = friends.find(f => f.playerId === toId);
+    if (!fromFriend || !toFriend) return false;
+
+    // Auto-Backup
+    try {
+      await window.storage.set(
+        `golf-backup-pre-merge-${Date.now()}`,
+        JSON.stringify({ friends, rounds, ts: new Date().toISOString() })
+      );
+    } catch {}
+
+    // Friends-Liste aktualisieren
+    const newAliases = [
+      ...(toFriend.aliases || []),
+      fromFriend.name,
+      ...(fromFriend.aliases || []),
+    ].filter((a, i, arr) => arr.findIndex(x => normName(x) === normName(a)) === i)
+     .filter(a => normName(a) !== normName(toFriend.name));
+
+    const mergedHistory = [
+      ...(toFriend.hcpHistory || []),
+      ...(fromFriend.hcpHistory || []),
+    ].sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    const updatedFriends = friends
+      .filter(f => f.playerId !== fromId)
+      .map(f => f.playerId === toId ? { ...f, aliases: newAliases, hcpHistory: mergedHistory } : f);
+
+    // Runden aktualisieren: alle players mit fromId → toId
+    const updatedRounds = rounds.map(r => {
+      if (!r.players) return r;
+      return {
+        ...r,
+        players: r.players.map(p => p.playerId === fromId ? { ...p, playerId: toId } : p),
+      };
+    });
+
+    setFriends(updatedFriends);
+    setRounds(updatedRounds);
+    try { await window.storage.set("golf-friends", JSON.stringify(updatedFriends)); } catch {}
+    try { await window.storage.set("golf-rounds", JSON.stringify(updatedRounds)); } catch {}
+    showUndoToast(`✓ "${fromFriend.name}" mit "${toFriend.name}" zusammengeführt`, null);
+    return true;
   };
 
   // ── Scores
@@ -8509,6 +8695,217 @@ WICHTIG:
     );
   };
 
+  // ── v39: Player-Manager — alle Spieler verwalten (HCP, Aliase, Merge) ──
+  const renderPlayerManager = () => {
+    if (!showPlayerManager) return null;
+    const focused = playerManagerFocus ? friends.find(f => f.playerId === playerManagerFocus) : null;
+    const otherFriends = focused ? friends.filter(f => f.playerId !== focused.playerId) : [];
+
+    return (
+      <div onClick={() => { if (!mergeTarget) { setShowPlayerManager(false); setPlayerManagerFocus(null); } }}
+        style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+        <div onClick={e => e.stopPropagation()} className="slide-up"
+          style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
+          <SwipeHandle onClose={() => { setShowPlayerManager(false); setPlayerManagerFocus(null); }} />
+
+          {!focused && (
+            <>
+              <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>👥 Spieler verwalten</h3>
+              <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "16px", lineHeight: 1.5 }}>
+                Tippe einen Spieler für HCP-History, Aliase oder Merge mit anderem Spieler. Alte Runden bleiben mit ihrem damaligen HCP — dein Setup für neue Runden nutzt den aktuellen.
+              </p>
+
+              {friends.length === 0 ? (
+                <EmptyState icon="👤" title="Noch keine Spieler" sub="Spieler erscheinen hier sobald du welche zu Runden hinzufügst." />
+              ) : friends.map(f => {
+                const lastChange = (f.hcpHistory || []).slice(-1)[0];
+                return (
+                  <button key={f.playerId} onClick={() => { setPlayerManagerFocus(f.playerId); setAliasInput(""); }}
+                    className="card-hover"
+                    style={{ ...S.card, width: "100%", padding: "12px 14px", marginBottom: "8px", textAlign: "left", cursor: "pointer" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                      <div style={{ width: "32px", height: "32px", borderRadius: "50%", background: `${T.gold}20`, border: `1px solid ${T.gold}40`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "13px", fontWeight: 700, color: T.gold }}>
+                        {(f.name || "?").charAt(0).toUpperCase()}
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: "14px", fontWeight: 600, color: T.text, display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                          {f.name}
+                          {f.isOwner && <span style={{ fontSize: "9px", color: T.gold, background: `${T.gold}15`, padding: "1px 5px", borderRadius: "3px", fontWeight: 700, letterSpacing: "0.04em" }}>OWNER</span>}
+                        </div>
+                        <div style={{ fontSize: "11px", color: T.textSoft, marginTop: "2px" }}>
+                          HCP <span className="mono" style={{ color: T.gold, fontWeight: 700 }}>{f.hcp}</span>
+                          {lastChange && lastChange.date && (
+                            <span style={{ color: T.textDim }}> · seit {fmtDate(lastChange.date)}</span>
+                          )}
+                          {(f.aliases?.length > 0) && (
+                            <span style={{ color: T.textDim }}> · {f.aliases.length} Alias{f.aliases.length === 1 ? "" : "e"}</span>
+                          )}
+                        </div>
+                      </div>
+                      <div style={{ color: T.textSoft, fontSize: "18px" }}>›</div>
+                    </div>
+                  </button>
+                );
+              })}
+
+              <button onClick={() => { setShowPlayerManager(false); setPlayerManagerFocus(null); }}
+                style={{ ...S.btnGhost, width: "100%", marginTop: "14px" }}>Schließen</button>
+            </>
+          )}
+
+          {focused && (
+            <>
+              <button onClick={() => { setPlayerManagerFocus(null); setAliasInput(""); }}
+                style={{ ...S.btnGhost, fontSize: "11px", padding: "4px 8px", marginBottom: "12px" }}>← zurück</button>
+
+              <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>{focused.name}</h3>
+              <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "16px" }}>
+                Player-ID: <span className="mono">{focused.playerId}</span>
+              </p>
+
+              {/* Aktueller HCP + bearbeiten */}
+              <div style={{ ...S.card, padding: "14px", marginBottom: "12px" }}>
+                <div style={{ ...S.eyebrow, marginBottom: "8px" }}>Aktueller HCP</div>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                  <input type="number" step="0.1" value={focused.hcp}
+                    onChange={e => updateFriendHcp(focused.name, e.target.value)}
+                    style={{ ...S.input, fontFamily: "JetBrains Mono, monospace", fontSize: "20px", textAlign: "center", fontWeight: 700, color: T.gold, padding: "10px" }}/>
+                </div>
+                <p style={{ fontSize: "10px", color: T.textDim, marginTop: "8px", lineHeight: 1.4 }}>
+                  Änderungen werden mit Datum gespeichert. Alte Runden behalten ihren damaligen HCP.
+                </p>
+              </div>
+
+              {/* HCP-History */}
+              {(focused.hcpHistory?.length > 0) && (
+                <div style={{ ...S.card, padding: "14px", marginBottom: "12px" }}>
+                  <div style={{ ...S.eyebrow, marginBottom: "10px" }}>📈 HCP-Historie</div>
+                  {[...(focused.hcpHistory || [])].reverse().slice(0, 10).map((h, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderTop: i > 0 ? `1px solid ${T.line}` : "none", fontSize: "12px" }}>
+                      <span style={{ color: T.textSoft }}>{fmtDate(h.date)}</span>
+                      <span className="mono" style={{ color: T.gold, fontWeight: 700 }}>HCP {h.hcp}</span>
+                    </div>
+                  ))}
+                  {focused.hcpHistory.length > 10 && (
+                    <p style={{ fontSize: "10px", color: T.textDim, marginTop: "8px", textAlign: "center", fontStyle: "italic" }}>
+                      {focused.hcpHistory.length - 10} ältere Einträge
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Aliase */}
+              <div style={{ ...S.card, padding: "14px", marginBottom: "12px" }}>
+                <div style={{ ...S.eyebrow, marginBottom: "10px" }}>🏷️ Aliase</div>
+                <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px", lineHeight: 1.5 }}>
+                  Andere Namen unter denen dieser Spieler bekannt ist. Wird beim Setup automatisch erkannt — z.B. „Thorsti" → „Thorsten".
+                </p>
+                {(focused.aliases || []).length > 0 ? (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "10px" }}>
+                    {focused.aliases.map(a => (
+                      <span key={a} style={{
+                        background: `${T.sage}15`,
+                        border: `1px solid ${T.sage}40`,
+                        borderRadius: "6px",
+                        padding: "4px 8px",
+                        fontSize: "11px",
+                        color: T.sage,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "5px",
+                      }}>
+                        {a}
+                        <button onClick={() => removeAlias(focused.playerId, a)}
+                          style={{ background: "transparent", border: "none", color: T.double, fontSize: "13px", cursor: "pointer", padding: 0, lineHeight: 1 }}>×</button>
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p style={{ fontSize: "11px", color: T.textDim, fontStyle: "italic", marginBottom: "10px" }}>
+                    Noch keine Aliase eingetragen.
+                  </p>
+                )}
+                <div style={{ display: "flex", gap: "6px" }}>
+                  <input value={aliasInput} onChange={e => setAliasInput(e.target.value)}
+                    placeholder="Spitzname, Echtname, Variante..."
+                    style={{ ...S.input, fontSize: "13px", padding: "8px 10px", flex: 1 }}/>
+                  <button
+                    onClick={() => {
+                      if (aliasInput.trim()) {
+                        addAlias(focused.playerId, aliasInput);
+                        setAliasInput("");
+                      }
+                    }}
+                    style={{ ...S.btnSecondary, padding: "8px 14px", fontSize: "13px" }}>+</button>
+                </div>
+              </div>
+
+              {/* Merge mit anderem Spieler */}
+              {otherFriends.length > 0 && (
+                <div style={{ ...S.card, padding: "14px", marginBottom: "12px", borderColor: `${T.double}30` }}>
+                  <div style={{ ...S.eyebrow, marginBottom: "10px", color: T.double }}>⚠️ Mit anderem Spieler zusammenführen</div>
+                  <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px", lineHeight: 1.5 }}>
+                    Falls dieser Spieler dieselbe Person ist wie jemand anders. „{focused.name}" wird gelöscht, alle Runden auf den Ziel-Spieler umgeschrieben.
+                  </p>
+                  <select
+                    onChange={e => {
+                      const toId = e.target.value;
+                      if (toId) setMergeTarget({ fromId: focused.playerId, toId });
+                    }}
+                    style={{ ...S.input, fontSize: "13px", padding: "10px", width: "100%" }}
+                    defaultValue="">
+                    <option value="">Mit welchem Spieler zusammenführen?</option>
+                    {otherFriends.map(o => (
+                      <option key={o.playerId} value={o.playerId}>→ {o.name} (HCP {o.hcp})</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <button onClick={() => { setPlayerManagerFocus(null); setAliasInput(""); }}
+                style={{ ...S.btnGhost, width: "100%", fontSize: "13px" }}>Fertig</button>
+            </>
+          )}
+        </div>
+
+        {/* Merge-Bestätigung */}
+        {mergeTarget && (() => {
+          const fromF = friends.find(f => f.playerId === mergeTarget.fromId);
+          const toF = friends.find(f => f.playerId === mergeTarget.toId);
+          const affectedRounds = rounds.filter(r => r.players?.some(p => p.playerId === mergeTarget.fromId)).length;
+          if (!fromF || !toF) return null;
+          return (
+            <div onClick={e => e.stopPropagation()}
+              style={{ position: "fixed", inset: 0, background: "#000000ee", zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center", padding: "20px" }}>
+              <div style={{ ...S.card, maxWidth: "440px", width: "100%", padding: "20px", borderColor: T.double }}>
+                <h4 className="serif" style={{ fontSize: "20px", margin: "0 0 8px", color: T.double }}>⚠️ Merge bestätigen</h4>
+                <p style={{ fontSize: "13px", color: T.text, lineHeight: 1.6, marginBottom: "12px" }}>
+                  „<strong>{fromF.name}</strong>" wird mit „<strong>{toF.name}</strong>" zusammengeführt.
+                </p>
+                <ul style={{ fontSize: "11px", color: T.textSoft, lineHeight: 1.6, marginBottom: "16px", paddingLeft: "18px" }}>
+                  <li>{affectedRounds} Runde{affectedRounds === 1 ? "" : "n"} werden umgeschrieben</li>
+                  <li>„{fromF.name}" wird zum Alias von „{toF.name}"</li>
+                  <li>HCP-Historien werden zusammengeführt</li>
+                  <li>Auto-Backup wird vor dem Merge angelegt</li>
+                </ul>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <button onClick={() => setMergeTarget(null)}
+                    style={{ ...S.btnSecondary, flex: 1 }}>Abbrechen</button>
+                  <button onClick={async () => {
+                    await mergePlayer(mergeTarget.fromId, mergeTarget.toId);
+                    setMergeTarget(null);
+                    setPlayerManagerFocus(null);
+                  }}
+                    style={{ ...S.btnPrimary, flex: 1, background: T.double }}>Zusammenführen</button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+      </div>
+    );
+  };
+
   // ── v33: Trash modal — soft-deleted rounds recoverable for 30 days ──
   const renderTrash = () => {
     if (!showTrash) return null;
@@ -9811,6 +10208,18 @@ WICHTIG:
             </>
           )}
 
+          {/* v39: Player-Manager-Trigger */}
+          <div style={{ marginTop: "22px", paddingTop: "18px", borderTop: `1px solid ${T.line}` }}>
+            <div style={{ ...S.eyebrow, marginBottom: "10px", color: T.sage }}>👥 Spieler verwalten</div>
+            <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, marginBottom: "10px" }}>
+              HCPs aktualisieren, Aliase verwalten („Thorsti" = „Thorsten"), doppelte Spieler zusammenführen.
+            </p>
+            <button onClick={() => { setShowSyncModal(false); setShowPlayerManager(true); setPlayerManagerFocus(null); }}
+              style={{ ...S.btnSecondary, width: "100%", color: T.sage, borderColor: `${T.sage}40`, background: `${T.sage}10` }}>
+              👥 Spieler-Manager öffnen ({friends.length})
+            </button>
+          </div>
+
           {/* v33: Cloud Archive (Soft-Delete + Recovery) */}
           {SYNC_ENABLED && (
             <div style={{ marginTop: "22px", paddingTop: "18px", borderTop: `1px solid ${T.line}` }}>
@@ -10478,6 +10887,7 @@ Wichtig:
       {renderLiveViewerModal()}
       {renderBackupRestore()}
       {renderTrash()}
+      {renderPlayerManager()}
       {renderHoleJump()}
       {renderStatDrilldown()}
       {renderOwnerSetup()}
