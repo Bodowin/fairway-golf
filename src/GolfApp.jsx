@@ -2218,8 +2218,9 @@ function autoAssignTeams(adjStrokes) {
 // ═════════════════════════════════════════════════════════════════════════════
 const GLOBAL_CSS = `
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  body { margin: 0; background: ${T.canvas}; }
-  input, button, textarea { font-family: inherit; }
+  html, body { margin: 0; background: ${T.canvas}; overflow-x: hidden; max-width: 100%; }
+  #root { overflow-x: hidden; max-width: 100vw; }
+  input, button, textarea { font-family: inherit; max-width: 100%; }
   input:focus, textarea:focus { outline: none; border-color: ${T.gold}66 !important; box-shadow: 0 0 0 3px ${T.gold}15; }
   button { cursor: pointer; transition: transform 0.1s ease, background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease; }
   button:active { transform: scale(0.96); }
@@ -2243,7 +2244,7 @@ const GLOBAL_CSS = `
 `;
 
 const S = {
-  app: { minHeight: "100vh", background: T.canvas, color: T.text, fontFamily: "Inter, system-ui, sans-serif", fontSize: "14px", paddingBottom: "100px", letterSpacing: "-0.005em" },
+  app: { minHeight: "100vh", background: T.canvas, color: T.text, fontFamily: "Inter, system-ui, sans-serif", fontSize: "14px", paddingBottom: "100px", letterSpacing: "-0.005em", overflowX: "hidden", maxWidth: "100vw" },
   eyebrow: { fontSize: "10px", fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", color: T.textDim },
   page: { padding: "20px 16px" },
   card: { background: T.surface1, border: `1px solid ${T.line}`, borderRadius: "16px", padding: "18px", transition: "border-color 0.15s, background 0.15s" },
@@ -5915,13 +5916,16 @@ export default function GolfApp() {
             )}
           </div>
 
-          <div style={{ display: "flex", gap: "10px" }}>
-            <button style={{ ...S.btnSecondary, flex: 1 }} onClick={() => setView("holes")}>← Löcher</button>
+          {/* v38: Action-Buttons in 2 Zeilen — verhindert horizontales Scrollen */}
+          <div style={{ display: "flex", gap: "8px", marginBottom: "8px" }}>
+            <button
+              style={{ ...S.btnSecondary, flex: 1, padding: "12px 8px", fontSize: "13px" }}
+              onClick={() => setView("holes")}>← Löcher</button>
             <button
               onClick={undoLastScore}
               disabled={!lastScoreEntry}
               style={{
-                ...S.btnSecondary, flex: 1,
+                ...S.btnSecondary, flex: 1, padding: "12px 8px", fontSize: "13px",
                 opacity: lastScoreEntry ? 1 : 0.4,
                 cursor: lastScoreEntry ? "pointer" : "not-allowed",
               }}
@@ -5931,15 +5935,20 @@ export default function GolfApp() {
             <button
               onClick={async () => { await saveRound(); setView("home"); showUndoToast("⏸️ Runde pausiert — taucht als 'läuft' auf der Home-Seite auf", null); }}
               style={{
-                ...S.btnSecondary, flex: 1,
+                ...S.btnSecondary, flex: 1, padding: "12px 8px", fontSize: "13px",
                 background: `${T.gold}15`, color: T.gold,
                 border: `1px solid ${T.gold}50`,
               }}
               title="Runde wird automatisch gespeichert und kann später fortgesetzt werden">
               ⏸ Pause
             </button>
-            <button style={{ ...S.btnPrimary, flex: 2 }} className="gold-hover" onClick={() => { saveRound(); setView("results"); }}>Auswertung →</button>
           </div>
+          <button
+            style={{ ...S.btnPrimary, width: "100%" }}
+            className="gold-hover"
+            onClick={() => { saveRound(); setView("results"); }}>
+            Auswertung →
+          </button>
         </div>
       </div>
     );
@@ -10433,7 +10442,7 @@ Wichtig:
   // RENDER
   // ═══════════════════════════════════════════════════════════════════════════
   return (
-    <div style={S.app}>
+    <div style={{ ...S.app, width: "100%", overflowX: "hidden", position: "relative" }}>
       <style>{GLOBAL_CSS}</style>
       {renderHeader()}
       {!isOnline && (
