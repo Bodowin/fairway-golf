@@ -851,8 +851,43 @@ function calcCourseHcp(hcp, slope, cr, par, conversionTable) {
 const holeHS     = (ph, si, n) => Math.floor(Math.abs(ph)/n) + (si <= Math.abs(ph)%n ? 1 : 0);
 const isStrich   = v => v === null;
 const isValid    = v => typeof v === "number" && v > 0;
-const sfNetto    = (g, hs, par) => isStrich(g) ? 0 : (isValid(g) ? Math.max(0, par - (g - hs) + 2) : null);
+
+// ── v34: Cap-Wert (Pick-Up-Regel) ──
+// Score >= (Par + Vorgabeschläge + 2) ist ein Auto-Strich für SF (= 0 Punkte).
+// Anzeige: bei manuellem Strich wird der Cap-Wert in Klammern gezeigt, z.B. (7).
+const capValue   = (par, hs) => par + hs + 2;
+
+// Stableford netto. Auto-strich wenn g >= cap (modus-unabhängig).
+// Manueller Strich (g === null) → 0 Punkte, zählt als "Pick-Up".
+const sfNetto    = (g, hs, par) => {
+  if (isStrich(g)) return 0;
+  if (!isValid(g)) return null;
+  if (g >= capValue(par, hs)) return 0; // Auto-Strich für SF
+  return Math.max(0, par - (g - hs) + 2);
+};
 const sfBrutto   = (g, par)     => isStrich(g) ? 0 : (isValid(g) ? Math.max(0, par - g + 2) : null);
+
+// ── v34: Total Strokes — Summe aller Schläge pro Spieler ──
+// Manueller Strich zählt mit Cap-Wert (Par + Vorgabeschläge + 2).
+// Manuelle Eingabe (auch ≥ Cap, z.B. 10) zählt mit echtem Wert.
+// Nicht-gespielte Löcher werden ignoriert.
+function totalStrokes(player, round) {
+  if (!round?.holes || !round?.scores) return 0;
+  const scores = round.scores[player.id] || {};
+  const { ph } = resolvePlayerPH(player, round.cfg, round.selectedClubSnapshot,
+    round.holes.reduce((s, h) => s + h.par, 0));
+  let total = 0;
+  round.holes.forEach((h, i) => {
+    const g = scores[i];
+    if (isStrich(g)) {
+      const hs = holeHS(ph, h.si, round.holes.length);
+      total += capValue(h.par, hs);
+    } else if (isValid(g)) {
+      total += g;
+    }
+  });
+  return total;
+}
 
 // Check whether a round is fully complete (all players, all holes have a score or strich).
 // Returns { complete, holesPlayed, totalHoles, playersCount }.
@@ -1567,6 +1602,17 @@ function analyzeRound(round) {
     uschiTrend = { labels, series };
   }
 
+  // v34: Total strokes per player (Striche zählen mit Cap-Wert)
+  const totalStrokesPerPlayer = players.map(p => {
+    const data = perPlayerHoleData[p.id];
+    let total = 0;
+    data.forEach(d => {
+      if (!d) return;
+      total += d.effectiveGross || 0;
+    });
+    return { playerName: p.name, total };
+  }).filter(x => x.total > 0).sort((a, b) => a.total - b.total);
+
   return {
     completeness: { played, total, percent: Math.round((played / total) * 100) },
     hallOfFame: {
@@ -1581,6 +1627,7 @@ function analyzeRound(round) {
     hardestHoles: hardest,
     easiestHoles: easiest,
     playerHighlights,
+    totalStrokesPerPlayer,
     uschiTrend,
   };
 }
@@ -2700,6 +2747,30 @@ export default function GolfApp() {
   // setScore also detects when a hole is freshly completed (all players have a value)
   // and shows a small summary toast like "Loch 7: Bodo +2, Max +0, Thorsten Strich".
   const setScore = (pid, hi, val) => {
+    // ── v34: Pickup-Hinweis bei Eingabe ≥ Cap-Wert ──
+    // Wenn der Score netto kein Punkt mehr bringen kann, schlagen wir einen Strich (Pickup) vor.
+    // Toast erscheint nur bei echter Zahl-Eingabe (nicht bei manuellem Strich).
+    if (typeof val === "number" && val > 0) {
+      const player = players.find(pp => pp.id === pid);
+      const hole = holes[hi];
+      if (player && hole) {
+        const tee = playerTee(player, cfg, selectedClub);
+        const ph = tee ? resolvePlayerPH(player, cfg, selectedClub, par).ph : 0;
+        const hs = holeHS(ph, hole.si, cfg.numHoles);
+        const cap = capValue(hole.par, hs);
+        if (val >= cap) {
+          // Defer slightly so toast doesn't race with pad-close animation
+          setTimeout(() => {
+            showUndoToast(
+              `💡 Pick-Up möglich · 0 SF`,
+              () => { setScore(pid, hi, null); },
+              "Strich"
+            );
+          }, 100);
+        }
+      }
+    }
+
     setScores(s => {
       const prevValue = s[pid]?.[hi]; // capture pre-change state for undo
       // Track this entry so the user can undo via the "↶ Letzten Score rückgängig" button
@@ -2921,7 +2992,7 @@ export default function GolfApp() {
   // ── Stats (uses per-player tee data + any manual PH override)
   const computeStats = (player) => {
     const tee = playerTee(player, cfg, selectedClub);
-    if (!tee) return { ph: 0, hr: [], bT: 0, nT: 0, sfNT: 0, sfBT: 0, phSource: "formula", strichCount: 0 };
+    if (!tee) return { ph: 0, hr: [], bT: 0, nT: 0, sfNT: 0, sfBT: 0, totalStr: 0, phSource: "formula", strichCount: 0 };
     const { ph, source: phSource } = resolvePlayerPH(player, cfg, selectedClub, par);
     const hr = holes.map((h, i) => {
       const g = scores[player.id]?.[i];
@@ -2931,8 +3002,14 @@ export default function GolfApp() {
     const played = hr.filter(h => isValid(h.g));
     const bT = played.reduce((s, h) => s + h.g, 0);
     const strichCount = hr.filter(h => isStrich(h.g)).length;
+    // v34: totalStr = Total Strokes (Schläge gesamt). Striche zählen mit ihrem Cap-Wert (Par + HS + 2).
+    const totalStr = hr.reduce((s, h) => {
+      if (isStrich(h.g)) return s + capValue(h.par, h.hs);
+      if (isValid(h.g)) return s + h.g;
+      return s;
+    }, 0);
     return {
-      ph, hr, bT, tee, phSource, strichCount,
+      ph, hr, bT, tee, phSource, strichCount, totalStr,
       nT: played.length ? bT - ph : 0,
       sfNT: hr.reduce((s, h) => s + (h.sfN || 0), 0),
       sfBT: hr.reduce((s, h) => s + (h.sfB || 0), 0),
@@ -3117,9 +3194,9 @@ export default function GolfApp() {
     }
   };
   // Show undo toast — fires an action that can be reverted within N seconds.
-  const showUndoToast = (message, undoFn) => {
+  const showUndoToast = (message, undoFn, actionLabel) => {
     clearTimeout(undoTimerRef.current);
-    setUndoAction({ message, undo: undoFn });
+    setUndoAction({ message, undo: undoFn, actionLabel: actionLabel || "Rückgängig" });
     undoTimerRef.current = setTimeout(() => setUndoAction(null), 6000);
   };
 
@@ -5432,9 +5509,9 @@ export default function GolfApp() {
                       </div>
                       <div style={{ fontSize: "11px", color: T.textSoft }}>
                         {isUschi ? (
-                          <>SF <span className="mono">{s.sfNT}</span> · Brutto <span className="mono">{s.bT || "—"}{s.strichCount > 0 ? "*" : ""}</span></>
+                          <>SF <span className="mono">{s.sfNT}</span> · Brutto <span className="mono">{s.bT || "—"}{s.strichCount > 0 ? "*" : ""}</span> · Schläge <span className="mono" style={{ color: T.gold }}>{s.totalStr || "—"}</span></>
                         ) : (
-                          <>Vorgabe <span className="mono">{s.ph}</span> · Brutto <span className="mono">{s.bT || "—"}{s.strichCount > 0 ? "*" : ""}</span></>
+                          <>Vorgabe <span className="mono">{s.ph}</span> · Brutto <span className="mono">{s.bT || "—"}{s.strichCount > 0 ? "*" : ""}</span> · Schläge <span className="mono" style={{ color: T.gold }}>{s.totalStr || "—"}</span></>
                         )}
                       </div>
                     </div>
@@ -5570,7 +5647,7 @@ export default function GolfApp() {
                   const hs = holeHS(ph, hole.si, cfg.numHoles);
                   const col = scoreColor(g, hole.par);
                   const isEmpty = g === undefined;
-                  const display = isStrich(g) ? "✗" : isValid(g) ? g : "—";
+                  const display = isStrich(g) ? `(${capValue(hole.par, hs)})` : isValid(g) ? g : "—";
                   return (
                     <td key={p.id} style={{ padding: "5px 6px", textAlign: "center" }}>
                       <button onClick={() => { setCurrentHole(i); setPadOpen({ playerId: p.id, holeIdx: i }); }}
@@ -5719,7 +5796,7 @@ export default function GolfApp() {
                     fontFamily: "JetBrains Mono, monospace",
                     display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "2px",
                   }}>
-                  <span>{isStrich(g) ? "✗" : isValid(g) ? g : "Tippen"}</span>
+                  <span>{isStrich(g) ? `(${capValue(hole.par, hs)})` : isValid(g) ? g : "Tippen"}</span>
                   {!isEmpty && (
                     <span style={{ fontSize: "11px", opacity: 0.8, fontWeight: 500 }}>
                       {label} {sf != null && `· ${sf} SF`}
@@ -6287,7 +6364,7 @@ export default function GolfApp() {
                     {s.tee?.teeName && <TeeDot name={s.tee.teeName} size={9} />}
                   </div>
                   <div style={{ fontSize: "11px", color: T.textSoft, marginTop: "1px" }}>
-                    HCP <span className="mono">{s.p.hcp}</span> · Vorgabe <span className="mono">{s.ph}</span> · Brutto <span className="mono">{s.bT || "—"}{s.strichCount > 0 ? "*" : ""}</span>
+                    HCP <span className="mono">{s.p.hcp}</span> · Vorgabe <span className="mono">{s.ph}</span> · Brutto <span className="mono">{s.bT || "—"}{s.strichCount > 0 ? "*" : ""}</span> · Schläge <span className="mono" style={{ color: T.gold }}>{s.totalStr || "—"}</span>
                   </div>
                 </div>
                 <div style={{ textAlign: "right" }}>
@@ -6351,7 +6428,7 @@ export default function GolfApp() {
                             <td className="mono" style={{ padding: "6px 7px", textAlign: "center", color: T.textSoft }}>{holes[i].par}</td>
                             <td className="mono" style={{ padding: "6px 7px", textAlign: "center", color: T.textDim }}>{holes[i].si}</td>
                             <td className="mono" style={{ padding: "6px 7px", textAlign: "center", color: T.gold, fontWeight: 600 }}>{h.hs > 0 ? `+${h.hs}` : "—"}</td>
-                            <td className="mono" style={{ padding: "6px 7px", textAlign: "center", fontWeight: 700, color: col }}>{isStrich(h.g) ? "✗" : isValid(h.g) ? h.g : "—"}</td>
+                            <td className="mono" style={{ padding: "6px 7px", textAlign: "center", fontWeight: 700, color: col }}>{isStrich(h.g) ? `(${capValue(holes[i].par, h.hs)})` : isValid(h.g) ? h.g : "—"}</td>
                             <td className="mono" style={{ padding: "6px 7px", textAlign: "center", color: T.textSoft }}>{h.netto ?? "—"}</td>
                             <td className="mono" style={{ padding: "6px 7px", textAlign: "center", fontWeight: 700, color: T.gold }}>{h.sfN ?? "—"}</td>
                             <td className="mono" style={{ padding: "6px 7px", textAlign: "center", color: T.textSoft }}>{h.sfB ?? "—"}</td>
@@ -7676,6 +7753,23 @@ WICHTIG:
             </div>
           )}
 
+          {/* 🎯 v34: Total Strokes pro Spieler */}
+          {analysis.totalStrokesPerPlayer && analysis.totalStrokesPerPlayer.length > 0 && (
+            <div style={{ ...S.card, padding: "12px 14px", marginBottom: "14px" }}>
+              <div style={{ ...S.eyebrow, marginBottom: "10px" }}>🎯 Schläge gesamt</div>
+              {analysis.totalStrokesPerPlayer.map((tp, i) => (
+                <div key={tp.playerName} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "6px 0", borderTop: i > 0 ? `1px solid ${T.line}` : "none" }}>
+                  <span className="mono" style={{ fontSize: "11px", color: T.textDim, minWidth: "20px" }}>{i + 1}.</span>
+                  <span style={{ flex: 1, fontSize: "13px", color: T.text, fontWeight: 600 }}>{tp.playerName}</span>
+                  <span className="mono" style={{ fontSize: "16px", fontWeight: 700, color: T.gold }}>{tp.total}</span>
+                </div>
+              ))}
+              <p style={{ fontSize: "10px", color: T.textDim, marginTop: "8px", lineHeight: 1.4, fontStyle: "italic" }}>
+                Striche zählen mit Pick-Up-Wert (Par + Vorgabe + 2).
+              </p>
+            </div>
+          )}
+
           {/* 📖 Player highlights */}
           {analysis.playerHighlights.length > 0 && (
             <div style={{ ...S.card, padding: "12px 14px", marginBottom: "14px" }}>
@@ -8500,7 +8594,7 @@ WICHTIG:
             letterSpacing: "0.05em",
           }}
         >
-          Rückgängig
+          {undoAction.actionLabel || "Rückgängig"}
         </button>
       </div>
     );
