@@ -1193,6 +1193,12 @@ function aggregateClubStats(clubName, allRounds) {
           birdies: 0, pars: 0, bogeys: 0, doubles: 0, strichCount: 0,
           ladiesTotal: 0, // total # ladies across all rounds at this club
           uschi: { total: 0, par3Wins: 0, bestCarry: 0, burntCount: 0 },
+          // v37: Drilldown-Listen pro Stat-Kategorie — { holeIdx, gross, par, date, clubName }
+          birdiesList: [],
+          parsList: [],
+          bogeysList: [],
+          doublesList: [],
+          strichList: [],
           perHole: holes.map((h, i) => ({
             holeIdx: i, par: h.par, si: h.si,
             grossList: [], // strikes treated as par+3
@@ -1240,12 +1246,17 @@ function aggregateClubStats(clubName, allRounds) {
         // Birdie/par/bogey/double tallies (only from real scores, not strikes)
         if (isValid_) {
           const diff = g - h.par;
-          if (diff <= -1) pm.birdies++;
-          else if (diff === 0) pm.pars++;
-          else if (diff === 1) pm.bogeys++;
-          else if (diff >= 2) pm.doubles++;
+          // v37: Drilldown-Eintrag mit Loch + Score + Runden-Kontext
+          const drillEntry = { holeIdx: i, gross: g, par: h.par, date: roundDate, clubName: r.cfg?.clubName || "Runde" };
+          if (diff <= -1) { pm.birdies++; pm.birdiesList.push(drillEntry); }
+          else if (diff === 0) { pm.pars++; pm.parsList.push(drillEntry); }
+          else if (diff === 1) { pm.bogeys++; pm.bogeysList.push(drillEntry); }
+          else if (diff >= 2) { pm.doubles++; pm.doublesList.push(drillEntry); }
         }
-        if (isStrich_) pm.strichCount++;
+        if (isStrich_) {
+          pm.strichCount++;
+          pm.strichList.push({ holeIdx: i, gross: null, par: h.par, capValue: personalPar + 2, date: roundDate, clubName: r.cfg?.clubName || "Runde" });
+        }
 
         // Stableford netto (strike = 0 points)
         const netto = effectiveGross - strokesOnHole;
@@ -1341,6 +1352,12 @@ function aggregateClubStats(clubName, allRounds) {
       strichCount: pm.strichCount,
       uschi: pm.uschi,
       simHcp, // v35
+      // v37: Drilldown-Listen
+      birdiesList: pm.birdiesList,
+      parsList: pm.parsList,
+      bogeysList: pm.bogeysList,
+      doublesList: pm.doublesList,
+      strichList: pm.strichList,
       perHole: pm.perHole.map(ph => ({
         ...ph,
         avgGross: ph.grossList.length ? ph.grossList.reduce((s, v) => s + v, 0) / ph.grossList.length : 0,
@@ -2326,6 +2343,15 @@ export default function GolfApp() {
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState("");
   const [importErrors, setImportErrors] = useState([]);
+  // v37: Import-Modus — "choose" | "ai" | "wizard"
+  const [importMode, setImportMode] = useState("choose");
+  // v37: Wizard-State
+  const [wizardStep, setWizardStep] = useState(1);
+  const [wizardData, setWizardData] = useState({
+    name: "", region: "", numHoles: 18,
+    tees: [{ teeName: "Weiß", color: "Weiß", slope: "", cr: "", par: 72 }],
+    holes: [],
+  });
   const [padOpen, setPadOpen] = useState(null); // { playerId, holeIdx } | null
   const [teePickerFor, setTeePickerFor] = useState(null); // playerId to change tee for
   const [phEditingFor, setPhEditingFor] = useState(null); // playerId whose PH is being edited manually
@@ -2348,6 +2374,8 @@ export default function GolfApp() {
   // Backup-restore modal: list of available backups with preview + restore action
   const [showBackupRestore, setShowBackupRestore] = useState(false);
   const [backupList, setBackupList] = useState([]); // [{ key, label, count, friends, clubs, type }]
+  // v37: Stat-Drilldown — { type, items, label, color, playerName }
+  const [statDrilldown, setStatDrilldown] = useState(null);
   // ── v33: Cloud Archive State ──
   const [lastCloudArchive, setLastCloudArchive] = useState(0); // unix ms — last successful archive push
   const [archiveStatus, setArchiveStatus] = useState("idle"); // idle | saving | success | error
@@ -3405,8 +3433,41 @@ export default function GolfApp() {
       setCustomClubs(updated);
       try { await window.storage.set("golf-custom-clubs", JSON.stringify(updated)); } catch {}
       setImportText(""); setImportErrors([]); setShowImport(false);
+      setImportMode("choose"); setWizardStep(1);
+      setWizardData({
+        name: "", region: "", numHoles: 18,
+        tees: [{ teeName: "Weiß", color: "Weiß", slope: "", cr: "", par: 72 }],
+        holes: [],
+      });
     } catch (e) {
       setImportErrors([`JSON-Fehler: ${e.message}`]);
+    }
+  };
+
+  // v37: Direkter Import für Wizard — bypassed JSON-Parsing
+  const importClubFromObject = async (rawObj) => {
+    try {
+      const parsed = normalizeBirdiebookFormat(rawObj);
+      const errors = validateClub(parsed);
+      if (errors.length > 0) { setImportErrors(errors); return false; }
+      const existing = customClubs.findIndex(c => c.name === parsed.name);
+      const updated = existing >= 0
+        ? customClubs.map((c, i) => i === existing ? parsed : c)
+        : [parsed, ...customClubs];
+      setCustomClubs(updated);
+      try { await window.storage.set("golf-custom-clubs", JSON.stringify(updated)); } catch {}
+      setImportText(""); setImportErrors([]); setShowImport(false);
+      setImportMode("choose"); setWizardStep(1);
+      setWizardData({
+        name: "", region: "", numHoles: 18,
+        tees: [{ teeName: "Weiß", color: "Weiß", slope: "", cr: "", par: 72 }],
+        holes: [],
+      });
+      showUndoToast(`✓ Club „${parsed.name}" hinzugefügt`, null);
+      return true;
+    } catch (e) {
+      setImportErrors([`Fehler: ${e.message}`]);
+      return false;
     }
   };
 
@@ -4019,12 +4080,35 @@ export default function GolfApp() {
                     <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>WORST SF</div>
                   </div>
                 </div>
-                <div style={{ display: "flex", gap: "12px", fontSize: "11px", color: T.textSoft, flexWrap: "wrap", justifyContent: "center" }}>
-                  <span>🎯 {focusPlayerData.birdies} Birdies</span>
-                  <span>⛳ {focusPlayerData.pars} Pars</span>
-                  <span>⚠️ {focusPlayerData.bogeys} Bogeys</span>
-                  <span>💀 {focusPlayerData.doubles} Doubles+</span>
-                  {focusPlayerData.strichCount > 0 && <span style={{ color: T.double }}>✗ {focusPlayerData.strichCount} Striche</span>}
+                <div style={{ display: "flex", gap: "8px", fontSize: "11px", color: T.textSoft, flexWrap: "wrap", justifyContent: "center" }}>
+                  {/* v37: Tappable Stats — öffnen Drilldown-Modal */}
+                  {[
+                    { type: "birdies",   icon: "🎯", count: focusPlayerData.birdies,     label: "Birdies",  color: T.gold,   list: focusPlayerData.birdiesList || [] },
+                    { type: "pars",      icon: "⛳", count: focusPlayerData.pars,        label: "Pars",     color: T.sage,   list: focusPlayerData.parsList || [] },
+                    { type: "bogeys",    icon: "⚠️", count: focusPlayerData.bogeys,      label: "Bogeys",   color: T.textSoft, list: focusPlayerData.bogeysList || [] },
+                    { type: "doubles",   icon: "💀", count: focusPlayerData.doubles,     label: "Doubles+", color: T.textSoft, list: focusPlayerData.doublesList || [] },
+                    { type: "strich",    icon: "✗",  count: focusPlayerData.strichCount, label: "Striche",  color: T.double, list: focusPlayerData.strichList || [] },
+                  ].filter(s => s.count > 0).map(s => (
+                    <button
+                      key={s.type}
+                      onClick={() => setStatDrilldown({
+                        type: s.type, items: s.list, label: s.label,
+                        icon: s.icon, color: s.color, playerName: focusPlayerName,
+                      })}
+                      style={{
+                        background: `${s.color}12`,
+                        border: `1px solid ${s.color}40`,
+                        borderRadius: "14px",
+                        padding: "5px 10px",
+                        fontSize: "11px",
+                        color: s.color === T.textSoft ? T.text : s.color,
+                        cursor: "pointer",
+                        fontWeight: 600,
+                      }}
+                      title="Tippen für Details">
+                      {s.icon} {s.count} {s.label} ›
+                    </button>
+                  ))}
                 </div>
                 {/* v35: Sim-HCP-Box im Focus-Detail */}
                 {focusPlayerData.simHcp?.hasEnoughData ? (
@@ -8088,6 +8172,84 @@ WICHTIG:
   // ═══════════════════════════════════════════════════════════════════════════
   // BACKUP RESTORE MODAL — list of all available backups with preview + restore
   // ═══════════════════════════════════════════════════════════════════════════
+  // ── v37: Stat-Drilldown — zeigt alle Vorkommen einer Stat-Kategorie ──
+  const renderStatDrilldown = () => {
+    if (!statDrilldown) return null;
+    const { type, items, label, icon, color, playerName } = statDrilldown;
+    // Sortiere: neueste Runden zuerst, innerhalb einer Runde nach Loch
+    const sorted = [...(items || [])].sort((a, b) => {
+      const da = new Date(a.date || 0).getTime();
+      const db = new Date(b.date || 0).getTime();
+      if (db !== da) return db - da;
+      return a.holeIdx - b.holeIdx;
+    });
+    // Gruppiere nach Datum + Club
+    const groups = {};
+    sorted.forEach(item => {
+      const key = `${item.date}::${item.clubName}`;
+      if (!groups[key]) groups[key] = { date: item.date, clubName: item.clubName, entries: [] };
+      groups[key].entries.push(item);
+    });
+    const groupArr = Object.values(groups);
+    return (
+      <div onClick={() => setStatDrilldown(null)}
+        style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1150, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+        <div onClick={e => e.stopPropagation()} className="slide-up"
+          style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
+          <SwipeHandle onClose={() => setStatDrilldown(null)} />
+          <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>
+            {icon} {playerName}s {label}
+          </h3>
+          <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "16px", lineHeight: 1.5 }}>
+            {sorted.length === 0
+              ? "Noch keine Einträge in dieser Kategorie."
+              : `${sorted.length} ${sorted.length === 1 ? "Eintrag" : "Einträge"} insgesamt · gruppiert nach Runde`}
+          </p>
+
+          {sorted.length === 0 ? (
+            <EmptyState icon={icon} title={`Keine ${label}`} sub={`${playerName} hat in den aufgezeichneten Runden noch keine ${label.toLowerCase()} eingetragen.`} />
+          ) : (
+            groupArr.map((g, gi) => (
+              <div key={gi} style={{ ...S.card, padding: "12px 14px", marginBottom: "10px" }}>
+                <div style={{ fontSize: "12px", fontWeight: 600, color: T.text, marginBottom: "8px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span>{g.clubName}</span>
+                  <span style={{ fontSize: "10px", color: T.textDim, fontWeight: 400 }}>{fmtDate(g.date)}</span>
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                  {g.entries.map((e, ei) => (
+                    <div key={ei} style={{
+                      background: `${color}15`,
+                      border: `1px solid ${color}40`,
+                      borderRadius: "8px",
+                      padding: "5px 9px",
+                      fontSize: "11px",
+                      color: T.text,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "5px",
+                    }}>
+                      <span style={{ color: T.gold, fontWeight: 700 }}>L{e.holeIdx + 1}</span>
+                      <span style={{ color: T.textDim, fontSize: "10px" }}>Par {e.par}</span>
+                      <span style={{ color: color === T.textSoft ? T.text : color, fontWeight: 700, fontFamily: "JetBrains Mono, monospace" }}>
+                        {type === "strich" ? `(${e.capValue})` : e.gross}
+                      </span>
+                      {type === "birdies" && e.gross !== null && e.par - e.gross >= 2 && (
+                        <span style={{ fontSize: "9px", color: T.gold, fontWeight: 700 }}>{e.par - e.gross === 2 ? "Eagle" : "Albatros"}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))
+          )}
+
+          <button onClick={() => setStatDrilldown(null)}
+            style={{ ...S.btnGhost, width: "100%", marginTop: "14px", fontSize: "13px" }}>Schließen</button>
+        </div>
+      </div>
+    );
+  };
+
   // ── v33: Trash modal — soft-deleted rounds recoverable for 30 days ──
   const renderTrash = () => {
     if (!showTrash) return null;
@@ -9704,28 +9866,315 @@ WICHTIG:
   // ═══════════════════════════════════════════════════════════════════════════
   // IMPORT MODAL
   // ═══════════════════════════════════════════════════════════════════════════
+  // ── v37: AI-Prompt für Club-Import (Copy-Paste in ChatGPT/Claude.ai) ──
+  const AI_CLUB_IMPORT_PROMPT = `Du bekommst gleich Fotos oder Beschreibung von einer österreichischen Golf-Birdiebook-Scorekarte. Bitte konvertiere sie in folgendes JSON-Format. Antworte NUR mit dem JSON, keine Erklärungen.
+
+Format:
+{
+  "name": "GC Beispiel",
+  "region": "Niederösterreich",
+  "numHoles": 18,
+  "tees": {
+    "Gelb": { "teeName": "Gelb", "color": "Gelb", "slope": 130, "cr": 71.2, "par": 72 },
+    "Weiss": { "teeName": "Weiss", "color": "Weiß", "slope": 134, "cr": 72.5, "par": 72 },
+    "Rot": { "teeName": "Rot", "color": "Rot", "slope": 128, "cr": 70.8, "par": 72 }
+  },
+  "holes": [
+    { "par": 4, "si": 13 },
+    { "par": 4, "si": 5 },
+    { "par": 5, "si": 17 }
+    // ... insgesamt 18 (oder 9) Löcher mit jeweils par + si
+  ]
+}
+
+Wichtig:
+- "color" muss einer von: "Gelb", "Weiß", "Blau", "Rot", "Schwarz" sein
+- "slope" ist eine Zahl zwischen 100-155
+- "cr" ist Course-Rating, eine Dezimalzahl
+- "par" pro Loch ist 3, 4 oder 5
+- "si" ist Stroke-Index (Loch-Schwierigkeit), Werte 1-18 müssen eindeutig sein
+- Mindestens 1 Tee, gerne alle die im Birdiebook stehen
+- Bitte achte penibel auf die Reihenfolge der Löcher (Loch 1 → 18)`;
+
   const renderImportModal = () => (
-    <div onClick={() => setShowImport(false)}
+    <div onClick={() => { setShowImport(false); setImportMode("choose"); setWizardStep(1); }}
       style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1000, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
       <div onClick={e => e.stopPropagation()} className="slide-up"
-        style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "90vh", overflowY: "auto" }}>
-        <SwipeHandle onClose={() => setShowImport(false)} />
-        <h3 className="serif" style={{ fontSize: "24px", margin: "0 0 6px", color: T.text }}>Club-Daten importieren</h3>
-        <p style={{ fontSize: "13px", color: T.textSoft, marginBottom: "14px" }}>JSON aus dem Agent-Prompt einfügen.</p>
-        <textarea value={importText} onChange={e => setImportText(e.target.value)}
-          placeholder={`{\n  "name": "GC ...",\n  "tees": { ... },\n  "holes": [ ... ]\n}`}
-          style={{ ...S.input, fontFamily: "JetBrains Mono, monospace", fontSize: "12px", minHeight: "220px", resize: "vertical", marginBottom: "10px" }}/>
-        {importErrors.length > 0 && (
-          <div style={{ background: `${T.double}15`, border: `1px solid ${T.double}50`, borderRadius: "10px", padding: "10px 14px", marginBottom: "10px", fontSize: "12px", color: T.double }}>
-            <div style={{ fontWeight: 700, marginBottom: "4px" }}>Fehler:</div>
-            {importErrors.map((e,i) => <div key={i}>• {e}</div>)}
-          </div>
+        style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
+        <SwipeHandle onClose={() => { setShowImport(false); setImportMode("choose"); setWizardStep(1); }} />
+        <h3 className="serif" style={{ fontSize: "24px", margin: "0 0 6px", color: T.text }}>Club hinzufügen</h3>
+
+        {/* ── MODE: Choose ── */}
+        {importMode === "choose" && (
+          <>
+            <p style={{ fontSize: "13px", color: T.textSoft, marginBottom: "18px" }}>
+              Wähle eine Methode — schnell mit KI-Hilfe oder Schritt-für-Schritt selbst eingeben.
+            </p>
+            <button
+              onClick={() => setImportMode("ai")}
+              className="card-hover"
+              style={{ ...S.card, width: "100%", padding: "16px", marginBottom: "10px", textAlign: "left", cursor: "pointer", border: `1px solid ${T.gold}40` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                <div style={{ fontSize: "32px" }}>🤖</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: "15px", fontWeight: 700, color: T.gold, marginBottom: "2px" }}>KI-Assistent</div>
+                  <div style={{ fontSize: "11px", color: T.textSoft, lineHeight: 1.5 }}>
+                    Prompt kopieren · in ChatGPT oder Claude.ai mit Birdiebook-Foto einfügen · JSON zurück hier reinpasten. Empfohlen.
+                  </div>
+                </div>
+                <div style={{ color: T.gold, fontSize: "20px" }}>›</div>
+              </div>
+            </button>
+            <button
+              onClick={() => setImportMode("wizard")}
+              className="card-hover"
+              style={{ ...S.card, width: "100%", padding: "16px", marginBottom: "10px", textAlign: "left", cursor: "pointer" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                <div style={{ fontSize: "32px" }}>📝</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: "15px", fontWeight: 700, color: T.text, marginBottom: "2px" }}>Selbst eintippen</div>
+                  <div style={{ fontSize: "11px", color: T.textSoft, lineHeight: 1.5 }}>
+                    Step-by-Step Wizard: Name, Tees, Loch-Daten. Funktioniert auch offline.
+                  </div>
+                </div>
+                <div style={{ color: T.textSoft, fontSize: "20px" }}>›</div>
+              </div>
+            </button>
+            <button
+              onClick={() => setImportMode("paste")}
+              style={{ ...S.btnGhost, width: "100%", padding: "12px", marginTop: "6px", fontSize: "12px" }}>
+              Erfahren? JSON direkt einfügen
+            </button>
+          </>
         )}
-        <div style={{ display: "flex", gap: "8px" }}>
-          <button onClick={() => { setShowImport(false); setImportText(""); setImportErrors([]); }}
-            style={{ ...S.btnSecondary, flex: 1 }}>Abbrechen</button>
-          <button onClick={importClub} className="gold-hover" style={{ ...S.btnPrimary, flex: 2 }}>Importieren</button>
-        </div>
+
+        {/* ── MODE: AI Prompt ── */}
+        {importMode === "ai" && (
+          <>
+            <button onClick={() => setImportMode("choose")} style={{ ...S.btnGhost, fontSize: "11px", padding: "4px 8px", marginBottom: "12px" }}>← zurück</button>
+            <div style={{ ...S.eyebrow, marginBottom: "8px", color: T.gold }}>Schritt 1: Prompt kopieren</div>
+            <div style={{ background: T.surface2, border: `1px solid ${T.line}`, borderRadius: "10px", padding: "12px", marginBottom: "12px", maxHeight: "180px", overflowY: "auto", fontFamily: "JetBrains Mono, monospace", fontSize: "11px", color: T.textSoft, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
+              {AI_CLUB_IMPORT_PROMPT}
+            </div>
+            <button
+              onClick={() => {
+                navigator.clipboard?.writeText(AI_CLUB_IMPORT_PROMPT);
+                showUndoToast("✓ Prompt in Zwischenablage", null);
+              }}
+              style={{ ...S.btnPrimary, width: "100%", padding: "12px", marginBottom: "16px" }}>
+              📋 Prompt kopieren
+            </button>
+
+            <div style={{ ...S.eyebrow, marginBottom: "8px" }}>Schritt 2: KI fragen</div>
+            <p style={{ fontSize: "11px", color: T.textSoft, lineHeight: 1.6, marginBottom: "12px" }}>
+              Geh auf <span style={{ color: T.gold, fontWeight: 600 }}>chatgpt.com</span> oder <span style={{ color: T.gold, fontWeight: 600 }}>claude.ai</span>, füge den Prompt ein und lade Fotos vom Birdiebook hoch (Scorekarte mit Tees + Slope/CR + alle 18 Loch).
+            </p>
+
+            <div style={{ ...S.eyebrow, marginBottom: "8px" }}>Schritt 3: JSON zurück hier rein</div>
+            <textarea value={importText} onChange={e => setImportText(e.target.value)}
+              placeholder={`{\n  "name": "GC ...",\n  "tees": { ... },\n  "holes": [ ... ]\n}`}
+              style={{ ...S.input, fontFamily: "JetBrains Mono, monospace", fontSize: "12px", minHeight: "180px", resize: "vertical", marginBottom: "10px" }}/>
+            {importErrors.length > 0 && (
+              <div style={{ background: `${T.double}15`, border: `1px solid ${T.double}50`, borderRadius: "10px", padding: "10px 14px", marginBottom: "10px", fontSize: "12px", color: T.double }}>
+                <div style={{ fontWeight: 700, marginBottom: "4px" }}>Fehler:</div>
+                {importErrors.map((e,i) => <div key={i}>• {e}</div>)}
+              </div>
+            )}
+            <button onClick={importClub} className="gold-hover" style={{ ...S.btnPrimary, width: "100%" }}>Importieren</button>
+          </>
+        )}
+
+        {/* ── MODE: Wizard ── */}
+        {importMode === "wizard" && (
+          <>
+            <button onClick={() => { setImportMode("choose"); setWizardStep(1); }} style={{ ...S.btnGhost, fontSize: "11px", padding: "4px 8px", marginBottom: "12px" }}>← zurück</button>
+            <div style={{ display: "flex", gap: "4px", marginBottom: "16px" }}>
+              {[1, 2, 3].map(s => (
+                <div key={s} style={{
+                  flex: 1, height: "4px", borderRadius: "2px",
+                  background: s <= wizardStep ? T.gold : T.line,
+                }} />
+              ))}
+            </div>
+
+            {wizardStep === 1 && (
+              <>
+                <div style={{ ...S.eyebrow, marginBottom: "10px", color: T.gold }}>Schritt 1/3: Club-Basis</div>
+                <label style={{ fontSize: "11px", color: T.textDim, display: "block", marginBottom: "4px" }}>Club-Name</label>
+                <input value={wizardData.name} onChange={e => setWizardData(d => ({ ...d, name: e.target.value }))}
+                  placeholder="z.B. GC Adamstal" style={{ ...S.input, marginBottom: "10px" }} />
+                <label style={{ fontSize: "11px", color: T.textDim, display: "block", marginBottom: "4px" }}>Region (optional)</label>
+                <input value={wizardData.region} onChange={e => setWizardData(d => ({ ...d, region: e.target.value }))}
+                  placeholder="z.B. Niederösterreich" style={{ ...S.input, marginBottom: "10px" }} />
+                <label style={{ fontSize: "11px", color: T.textDim, display: "block", marginBottom: "4px" }}>Anzahl Löcher</label>
+                <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
+                  {[9, 18].map(n => (
+                    <button key={n} onClick={() => setWizardData(d => ({ ...d, numHoles: n }))}
+                      style={{
+                        flex: 1, padding: "12px",
+                        background: wizardData.numHoles === n ? `${T.gold}20` : T.surface2,
+                        color: wizardData.numHoles === n ? T.gold : T.textSoft,
+                        border: `1px solid ${wizardData.numHoles === n ? T.gold : T.line}`,
+                        borderRadius: "8px", fontWeight: 600, fontSize: "14px",
+                      }}>
+                      {n} Loch
+                    </button>
+                  ))}
+                </div>
+                <button onClick={() => setWizardStep(2)}
+                  disabled={!wizardData.name.trim()}
+                  style={{ ...S.btnPrimary, width: "100%", opacity: wizardData.name.trim() ? 1 : 0.4 }}>
+                  Weiter →
+                </button>
+              </>
+            )}
+
+            {wizardStep === 2 && (
+              <>
+                <div style={{ ...S.eyebrow, marginBottom: "10px", color: T.gold }}>Schritt 2/3: Tees</div>
+                <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, marginBottom: "12px" }}>
+                  Mindestens 1 Tee. Werte stehen im Birdiebook auf der Scorekarte (Slope, CR, Par).
+                </p>
+                {wizardData.tees.map((t, ti) => (
+                  <div key={ti} style={{ ...S.card, padding: "12px", marginBottom: "10px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                      <select value={t.color}
+                        onChange={e => setWizardData(d => ({
+                          ...d, tees: d.tees.map((x, i) => i === ti ? { ...x, color: e.target.value, teeName: e.target.value } : x)
+                        }))}
+                        style={{ ...S.input, padding: "6px 10px", fontSize: "12px", width: "auto" }}>
+                        {["Gelb", "Weiß", "Blau", "Rot", "Schwarz"].map(c => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                      {wizardData.tees.length > 1 && (
+                        <button onClick={() => setWizardData(d => ({ ...d, tees: d.tees.filter((_, i) => i !== ti) }))}
+                          style={{ background: "transparent", border: "none", color: T.double, fontSize: "16px", padding: "4px 8px" }}>×</button>
+                      )}
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px" }}>
+                      <div>
+                        <label style={{ fontSize: "9px", color: T.textDim, display: "block", marginBottom: "2px", fontWeight: 600 }}>SLOPE</label>
+                        <input type="number" value={t.slope} placeholder="130"
+                          onChange={e => setWizardData(d => ({ ...d, tees: d.tees.map((x, i) => i === ti ? { ...x, slope: e.target.value } : x) }))}
+                          style={{ ...S.input, padding: "6px 8px", fontSize: "13px", textAlign: "center" }} />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: "9px", color: T.textDim, display: "block", marginBottom: "2px", fontWeight: 600 }}>CR</label>
+                        <input type="number" step="0.1" value={t.cr} placeholder="71.5"
+                          onChange={e => setWizardData(d => ({ ...d, tees: d.tees.map((x, i) => i === ti ? { ...x, cr: e.target.value } : x) }))}
+                          style={{ ...S.input, padding: "6px 8px", fontSize: "13px", textAlign: "center" }} />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: "9px", color: T.textDim, display: "block", marginBottom: "2px", fontWeight: 600 }}>PAR</label>
+                        <input type="number" value={t.par} placeholder="72"
+                          onChange={e => setWizardData(d => ({ ...d, tees: d.tees.map((x, i) => i === ti ? { ...x, par: e.target.value } : x) }))}
+                          style={{ ...S.input, padding: "6px 8px", fontSize: "13px", textAlign: "center" }} />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                <button onClick={() => setWizardData(d => ({ ...d, tees: [...d.tees, { teeName: "Weiß", color: "Weiß", slope: "", cr: "", par: 72 }] }))}
+                  style={{ ...S.btnSecondary, width: "100%", padding: "10px", fontSize: "12px", marginBottom: "10px" }}>
+                  + Tee hinzufügen
+                </button>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <button onClick={() => setWizardStep(1)} style={{ ...S.btnSecondary, flex: 1 }}>← Zurück</button>
+                  <button onClick={() => {
+                    // Initialize holes if empty
+                    if (wizardData.holes.length === 0) {
+                      setWizardData(d => ({ ...d, holes: Array.from({ length: d.numHoles }, () => ({ par: 4, si: "" })) }));
+                    }
+                    setWizardStep(3);
+                  }}
+                    disabled={!wizardData.tees.every(t => t.slope && t.cr && t.par)}
+                    style={{ ...S.btnPrimary, flex: 2, opacity: wizardData.tees.every(t => t.slope && t.cr && t.par) ? 1 : 0.4 }}>
+                    Weiter →
+                  </button>
+                </div>
+              </>
+            )}
+
+            {wizardStep === 3 && (
+              <>
+                <div style={{ ...S.eyebrow, marginBottom: "10px", color: T.gold }}>Schritt 3/3: Loch-Daten</div>
+                <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, marginBottom: "12px" }}>
+                  Pro Loch: Par (3/4/5) + SI (1-{wizardData.numHoles}). SI muss eindeutig sein.
+                </p>
+                <div style={{ maxHeight: "55vh", overflowY: "auto", marginBottom: "12px" }}>
+                  {wizardData.holes.map((h, hi) => (
+                    <div key={hi} style={{ display: "grid", gridTemplateColumns: "30px 1fr 1fr", gap: "8px", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${T.line}` }}>
+                      <div className="mono" style={{ fontSize: "13px", color: T.gold, fontWeight: 700 }}>{hi + 1}</div>
+                      <div style={{ display: "flex", gap: "4px" }}>
+                        {[3, 4, 5].map(p => (
+                          <button key={p} onClick={() => setWizardData(d => ({ ...d, holes: d.holes.map((x, i) => i === hi ? { ...x, par: p } : x) }))}
+                            style={{
+                              flex: 1, padding: "6px 0",
+                              background: h.par === p ? `${T.gold}20` : T.surface2,
+                              color: h.par === p ? T.gold : T.textSoft,
+                              border: `1px solid ${h.par === p ? T.gold : T.line}`,
+                              borderRadius: "5px", fontSize: "12px", fontWeight: 600,
+                            }}>
+                            {p}
+                          </button>
+                        ))}
+                      </div>
+                      <input type="number" value={h.si} placeholder="SI"
+                        min="1" max={wizardData.numHoles}
+                        onChange={e => setWizardData(d => ({ ...d, holes: d.holes.map((x, i) => i === hi ? { ...x, si: e.target.value } : x) }))}
+                        style={{ ...S.input, padding: "6px 8px", fontSize: "12px", textAlign: "center" }} />
+                    </div>
+                  ))}
+                </div>
+                {importErrors.length > 0 && (
+                  <div style={{ background: `${T.double}15`, border: `1px solid ${T.double}50`, borderRadius: "10px", padding: "10px 14px", marginBottom: "10px", fontSize: "12px", color: T.double }}>
+                    <div style={{ fontWeight: 700, marginBottom: "4px" }}>Fehler:</div>
+                    {importErrors.map((e,i) => <div key={i}>• {e}</div>)}
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <button onClick={() => setWizardStep(2)} style={{ ...S.btnSecondary, flex: 1 }}>← Zurück</button>
+                  <button onClick={() => {
+                    // Build club object from wizard data
+                    const teesObj = {};
+                    wizardData.tees.forEach(t => {
+                      teesObj[t.color] = {
+                        teeName: t.color, color: t.color,
+                        slope: parseInt(t.slope) || 0,
+                        cr: parseFloat(t.cr) || 0,
+                        par: parseInt(t.par) || 72,
+                      };
+                    });
+                    const club = {
+                      name: wizardData.name.trim(),
+                      region: wizardData.region.trim() || undefined,
+                      numHoles: wizardData.numHoles,
+                      tees: teesObj,
+                      holes: wizardData.holes.map(h => ({ par: parseInt(h.par) || 4, si: parseInt(h.si) || 0 })),
+                    };
+                    importClubFromObject(club);
+                  }} className="gold-hover" style={{ ...S.btnPrimary, flex: 2 }}>Speichern</button>
+                </div>
+              </>
+            )}
+          </>
+        )}
+
+        {/* ── MODE: Direct Paste (Power-User) ── */}
+        {importMode === "paste" && (
+          <>
+            <button onClick={() => setImportMode("choose")} style={{ ...S.btnGhost, fontSize: "11px", padding: "4px 8px", marginBottom: "12px" }}>← zurück</button>
+            <p style={{ fontSize: "13px", color: T.textSoft, marginBottom: "14px" }}>JSON direkt einfügen.</p>
+            <textarea value={importText} onChange={e => setImportText(e.target.value)}
+              placeholder={`{\n  "name": "GC ...",\n  "tees": { ... },\n  "holes": [ ... ]\n}`}
+              style={{ ...S.input, fontFamily: "JetBrains Mono, monospace", fontSize: "12px", minHeight: "220px", resize: "vertical", marginBottom: "10px" }}/>
+            {importErrors.length > 0 && (
+              <div style={{ background: `${T.double}15`, border: `1px solid ${T.double}50`, borderRadius: "10px", padding: "10px 14px", marginBottom: "10px", fontSize: "12px", color: T.double }}>
+                <div style={{ fontWeight: 700, marginBottom: "4px" }}>Fehler:</div>
+                {importErrors.map((e,i) => <div key={i}>• {e}</div>)}
+              </div>
+            )}
+            <button onClick={importClub} className="gold-hover" style={{ ...S.btnPrimary, width: "100%" }}>Importieren</button>
+          </>
+        )}
       </div>
     </div>
   );
@@ -9770,6 +10219,7 @@ WICHTIG:
       {renderLiveViewerModal()}
       {renderBackupRestore()}
       {renderTrash()}
+      {renderStatDrilldown()}
       {renderOwnerSetup()}
       {renderUndoToast()}
     </div>
