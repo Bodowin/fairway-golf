@@ -943,7 +943,7 @@ const BUILT_IN_CLUBS = [
 const STRICH = null;
 
 // ─── v40: Versions-Marker — sichtbar im App-Footer ──────────────────────────
-const APP_VERSION = "v41";
+const APP_VERSION = "v42-cyprus";
 const APP_BUILD_DATE = "2026-04-27";
 
 function makeHoles(totalPar, numHoles) {
@@ -2546,6 +2546,12 @@ function GolfAppInner() {
   const [showPlayerManager, setShowPlayerManager] = useState(false);
   const [playerManagerFocus, setPlayerManagerFocus] = useState(null); // playerId
   const [mergeTarget, setMergeTarget] = useState(null); // { fromId, toId }
+  // v42: Trip-Modus
+  const [trips, setTrips] = useState([]); // [{ id, name, startDate, endDate, location, syncCode, days, rules, players, hcpAdjustments, ...}]
+  const [activeTripId, setActiveTripId] = useState(null);
+  const [showTripSetup, setShowTripSetup] = useState(false);
+  const [tripFormData, setTripFormData] = useState(null); // { name, startDate, endDate, location, dayCount, ... }
+  const [showTripDetail, setShowTripDetail] = useState(false);
   const [aliasInput, setAliasInput] = useState("");
   // UI state
   const [clubQ, setClubQ] = useState("");
@@ -2740,6 +2746,11 @@ function GolfAppInner() {
         }
       } catch {}
       try { const c = await window.storage.get("golf-custom-clubs"); if (c) setCustomClubs(JSON.parse(c.value)); } catch {}
+      // v42: Trips laden
+      try {
+        const t = await window.storage.get("golf-trips");
+        if (t) setTrips(JSON.parse(t.value));
+      } catch {}
       try {
         const o = await window.storage.get("golf-owner-profile");
         if (o) setOwnerProfile(JSON.parse(o.value));
@@ -3229,6 +3240,163 @@ function GolfAppInner() {
     try { await window.storage.set("golf-rounds", JSON.stringify(updatedRounds)); } catch {}
     showUndoToast(`✓ "${fromFriend.name}" mit "${toFriend.name}" zusammengeführt`, null);
     return true;
+  };
+
+  // ─── v42: Trip-Modus Funktionen ──────────────────────────────────────────
+  // Trip-Datenmodell:
+  // {
+  //   id, name, location, startDate, endDate, syncCode,
+  //   players: [{ playerId, name, hcp, baseHcp, hcpAdjustments: { day2: -2, day3: +1 } }],
+  //   days: [{ dayNumber, date, roundIds: [] }],
+  //   pots: { dayWin: 10, threeDayPot: 50, weekTeamPot: 50, nearestPin: 10 },
+  //   createdAt, updatedAt
+  // }
+
+  const persistTrips = async (newTrips) => {
+    setTrips(newTrips);
+    try { await window.storage.set("golf-trips", JSON.stringify(newTrips)); } catch {}
+  };
+
+  const createTrip = async (data) => {
+    const newTrip = {
+      id: uid(),
+      name: data.name?.trim() || "Trip",
+      location: data.location?.trim() || "",
+      startDate: data.startDate || toDay(),
+      endDate: data.endDate || toDay(),
+      syncCode: data.syncCode?.trim() || syncCode || "",
+      players: (data.players || []).map(p => ({
+        playerId: p.playerId,
+        name: p.name,
+        hcp: p.hcp,
+        baseHcp: p.hcp, // Original-HCP zum Trip-Start (für HCP-Adjustments)
+        hcpAdjustments: {}, // { dayNumber: adjustment }
+      })),
+      days: (data.days || []).map((d, i) => ({
+        dayNumber: i + 1,
+        date: d.date || data.startDate,
+        roundIds: [],
+      })),
+      pots: {
+        dayWin: data.pots?.dayWin || 10,
+        threeDayPot: data.pots?.threeDayPot || 50,
+        weekTeamPot: data.pots?.weekTeamPot || 50,
+        nearestPin: data.pots?.nearestPin || 10,
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    const updated = [newTrip, ...trips];
+    await persistTrips(updated);
+    return newTrip;
+  };
+
+  const updateTrip = async (tripId, patch) => {
+    const updated = trips.map(t => t.id === tripId
+      ? { ...t, ...patch, updatedAt: new Date().toISOString() }
+      : t
+    );
+    await persistTrips(updated);
+  };
+
+  const deleteTrip = async (tripId) => {
+    const trip = trips.find(t => t.id === tripId);
+    const updated = trips.filter(t => t.id !== tripId);
+    await persistTrips(updated);
+    if (activeTripId === tripId) setActiveTripId(null);
+    if (trip) {
+      showUndoToast(`Trip "${trip.name}" gelöscht`, async () => {
+        await persistTrips([trip, ...updated]);
+      });
+    }
+  };
+
+  // Verbinde eine Runde mit einem Trip-Tag
+  const linkRoundToTripDay = async (tripId, dayNumber, roundId) => {
+    const trip = trips.find(t => t.id === tripId);
+    if (!trip) return;
+    const days = trip.days.map(d => {
+      if (d.dayNumber !== dayNumber) return d;
+      if (d.roundIds.includes(roundId)) return d;
+      return { ...d, roundIds: [...d.roundIds, roundId] };
+    });
+    await updateTrip(tripId, { days });
+  };
+
+  const unlinkRoundFromTrip = async (tripId, roundId) => {
+    const trip = trips.find(t => t.id === tripId);
+    if (!trip) return;
+    const days = trip.days.map(d => ({
+      ...d,
+      roundIds: d.roundIds.filter(id => id !== roundId),
+    }));
+    await updateTrip(tripId, { days });
+  };
+
+  // Berechne Trip-Wertung: Tagessieger pro Tag, Gesamt-Sieger
+  const computeTripStandings = (trip) => {
+    if (!trip || !rounds.length) return null;
+
+    const dayResults = trip.days.map(day => {
+      const dayRounds = rounds.filter(r => day.roundIds.includes(r.id));
+      const playerScores = {};
+
+      dayRounds.forEach(r => {
+        const par = sumPar(r.holes);
+        (r.players || []).forEach(p => {
+          const tee = playerTee(p, r.cfg, r.selectedClubSnapshot);
+          if (!tee || !r.holes?.length) return;
+          // Trip-HCP-Adjustment greift hier
+          const tripPlayer = trip.players.find(tp => tp.playerId === p.playerId);
+          const adjustment = tripPlayer?.hcpAdjustments?.[day.dayNumber] || 0;
+          const adjustedHcp = (parseFloat(p.hcp) || 0) + adjustment;
+          const adjustedPlayer = { ...p, hcp: adjustedHcp };
+          const { ph } = resolvePlayerPH(adjustedPlayer, r.cfg, r.selectedClubSnapshot, par);
+          let sf = 0, played = 0;
+          r.holes.forEach((h, i) => {
+            const g = r.scores?.[p.id]?.[i];
+            if (!isValid(g) && !isStrich(g)) return;
+            played++;
+            const hs = holeHS(ph, h.si, r.holes.length);
+            sf += sfNetto(g, hs, h.par) || 0;
+          });
+          if (played < r.holes.length * 0.5) return;
+          const key = p.playerId || `name:${normName(p.name)}`;
+          playerScores[key] = {
+            playerId: p.playerId,
+            name: p.name,
+            sf, hcp: p.hcp, adjustment, adjustedHcp,
+            roundId: r.id, clubName: r.cfg?.clubName,
+          };
+        });
+      });
+
+      const ranked = Object.values(playerScores).sort((a, b) => b.sf - a.sf);
+      const winner = ranked[0] || null;
+      return {
+        dayNumber: day.dayNumber,
+        date: day.date,
+        ranked,
+        winner,
+        complete: dayRounds.length > 0 && ranked.length > 0,
+      };
+    });
+
+    // 3-Tageswertung: Summe der besten 3 Tage
+    const totalScores = {};
+    dayResults.forEach(dr => {
+      dr.ranked.forEach(r => {
+        const key = r.playerId || `name:${normName(r.name)}`;
+        if (!totalScores[key]) {
+          totalScores[key] = { playerId: r.playerId, name: r.name, totalSf: 0, daysPlayed: 0 };
+        }
+        totalScores[key].totalSf += r.sf;
+        totalScores[key].daysPlayed++;
+      });
+    });
+    const totalRanked = Object.values(totalScores).sort((a, b) => b.totalSf - a.totalSf);
+
+    return { dayResults, totalRanked };
   };
 
   // ── Scores
@@ -4971,7 +5139,7 @@ function GolfAppInner() {
 
         {/* Tabs */}
         <div style={{ padding: "0 16px 16px", display: "flex", gap: "4px" }}>
-          {[{k:"rounds",l:"Runden"},{k:"friends",l:"Freunde"},{k:"stats",l:"📊 Stats"},{k:"history",l:"📈 Form"}].map(({k,l}) => (
+          {[{k:"rounds",l:"Runden"},{k:"friends",l:"Freunde"},{k:"stats",l:"📊 Stats"},{k:"history",l:"📈 Form"},{k:"trips",l:"🏖️ Trips"}].map(({k,l}) => (
             <button key={k} onClick={() => setTab(k)} style={{
               flex: 1, padding: "10px 0",
               background: tab === k ? T.surface2 : "transparent",
@@ -5340,6 +5508,76 @@ function GolfAppInner() {
               </>
             );
           })()}
+
+          {/* v42: Trips-Tab */}
+          {tab === "trips" && (
+            <>
+              <div style={{ marginBottom: "14px" }}>
+                <button
+                  onClick={() => {
+                    setTripFormData({
+                      name: "",
+                      location: "",
+                      startDate: toDay(),
+                      endDate: toDay(),
+                      dayCount: 3,
+                      syncCode: syncCode || "",
+                      selectedFriendIds: [],
+                      pots: { dayWin: 10, threeDayPot: 50, weekTeamPot: 50, nearestPin: 10 },
+                    });
+                    setShowTripSetup(true);
+                  }}
+                  className="gold-hover"
+                  style={{ ...S.btnPrimary, width: "100%" }}>
+                  ➕ Neuen Trip anlegen
+                </button>
+              </div>
+
+              {trips.length === 0 ? (
+                <EmptyState icon="🏖️" title="Noch keine Trips" sub="Plane deinen nächsten Golftrip mit mehreren Spieltagen, Tageswertungen und Pots." />
+              ) : (
+                trips.map(trip => {
+                  const standings = computeTripStandings(trip);
+                  const totalDays = trip.days?.length || 0;
+                  const playedDays = (trip.days || []).filter(d => d.roundIds?.length > 0).length;
+                  return (
+                    <button key={trip.id}
+                      onClick={() => { setActiveTripId(trip.id); setShowTripDetail(true); }}
+                      className="card-hover"
+                      style={{ ...S.card, width: "100%", padding: "14px", marginBottom: "10px", textAlign: "left", cursor: "pointer", border: `1px solid ${T.gold}30` }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "10px", marginBottom: "8px" }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: "16px", fontWeight: 700, color: T.text, marginBottom: "2px" }}>
+                            🏖️ {trip.name}
+                          </div>
+                          {trip.location && (
+                            <div style={{ fontSize: "11px", color: T.textSoft, marginBottom: "4px" }}>📍 {trip.location}</div>
+                          )}
+                          <div style={{ fontSize: "11px", color: T.textDim }}>
+                            {fmtDate(trip.startDate)} – {fmtDate(trip.endDate)} · {totalDays} Tage · {trip.players?.length || 0} Spieler
+                          </div>
+                        </div>
+                        <span style={{
+                          fontSize: "10px", padding: "3px 8px", borderRadius: "10px",
+                          background: playedDays === totalDays && totalDays > 0 ? `${T.sage}20` : `${T.gold}20`,
+                          color: playedDays === totalDays && totalDays > 0 ? T.sage : T.gold,
+                          fontWeight: 600, whiteSpace: "nowrap",
+                        }}>
+                          {playedDays}/{totalDays}
+                        </span>
+                      </div>
+                      {standings?.totalRanked?.length > 0 && (
+                        <div style={{ marginTop: "10px", paddingTop: "10px", borderTop: `1px solid ${T.line}`, fontSize: "11px", color: T.textSoft }}>
+                          🏆 Führung: <span style={{ color: T.gold, fontWeight: 700 }}>{standings.totalRanked[0].name}</span>
+                          {" "}— <span className="mono">{standings.totalRanked[0].totalSf} SF</span>
+                        </div>
+                      )}
+                    </button>
+                  );
+                })
+              )}
+            </>
+          )}
         </div>
 
         {/* Feedback footer */}
@@ -9394,6 +9632,314 @@ WICHTIG:
     );
   };
 
+  // ── v42: Trip-Setup-Modal ──
+  const renderTripSetup = () => {
+    if (!showTripSetup || !tripFormData) return null;
+    const close = () => { setShowTripSetup(false); setTripFormData(null); };
+    const f = tripFormData;
+    const setF = (patch) => setTripFormData(prev => ({ ...prev, ...patch }));
+    const isValid = f.name.trim() && f.startDate && f.endDate && f.dayCount > 0 && f.selectedFriendIds.length >= 2;
+
+    return (
+      <div onClick={close}
+        style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+        <div onClick={e => e.stopPropagation()} className="slide-up"
+          style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
+          <SwipeHandle onClose={close} />
+          <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>🏖️ Neuer Trip</h3>
+          <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "16px", lineHeight: 1.5 }}>
+            Mehrtägige Golfreise mit Tageswertungen und Pots.
+          </p>
+
+          {/* Basis */}
+          <div style={{ ...S.card, padding: "12px 14px", marginBottom: "12px" }}>
+            <div style={{ ...S.eyebrow, marginBottom: "10px" }}>📍 Basis</div>
+            <label style={{ fontSize: "11px", color: T.textDim, display: "block", marginBottom: "4px" }}>Trip-Name</label>
+            <input value={f.name} onChange={e => setF({ name: e.target.value })}
+              placeholder="z.B. Cyprus 2026" style={{ ...S.input, marginBottom: "10px" }}/>
+            <label style={{ fontSize: "11px", color: T.textDim, display: "block", marginBottom: "4px" }}>Location (optional)</label>
+            <input value={f.location} onChange={e => setF({ location: e.target.value })}
+              placeholder="z.B. Aphrodite Hills" style={{ ...S.input, marginBottom: "10px" }}/>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "10px" }}>
+              <div>
+                <label style={{ fontSize: "11px", color: T.textDim, display: "block", marginBottom: "4px" }}>Start</label>
+                <input type="date" value={f.startDate} onChange={e => setF({ startDate: e.target.value })} style={{ ...S.input }}/>
+              </div>
+              <div>
+                <label style={{ fontSize: "11px", color: T.textDim, display: "block", marginBottom: "4px" }}>Ende</label>
+                <input type="date" value={f.endDate} onChange={e => setF({ endDate: e.target.value })} style={{ ...S.input }}/>
+              </div>
+            </div>
+            <label style={{ fontSize: "11px", color: T.textDim, display: "block", marginBottom: "4px" }}>Spieltage</label>
+            <div style={{ display: "flex", gap: "6px" }}>
+              {[1, 2, 3, 4, 5].map(n => (
+                <button key={n} onClick={() => setF({ dayCount: n })}
+                  style={{
+                    flex: 1, padding: "10px",
+                    background: f.dayCount === n ? `${T.gold}20` : T.surface2,
+                    color: f.dayCount === n ? T.gold : T.textSoft,
+                    border: `1px solid ${f.dayCount === n ? T.gold : T.line}`,
+                    borderRadius: "8px", fontWeight: 600, fontSize: "14px",
+                  }}>
+                  {n}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Spieler */}
+          <div style={{ ...S.card, padding: "12px 14px", marginBottom: "12px" }}>
+            <div style={{ ...S.eyebrow, marginBottom: "10px" }}>👥 Spieler ({f.selectedFriendIds.length} ausgewählt)</div>
+            {friends.length === 0 ? (
+              <p style={{ fontSize: "12px", color: T.textDim, fontStyle: "italic" }}>Keine Friends. Lege erst Spieler über den Friends-Tab an.</p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                {friends.map(fr => {
+                  const checked = f.selectedFriendIds.includes(fr.playerId);
+                  return (
+                    <button key={fr.playerId}
+                      onClick={() => {
+                        setF({
+                          selectedFriendIds: checked
+                            ? f.selectedFriendIds.filter(id => id !== fr.playerId)
+                            : [...f.selectedFriendIds, fr.playerId]
+                        });
+                      }}
+                      style={{
+                        display: "flex", alignItems: "center", gap: "10px",
+                        padding: "8px 10px",
+                        background: checked ? `${T.gold}10` : T.surface2,
+                        border: `1px solid ${checked ? T.gold : T.line}`,
+                        borderRadius: "8px",
+                        textAlign: "left",
+                      }}>
+                      <div style={{
+                        width: "20px", height: "20px", borderRadius: "4px",
+                        border: `2px solid ${checked ? T.gold : T.textDim}`,
+                        background: checked ? T.gold : "transparent",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        color: T.canvas, fontSize: "12px", fontWeight: 700,
+                      }}>
+                        {checked && "✓"}
+                      </div>
+                      <span style={{ flex: 1, fontSize: "13px", color: T.text, fontWeight: 600 }}>{fr.name}</span>
+                      <span className="mono" style={{ fontSize: "11px", color: T.textSoft }}>HCP {fr.hcp}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Pots */}
+          <div style={{ ...S.card, padding: "12px 14px", marginBottom: "16px" }}>
+            <div style={{ ...S.eyebrow, marginBottom: "10px" }}>💰 Pots (€ pro Kopf)</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+              <div>
+                <label style={{ fontSize: "10px", color: T.textDim, display: "block", marginBottom: "2px" }}>Tagessieg</label>
+                <input type="number" value={f.pots.dayWin} onChange={e => setF({ pots: { ...f.pots, dayWin: parseInt(e.target.value) || 0 } })}
+                  style={{ ...S.input, fontSize: "13px", padding: "8px 10px" }}/>
+              </div>
+              <div>
+                <label style={{ fontSize: "10px", color: T.textDim, display: "block", marginBottom: "2px" }}>Gesamt-Wertung</label>
+                <input type="number" value={f.pots.threeDayPot} onChange={e => setF({ pots: { ...f.pots, threeDayPot: parseInt(e.target.value) || 0 } })}
+                  style={{ ...S.input, fontSize: "13px", padding: "8px 10px" }}/>
+              </div>
+              <div>
+                <label style={{ fontSize: "10px", color: T.textDim, display: "block", marginBottom: "2px" }}>Team-Wertung</label>
+                <input type="number" value={f.pots.weekTeamPot} onChange={e => setF({ pots: { ...f.pots, weekTeamPot: parseInt(e.target.value) || 0 } })}
+                  style={{ ...S.input, fontSize: "13px", padding: "8px 10px" }}/>
+              </div>
+              <div>
+                <label style={{ fontSize: "10px", color: T.textDim, display: "block", marginBottom: "2px" }}>Nearest-to-Pin</label>
+                <input type="number" value={f.pots.nearestPin} onChange={e => setF({ pots: { ...f.pots, nearestPin: parseInt(e.target.value) || 0 } })}
+                  style={{ ...S.input, fontSize: "13px", padding: "8px 10px" }}/>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button onClick={close} style={{ ...S.btnSecondary, flex: 1 }}>Abbrechen</button>
+            <button
+              onClick={async () => {
+                const selectedPlayers = friends.filter(fr => f.selectedFriendIds.includes(fr.playerId));
+                const startDate = new Date(f.startDate);
+                const days = Array.from({ length: f.dayCount }, (_, i) => {
+                  const d = new Date(startDate);
+                  d.setDate(d.getDate() + i);
+                  return { date: d.toISOString().slice(0, 10) };
+                });
+                await createTrip({
+                  name: f.name, location: f.location,
+                  startDate: f.startDate, endDate: f.endDate,
+                  syncCode: f.syncCode,
+                  players: selectedPlayers,
+                  days, pots: f.pots,
+                });
+                close();
+                showUndoToast(`✓ Trip "${f.name}" angelegt`, null);
+              }}
+              disabled={!isValid}
+              className="gold-hover"
+              style={{ ...S.btnPrimary, flex: 2, opacity: isValid ? 1 : 0.4 }}>
+              Trip anlegen
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ── v42: Trip-Detail-Modal ──
+  const renderTripDetail = () => {
+    if (!showTripDetail || !activeTripId) return null;
+    const trip = trips.find(t => t.id === activeTripId);
+    if (!trip) return null;
+    const close = () => { setShowTripDetail(false); setActiveTripId(null); };
+    const standings = computeTripStandings(trip);
+    const totalPot = (trip.players?.length || 0) * (
+      (trip.pots?.dayWin || 0) * (trip.days?.length || 0) +
+      (trip.pots?.threeDayPot || 0) +
+      (trip.pots?.weekTeamPot || 0)
+    );
+
+    return (
+      <div onClick={close}
+        style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+        <div onClick={e => e.stopPropagation()} className="slide-up"
+          style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
+          <SwipeHandle onClose={close} />
+          <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>🏖️ {trip.name}</h3>
+          <div style={{ fontSize: "12px", color: T.textSoft, marginBottom: "16px" }}>
+            {trip.location && <span>📍 {trip.location} · </span>}
+            {fmtDate(trip.startDate)} – {fmtDate(trip.endDate)}
+          </div>
+
+          {/* Pot-Summary */}
+          <div style={{ ...S.card, padding: "12px 14px", marginBottom: "12px", borderColor: `${T.gold}30` }}>
+            <div style={{ ...S.eyebrow, marginBottom: "8px", color: T.gold }}>💰 Pot-Übersicht</div>
+            <div style={{ fontSize: "20px", fontWeight: 700, color: T.gold, marginBottom: "4px" }}>
+              €{totalPot} <span style={{ fontSize: "11px", color: T.textDim, fontWeight: 500 }}>· {trip.players?.length || 0} Spieler</span>
+            </div>
+            <div style={{ fontSize: "10px", color: T.textDim, lineHeight: 1.5 }}>
+              €{trip.pots?.dayWin}/Tag · €{trip.pots?.threeDayPot} Gesamt · €{trip.pots?.weekTeamPot} Team · €{trip.pots?.nearestPin}/Par-3
+            </div>
+          </div>
+
+          {/* Tageswertungen */}
+          {standings?.dayResults?.length > 0 && (
+            <div style={{ ...S.card, padding: "12px 14px", marginBottom: "12px" }}>
+              <div style={{ ...S.eyebrow, marginBottom: "10px" }}>📅 Tageswertungen</div>
+              {standings.dayResults.map(dr => (
+                <div key={dr.dayNumber} style={{ padding: "8px 0", borderTop: dr.dayNumber > 1 ? `1px solid ${T.line}` : "none" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+                    <span style={{ fontSize: "12px", fontWeight: 600, color: T.text }}>Tag {dr.dayNumber}</span>
+                    <span style={{ fontSize: "10px", color: T.textDim }}>{fmtDate(dr.date)}</span>
+                  </div>
+                  {dr.complete && dr.winner ? (
+                    <div style={{ fontSize: "11px", color: T.textSoft }}>
+                      🥇 <span style={{ color: T.gold, fontWeight: 700 }}>{dr.winner.name}</span>
+                      {" "}— <span className="mono">{dr.winner.sf} SF</span>
+                      {" "}· €{trip.pots?.dayWin * (trip.players?.length || 0)}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: "11px", color: T.textDim, fontStyle: "italic" }}>Noch nicht gespielt</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Gesamt-Wertung */}
+          {standings?.totalRanked?.length > 0 && (
+            <div style={{ ...S.card, padding: "12px 14px", marginBottom: "12px" }}>
+              <div style={{ ...S.eyebrow, marginBottom: "10px" }}>🏆 Gesamt-Wertung</div>
+              {standings.totalRanked.map((p, i) => (
+                <div key={p.playerId || p.name} style={{
+                  display: "flex", alignItems: "center", gap: "8px",
+                  padding: "6px 0",
+                  borderTop: i > 0 ? `1px solid ${T.line}` : "none",
+                }}>
+                  <span style={{ width: "24px", color: i === 0 ? T.gold : T.textDim, fontWeight: 700, fontSize: "12px" }}>
+                    {i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `${i + 1}.`}
+                  </span>
+                  <span style={{ flex: 1, fontSize: "13px", color: T.text, fontWeight: 600 }}>{p.name}</span>
+                  <span style={{ fontSize: "10px", color: T.textDim }}>{p.daysPlayed} Tage</span>
+                  <span className="mono" style={{ fontSize: "13px", fontWeight: 700, color: T.gold, minWidth: "40px", textAlign: "right" }}>
+                    {p.totalSf}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Tage mit Runden verlinken */}
+          <div style={{ ...S.card, padding: "12px 14px", marginBottom: "12px" }}>
+            <div style={{ ...S.eyebrow, marginBottom: "10px" }}>🔗 Runden zuweisen</div>
+            <p style={{ fontSize: "10px", color: T.textDim, marginBottom: "10px", lineHeight: 1.4, fontStyle: "italic" }}>
+              Spielt eine Runde wie gewohnt und weist sie hier dem entsprechenden Tag zu.
+            </p>
+            {trip.days?.map(day => (
+              <div key={day.dayNumber} style={{ marginBottom: "12px", padding: "10px", background: T.surface2, borderRadius: "8px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+                  <span style={{ fontSize: "12px", fontWeight: 600, color: T.gold }}>Tag {day.dayNumber}</span>
+                  <span style={{ fontSize: "10px", color: T.textDim }}>{fmtDate(day.date)}</span>
+                </div>
+                {day.roundIds?.length > 0 ? (
+                  day.roundIds.map(rid => {
+                    const r = rounds.find(x => x.id === rid);
+                    if (!r) return null;
+                    return (
+                      <div key={rid} style={{ display: "flex", alignItems: "center", gap: "6px", padding: "4px 0" }}>
+                        <span style={{ flex: 1, fontSize: "11px", color: T.text }}>
+                          {r.cfg?.clubName || "Runde"} · {fmtDate(r.cfg?.date)}
+                        </span>
+                        <button onClick={() => unlinkRoundFromTrip(trip.id, rid)}
+                          style={{ background: "transparent", border: "none", color: T.double, fontSize: "14px", cursor: "pointer", padding: "2px 6px" }}>×</button>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div style={{ fontSize: "10px", color: T.textDim, fontStyle: "italic", marginBottom: "6px" }}>Keine Runden zugewiesen</div>
+                )}
+                <select
+                  onChange={async (e) => {
+                    if (e.target.value) {
+                      await linkRoundToTripDay(trip.id, day.dayNumber, e.target.value);
+                      e.target.value = "";
+                    }
+                  }}
+                  style={{ ...S.input, fontSize: "11px", padding: "6px 8px", width: "100%", marginTop: "4px" }}
+                  defaultValue="">
+                  <option value="">+ Runde hinzufügen...</option>
+                  {rounds.filter(r => !day.roundIds?.includes(r.id)).map(r => (
+                    <option key={r.id} value={r.id}>
+                      {r.cfg?.clubName || "Runde"} · {fmtDate(r.cfg?.date)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button
+              onClick={async () => {
+                if (confirm(`Trip "${trip.name}" wirklich löschen?`)) {
+                  await deleteTrip(trip.id);
+                  close();
+                }
+              }}
+              style={{ ...S.btnSecondary, flex: 1, color: T.double, borderColor: `${T.double}40` }}>
+              🗑️ Löschen
+            </button>
+            <button onClick={close} className="gold-hover" style={{ ...S.btnPrimary, flex: 2 }}>Schließen</button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   // ── v33: Trash modal — soft-deleted rounds recoverable for 30 days ──
   const renderTrash = () => {
     if (!showTrash) return null;
@@ -11375,6 +11921,8 @@ Wichtig:
       {renderLiveViewerModal()}
       {renderBackupRestore()}
       {renderTrash()}
+      {renderTripSetup()}
+      {renderTripDetail()}
       {renderScorerConflict()}
       {renderPlayerManager()}
       {renderHoleJump()}
