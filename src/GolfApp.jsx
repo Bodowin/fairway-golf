@@ -943,7 +943,7 @@ const BUILT_IN_CLUBS = [
 const STRICH = null;
 
 // ─── v40: Versions-Marker — sichtbar im App-Footer ──────────────────────────
-const APP_VERSION = "v42-cyprus";
+const APP_VERSION = "v42-cyprus.3";
 const APP_BUILD_DATE = "2026-04-27";
 
 function makeHoles(totalPar, numHoles) {
@@ -5817,10 +5817,11 @@ function GolfAppInner() {
   // ═══════════════════════════════════════════════════════════════════════════
   const renderGameModeCard = () => {
     const canTeam = players.length === 4;
+    const canUschi = players.length >= 2;
     const modes = [
       { k: "stableford",  l: "Stableford Netto",  sub: "Klassisch, Punkte pro Loch",     emoji: "⛳" },
-      { k: "uschi-single",l: "Uschi (Einzel)",    sub: "Low/Best Ball · Birdies · Uschi", emoji: "🎯" },
-      { k: "uschi-team",  l: "Uschi (2 vs 2)",    sub: "Teamwertung · nur bei 4 Spielern", emoji: "🎯🤝", disabled: !canTeam },
+      { k: "uschi-single",l: "Uschi (Einzel)",    sub: canUschi ? "Low/Best Ball · Birdies · Uschi" : "Braucht ≥ 2 Spieler", emoji: "🎯", needsMin: !canUschi },
+      { k: "uschi-team",  l: "Uschi (2 vs 2)",    sub: canTeam ? "Teamwertung · nur bei 4 Spielern" : "Braucht genau 4 Spieler", emoji: "🎯🤝", needsMin: !canTeam },
     ];
 
     return (
@@ -5832,25 +5833,32 @@ function GolfAppInner() {
             return (
               <button key={m.k}
                 onClick={() => {
-                  if (m.disabled) return;
+                  // v42: Pop-Up statt stumm disabled
+                  if (m.k === "uschi-single" && !canUschi) {
+                    showUndoToast(`⚠️ Uschi braucht mindestens 2 Spieler — du hast aktuell ${players.length}`, null);
+                    return;
+                  }
+                  if (m.k === "uschi-team" && !canTeam) {
+                    showUndoToast(`⚠️ Uschi 2v2 braucht genau 4 Spieler — du hast aktuell ${players.length}`, null);
+                    return;
+                  }
                   setGameMode(m.k);
                   if (m.k === "uschi-team" && canTeam && !teams) {
-                    // Auto-assign teams by default
                     const strokes = uschiAdjustedStrokes(players, cfg, selectedClub, holes);
                     setTeams(autoAssignTeams(strokes));
                   }
                   if (m.k === "stableford") setTeams(null);
                 }}
-                disabled={m.disabled}
                 style={{
                   padding: "14px 16px", textAlign: "left",
                   background: active ? `${T.gold}15` : T.surface2,
-                  color: active ? T.text : (m.disabled ? T.textDim : T.text),
+                  color: active ? T.text : (m.needsMin ? T.textDim : T.text),
                   border: `1.5px solid ${active ? T.gold : T.line}`,
                   borderRadius: "12px",
                   fontFamily: "Inter, sans-serif",
-                  opacity: m.disabled ? 0.5 : 1,
+                  opacity: m.needsMin ? 0.65 : 1,
                   display: "flex", alignItems: "center", gap: "12px",
+                  cursor: "pointer",
                 }}>
                 <span style={{ fontSize: "22px" }}>{m.emoji}</span>
                 <div style={{ flex: 1 }}>
@@ -6388,10 +6396,20 @@ function GolfAppInner() {
 
         <div style={{ display: "flex", gap: "10px", marginTop: "18px" }}>
           <button style={{ ...S.btnSecondary, flex: 1 }} onClick={() => setView("home")}>← Zurück</button>
-          <button style={{ ...S.btnPrimary, flex: 2, opacity: players.length === 0 || !cfg.clubName ? 0.35 : 1 }}
-            disabled={players.length === 0 || !cfg.clubName}
-            onClick={() => { setShowDD(false); setView("holes"); }}
-            className={players.length > 0 && cfg.clubName ? "gold-hover" : ""}>
+          <button style={{ ...S.btnPrimary, flex: 2 }}
+            onClick={() => {
+              if (!cfg.clubName) {
+                showUndoToast("⚠️ Wähle erst einen Club im Schritt 02", null);
+                return;
+              }
+              if (players.length === 0) {
+                showUndoToast("⚠️ Füge mindestens einen Spieler hinzu", null);
+                return;
+              }
+              setShowDD(false);
+              setView("holes");
+            }}
+            className="gold-hover">
             Weiter → Löcher prüfen
           </button>
         </div>
@@ -6812,7 +6830,15 @@ function GolfAppInner() {
           <button
             style={{ ...S.btnPrimary, width: "100%" }}
             className="gold-hover"
-            onClick={() => { saveRound(); setView("results"); }}>
+            onClick={() => {
+              const hasAnyScore = Object.values(scores || {}).some(ps => Object.values(ps || {}).some(v => v !== undefined));
+              if (!hasAnyScore) {
+                showUndoToast("⚠️ Trage erst ein paar Scores ein bevor du zur Auswertung gehst", null);
+                return;
+              }
+              saveRound();
+              setView("results");
+            }}>
             Auswertung →
           </button>
         </div>
@@ -8495,7 +8521,12 @@ WICHTIG:
 
   const liveStart = async () => {
     if (!SYNC_ENABLED) {
-      alert("Live-Ticker benötigt Cloud-Sync. Bitte in den Einstellungen aktivieren.");
+      showUndoToast("⚠️ Live-Ticker braucht Cloud-Sync — bitte erst in Settings → Cloud Sync aktivieren", null);
+      return;
+    }
+    // v42: Pop-Up wenn keine Spieler/Scores
+    if (players.length === 0) {
+      showUndoToast("⚠️ Füge erst Spieler hinzu bevor du den Live-Ticker startest", null);
       return;
     }
     // If we already have an active live code, reuse it instead of creating a duplicate
@@ -9638,7 +9669,6 @@ WICHTIG:
     const close = () => { setShowTripSetup(false); setTripFormData(null); };
     const f = tripFormData;
     const setF = (patch) => setTripFormData(prev => ({ ...prev, ...patch }));
-    const isValid = f.name.trim() && f.startDate && f.endDate && f.dayCount > 0 && f.selectedFriendIds.length >= 2;
 
     return (
       <div onClick={close}
@@ -9671,15 +9701,16 @@ WICHTIG:
               </div>
             </div>
             <label style={{ fontSize: "11px", color: T.textDim, display: "block", marginBottom: "4px" }}>Spieltage</label>
-            <div style={{ display: "flex", gap: "6px" }}>
-              {[1, 2, 3, 4, 5].map(n => (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "6px" }}>
+              {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
                 <button key={n} onClick={() => setF({ dayCount: n })}
                   style={{
-                    flex: 1, padding: "10px",
+                    padding: "10px",
                     background: f.dayCount === n ? `${T.gold}20` : T.surface2,
                     color: f.dayCount === n ? T.gold : T.textSoft,
                     border: `1px solid ${f.dayCount === n ? T.gold : T.line}`,
                     borderRadius: "8px", fontWeight: 600, fontSize: "14px",
+                    cursor: "pointer",
                   }}>
                   {n}
                 </button>
@@ -9691,7 +9722,19 @@ WICHTIG:
           <div style={{ ...S.card, padding: "12px 14px", marginBottom: "12px" }}>
             <div style={{ ...S.eyebrow, marginBottom: "10px" }}>👥 Spieler ({f.selectedFriendIds.length} ausgewählt)</div>
             {friends.length === 0 ? (
-              <p style={{ fontSize: "12px", color: T.textDim, fontStyle: "italic" }}>Keine Friends. Lege erst Spieler über den Friends-Tab an.</p>
+              <div style={{ padding: "12px", background: `${T.gold}10`, border: `1px solid ${T.gold}40`, borderRadius: "8px" }}>
+                <p style={{ fontSize: "13px", color: T.gold, fontWeight: 600, marginTop: 0, marginBottom: "8px" }}>
+                  ⚠️ Du hast noch keine Spieler in deiner Friend-Liste.
+                </p>
+                <p style={{ fontSize: "11px", color: T.textSoft, marginBottom: "10px", lineHeight: 1.5 }}>
+                  Lege zuerst Spieler an: Tab „Freunde" → Name + HCP eingeben → „+" drücken.
+                  Auch dein eigenes Owner-Profil zählt als Spieler.
+                </p>
+                <button onClick={() => { close(); setTab("friends"); }}
+                  style={{ ...S.btnSecondary, width: "100%", color: T.gold, borderColor: `${T.gold}50` }}>
+                  → Zum Friends-Tab
+                </button>
+              </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                 {friends.map(fr => {
@@ -9762,6 +9805,23 @@ WICHTIG:
             <button onClick={close} style={{ ...S.btnSecondary, flex: 1 }}>Abbrechen</button>
             <button
               onClick={async () => {
+                // v42: Klare Pop-Ups statt stumm disabled
+                if (!f.name.trim()) {
+                  showUndoToast("⚠️ Bitte gib deinem Trip einen Namen", null);
+                  return;
+                }
+                if (!f.startDate || !f.endDate) {
+                  showUndoToast("⚠️ Bitte wähle Start- und End-Datum", null);
+                  return;
+                }
+                if (f.dayCount < 1) {
+                  showUndoToast("⚠️ Mindestens 1 Spieltag nötig", null);
+                  return;
+                }
+                if (f.selectedFriendIds.length < 2) {
+                  showUndoToast("⚠️ Wähle mindestens 2 Spieler — ein Trip macht alleine wenig Sinn", null);
+                  return;
+                }
                 const selectedPlayers = friends.filter(fr => f.selectedFriendIds.includes(fr.playerId));
                 const startDate = new Date(f.startDate);
                 const days = Array.from({ length: f.dayCount }, (_, i) => {
@@ -9779,9 +9839,8 @@ WICHTIG:
                 close();
                 showUndoToast(`✓ Trip "${f.name}" angelegt`, null);
               }}
-              disabled={!isValid}
               className="gold-hover"
-              style={{ ...S.btnPrimary, flex: 2, opacity: isValid ? 1 : 0.4 }}>
+              style={{ ...S.btnPrimary, flex: 2 }}>
               Trip anlegen
             </button>
           </div>
@@ -10361,6 +10420,21 @@ WICHTIG:
   const renderOwnerSetup = () => {
     if (!ownerSetupOpen) return null;
     const isEditing = !!ownerProfile;
+
+    // v42: Lustige Pro-Golfer-Beispiele als Placeholder
+    const golferExamples = [
+      { name: "Tiger Woods", hcp: "+5.0" },
+      { name: "Rory McIlroy", hcp: "+4.5" },
+      { name: "Scottie Scheffler", hcp: "+5.5" },
+      { name: "Jon Rahm", hcp: "+4.0" },
+      { name: "John Daly", hcp: "5.0" },
+      { name: "Phil Mickelson", hcp: "+2.5" },
+      { name: "Bernhard Langer", hcp: "0.5" },
+      { name: "Sergio García", hcp: "+1.5" },
+    ];
+    // Wähle ein Beispiel basierend auf Datum (täglich rotierend, vermeidet bei jedem Re-Render Wechsel)
+    const dayOfYear = Math.floor((Date.now() - new Date(new Date().getFullYear(), 0, 0).getTime()) / 86400000);
+    const example = golferExamples[dayOfYear % golferExamples.length];
     return (
       <div onClick={() => setOwnerSetupOpen(false)}
         style={{
@@ -10388,7 +10462,7 @@ WICHTIG:
               type="text"
               value={ownerForm.name}
               onChange={e => setOwnerForm(f => ({ ...f, name: e.target.value }))}
-              placeholder="Bodo"
+              placeholder={`z.B. ${example.name}`}
               autoFocus
               style={{ ...S.input, width: "100%" }}/>
           </div>
@@ -10398,7 +10472,7 @@ WICHTIG:
               type="number" step="0.1"
               value={ownerForm.hcp}
               onChange={e => setOwnerForm(f => ({ ...f, hcp: e.target.value }))}
-              placeholder="29.1"
+              placeholder={`z.B. ${example.hcp}`}
               style={{ ...S.input, width: "100%" }}/>
           </div>
           <div style={{ display: "flex", gap: "8px" }}>
@@ -10727,6 +10801,28 @@ WICHTIG:
             </div>
             <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, margin: 0, fontStyle: "italic" }}>
               Wichtig: Jeder mit dem Code kann Daten lesen und schreiben. Teile ihn nur mit Leuten denen du vertraust.
+            </p>
+          </>
+        ),
+      },
+      {
+        icon: "🏖️",
+        title: "Trip-Modus für Reisen",
+        body: (
+          <>
+            <p style={{ fontSize: "13px", color: T.textSoft, lineHeight: 1.6, margin: "0 0 12px" }}>
+              Mehrtägige Golfreisen wie Cyprus oder Portugal werden im <b style={{ color: T.gold }}>🏖️ Trips-Tab</b> angelegt:
+            </p>
+            <div style={{ background: T.surface2, border: `1px solid ${T.line}`, borderRadius: "8px", padding: "12px", marginBottom: "10px" }}>
+              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "6px" }}>Was ein Trip macht</div>
+              <ul style={{ fontSize: "12px", color: T.text, lineHeight: 1.6, paddingLeft: "18px", margin: 0 }}>
+                <li>Mehrere Spieltage zusammenfassen</li>
+                <li>Pots verwalten (€ pro Tagessieger, Gesamt-Wertung)</li>
+                <li>Tageswertung + Gesamt-Rangliste auf einen Blick</li>
+              </ul>
+            </div>
+            <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, margin: 0, fontStyle: "italic" }}>
+              Du spielst weiter <b>normale Runden</b> wie immer und weist sie dann den Trip-Tagen zu. Die App rechnet alles aus.
             </p>
           </>
         ),
@@ -11149,7 +11245,15 @@ WICHTIG:
         <div onClick={e => e.stopPropagation()} className="slide-up"
           style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "90vh", overflowY: "auto" }}>
           <SwipeHandle onClose={() => setShowSyncModal(false)} />
-          <h3 className="serif" style={{ fontSize: "24px", margin: "0 0 6px", color: T.text }}>☁️ Cloud Sync</h3>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+            <h3 className="serif" style={{ fontSize: "24px", margin: 0, color: T.text }}>☁️ Cloud Sync</h3>
+            <button
+              onClick={() => { setShowSyncModal(false); setWelcomeSlide(0); setShowWelcome(true); }}
+              title="App-Tour & Hilfe öffnen"
+              style={{ ...S.btnGhost, padding: "6px 12px", fontSize: "11px", color: T.gold, borderColor: `${T.gold}40` }}>
+              ❔ Hilfe & Regeln
+            </button>
+          </div>
 
           {/* Owner profile section — appears at the top of sync settings */}
           <div style={{ marginTop: "12px", marginBottom: "16px", padding: "14px", background: T.surface2, borderRadius: "10px", border: `1px solid ${T.line}` }}>
