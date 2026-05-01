@@ -943,7 +943,7 @@ const BUILT_IN_CLUBS = [
 const STRICH = null;
 
 // ─── v40: Versions-Marker — sichtbar im App-Footer ──────────────────────────
-const APP_VERSION = "v49";
+const APP_VERSION = "v50";
 const APP_BUILD_DATE = "2026-05-01";
 
 function makeHoles(totalPar, numHoles) {
@@ -2138,11 +2138,21 @@ function normalizeBirdiebookFormat(input) {
     };
   });
 
-  // Build holes array
-  const holes = club.scorecard.loecher.map(l => ({
-    par: l.par,
-    si: l.hcp, // German "hcp" = Stroke Index in Austrian notation
-  }));
+  // Build holes array — v50: mit Loch-Längen pro Tee
+  const teesArr = Object.keys(tees);
+  const holes = club.scorecard.loecher.map(l => {
+    const lengths = {};
+    teesArr.forEach(teeName => {
+      const isWomenTee = /rot|red|damen|women|ladies/.test(teeName);
+      const lengthField = isWomenTee ? "d_ch" : "h_st";
+      if (l[lengthField]) lengths[teeName] = l[lengthField];
+    });
+    return {
+      par: l.par,
+      si: l.hcp, // German "hcp" = Stroke Index in Austrian notation
+      lengths, // { "Gelb": 340, "Rot": 320, ... }
+    };
+  });
 
   // Determine region from address.ort if available
   const region = club.adresse?.ort || club.region || "Österreich";
@@ -2370,6 +2380,128 @@ function computeUschiPoints(players, holes, scores, adjStrokes, par3Data) {
     perHole.push({ holeIdx: i, holePoints, holeBreakdown, uschi: uschiInfo, netto });
 
     // Add hole points to totals
+    players.forEach(p => { totals[p.id].total += holePoints[p.id]; });
+  }
+
+  return { perHole, totals, carry, openUschi };
+}
+
+/**
+ * v50: Best Ball+ Punkte
+ * Wie Uschi, aber:
+ * - Bester Netto-SF holt +1 (Tie: alle Tied bekommen +1)
+ * - KEINE Worst-Minus-Punkte
+ * - Optional: Birdie-Bonus (+1)
+ * - Optional: Uschi-Mechanik mit Verbrennung (wie Uschi-Modus)
+ *
+ * config: { birdieBonus: bool, uschiBonus: bool }
+ */
+function computeBestBallPlusPoints(players, holes, scores, adjStrokes, par3Data, config) {
+  const cfg = config || { birdieBonus: true, uschiBonus: false };
+  const strokesByPid = {};
+  adjStrokes.forEach(a => { strokesByPid[a.playerId] = a.perHole; });
+
+  const totals = {};
+  players.forEach(p => {
+    totals[p.id] = { total: 0, best: 0, birdies: 0, uschi: 0 };
+  });
+
+  const perHole = [];
+  let carry = 1;
+  const openUschi = [];
+
+  for (let i = 0; i < holes.length; i++) {
+    const hole = holes[i];
+    const holePoints = {};
+    const holeBreakdown = {};
+    players.forEach(p => {
+      holePoints[p.id] = 0;
+      holeBreakdown[p.id] = { best: false, birdie: false, uschi: 0 };
+    });
+
+    // Compute netto SF for each player who played this hole
+    const nettoSf = {};
+    const sfList = [];
+    players.forEach(p => {
+      const gross = scores[p.id]?.[i];
+      if (isValid(gross)) {
+        const s = strokesByPid[p.id]?.[i] || 0;
+        const sf = sfNetto(gross, s, hole.par) || 0;
+        nettoSf[p.id] = sf;
+        sfList.push({ pid: p.id, sf });
+      } else {
+        nettoSf[p.id] = null;
+      }
+    });
+
+    // v50: Bester Netto-SF holt +1 (Tie: alle Tied bekommen +1)
+    if (sfList.length >= 1) {
+      const bestSf = Math.max(...sfList.map(x => x.sf));
+      // Nur vergeben wenn der beste > 0 ist (also wirklich Punkte gemacht wurden)
+      if (bestSf > 0) {
+        sfList.forEach(x => {
+          if (x.sf === bestSf) {
+            holePoints[x.pid] += 1;
+            totals[x.pid].best += 1;
+            holeBreakdown[x.pid].best = true;
+          }
+        });
+      }
+    }
+
+    // Birdie-Bonus (optional, wenn aktiviert)
+    if (cfg.birdieBonus) {
+      players.forEach(p => {
+        const gross = scores[p.id]?.[i];
+        if (isValid(gross) && gross <= hole.par - 1) {
+          holePoints[p.id] += 1;
+          totals[p.id].birdies += 1;
+          holeBreakdown[p.id].birdie = true;
+        }
+      });
+    }
+
+    // Uschi (Par 3 only) — wie im Uschi-Modus, mit Verbrennung
+    let uschiInfo = null;
+    if (cfg.uschiBonus && hole.par === 3) {
+      const data = par3Data?.[i];
+      const allPar3Scored = players.every(p => {
+        const g = scores[p.id]?.[i];
+        return isValid(g) || isStrich(g);
+      });
+
+      if (!data) {
+        if (allPar3Scored) openUschi.push(i);
+        uschiInfo = { pending: true, multiplier: carry };
+      } else {
+        const greenHits = data.greenHits || [];
+        const closest = data.closest;
+
+        if (greenHits.length === 0) {
+          uschiInfo = { type: "carry", multiplier: carry, newMultiplier: carry + 1 };
+          carry += 1;
+        } else if (closest && greenHits.includes(closest)) {
+          const closestGross = scores[closest]?.[i];
+          if (isValid(closestGross) && closestGross <= hole.par) {
+            // Won — closest hit green AND made par or better
+            holePoints[closest] += carry;
+            totals[closest].uschi += carry;
+            holeBreakdown[closest].uschi = carry;
+            uschiInfo = { type: "won", winner: closest, points: carry, multiplier: carry };
+            carry = 1;
+          } else {
+            // Burnt
+            uschiInfo = { type: "burnt", burnBy: closest, multiplier: carry };
+            carry = 1;
+          }
+        } else {
+          if (allPar3Scored) openUschi.push(i);
+          uschiInfo = { pending: true, multiplier: carry };
+        }
+      }
+    }
+
+    perHole.push({ holeIdx: i, holePoints, holeBreakdown, uschi: uschiInfo, nettoSf });
     players.forEach(p => { totals[p.id].total += holePoints[p.id]; });
   }
 
@@ -2619,11 +2751,11 @@ function GolfAppInner() {
   const [showHoleJump, setShowHoleJump] = useState(false);
   // Game mode (Uschi)
   const [gameMode, setGameMode] = useState("stableford"); // "stableford" | "uschi-single" | "uschi-team" | "bestball-plus"
-  // v48: Best Ball+ Config — alle Spieler in einem Team, Toggles für Add-Ons
+  // v48+v50: Best Ball+ Config — Loch-für-Loch ohne Minus
+  // Always Netto. Bonus-Toggles sind optional.
   const [bestBallConfig, setBestBallConfig] = useState({
-    uschiBonus: false,    // Uschi-Mechanik aktiv (Trash-Talk-Punkte)
-    birdieBonus: true,    // Birdie-Bonus aktiv
-    scoring: "netto",     // "netto" (mit HCP-Vorgabe) | "brutto" (rohe SF)
+    birdieBonus: true,    // Brutto-Birdie als +1 Bonus
+    uschiBonus: false,    // Uschi-Verbrennungs-Mechanik bei Par-3 (wie Uschi-Modus)
   });
   const [showBestBallExplain, setShowBestBallExplain] = useState(false);
   const [teams, setTeams] = useState(null); // { A: [pid], B: [pid], nameA?, nameB? } | null
@@ -4148,59 +4280,11 @@ function GolfAppInner() {
     return computeTeamUschiPoints(uschiResult, teams);
   }, [gameMode, uschiResult, teams]);
 
-  // v48: Best Ball+ Result — Team-Total mit Bestem-Score-pro-Loch + optionalen Boni
+  // v48+v50: Best Ball+ — Loch-für-Loch Logik (wie Uschi aber ohne Minus)
   const bestBallResult = useMemo(() => {
     if (gameMode !== "bestball-plus" || players.length < 2) return null;
-    const result = {
-      perHole: [],          // [{ holeIdx, bestPlayerId, bestSf, bestBrutto, birdies: [pids], ladies: [pids] }]
-      totalSf: 0,           // Team-Gesamt-Score
-      birdieBonus: 0,
-      uschiBonus: 0,
-      total: 0,             // total + bonis
-    };
-    holes.forEach((h, i) => {
-      let bestSf = -Infinity;
-      let bestBrutto = -Infinity;
-      let bestPlayerId = null;
-      const birdiesAtHole = [];
-      const ladiesAtHole = [];
-      players.forEach(p => {
-        const g = scores[p.id]?.[i];
-        if (!isValid(g)) return;
-        // Score je nach Modus
-        const tee = playerTee(p, cfg, selectedClub);
-        if (!tee) return;
-        const { ph } = resolvePlayerPH(p, cfg, selectedClub, par);
-        const hs = holeHS(ph, h.si, holes.length);
-        const sfN = sfNetto(g, hs, h.par) || 0;
-        const sfB = sfBrutto(g, h.par) || 0;
-        const playerSf = bestBallConfig.scoring === "netto" ? sfN : sfB;
-        if (playerSf > bestSf) {
-          bestSf = playerSf;
-          bestBrutto = sfB;
-          bestPlayerId = p.id;
-        }
-        // Birdies (Brutto-Birdie)
-        if (g <= h.par - 1) birdiesAtHole.push(p.id);
-        // Ladies (manuell markiert via ladies-State)
-        if ((ladies[p.id] || []).includes(i)) ladiesAtHole.push(p.id);
-      });
-      if (bestSf < 0) bestSf = 0;
-      result.perHole.push({
-        holeIdx: i,
-        bestPlayerId,
-        bestSf,
-        bestBrutto: Math.max(0, bestBrutto),
-        birdies: birdiesAtHole,
-        ladies: ladiesAtHole,
-      });
-      result.totalSf += bestSf;
-      if (bestBallConfig.birdieBonus) result.birdieBonus += birdiesAtHole.length;
-      if (bestBallConfig.uschiBonus) result.uschiBonus += ladiesAtHole.length;
-    });
-    result.total = result.totalSf + result.birdieBonus + result.uschiBonus;
-    return result;
-  }, [gameMode, players, holes, scores, par, cfg, selectedClub, bestBallConfig, ladies]);
+    return computeBestBallPlusPoints(players, holes, scores, uschiStrokes, par3Data, bestBallConfig);
+  }, [gameMode, players, holes, scores, uschiStrokes, par3Data, bestBallConfig]);
 
   // ── Rounds
   const saveRound = async () => {
@@ -6458,7 +6542,7 @@ function GolfAppInner() {
     );
   };
 
-  // v48: Best Ball+ Config-UI im Setup
+  // v48+v50: Best Ball+ Config-UI im Setup
   const renderBestBallConfig = () => (
     <>
       <div style={{ marginTop: "14px", padding: "14px", background: T.surface2, borderRadius: "10px", border: `1px solid ${T.gold}40` }}>
@@ -6473,31 +6557,8 @@ function GolfAppInner() {
         </div>
 
         <p style={{ fontSize: "11px", color: T.textSoft, lineHeight: 1.5, marginBottom: "12px", margin: "0 0 12px" }}>
-          Alle {players.length} Spieler bilden <b>ein Team</b>. Pro Loch zählt der beste Score.
+          Pro Loch: Bester Netto-Stableford holt <b>+1 Punkt</b>. Bei Gleichstand bekommen alle Tied +1. Keine Minus-Punkte.
         </p>
-
-        {/* Scoring-Toggle */}
-        <div style={{ marginBottom: "10px" }}>
-          <div style={{ fontSize: "10px", color: T.textDim, fontWeight: 700, letterSpacing: "0.04em", marginBottom: "5px" }}>WERTUNG</div>
-          <div style={{ display: "flex", gap: "6px" }}>
-            {[
-              { v: "netto", l: "Netto (mit HCP-Vorgabe)" },
-              { v: "brutto", l: "Brutto (rohe SF)" },
-            ].map(opt => (
-              <button key={opt.v}
-                onClick={() => setBestBallConfig(c => ({ ...c, scoring: opt.v }))}
-                style={{
-                  flex: 1, padding: "8px 6px",
-                  background: bestBallConfig.scoring === opt.v ? `${T.gold}25` : T.surface1,
-                  color: bestBallConfig.scoring === opt.v ? T.gold : T.textSoft,
-                  border: `1px solid ${bestBallConfig.scoring === opt.v ? T.gold : T.line}`,
-                  borderRadius: "8px", fontSize: "11px", fontWeight: 600, cursor: "pointer",
-                }}>
-                {opt.l}
-              </button>
-            ))}
-          </div>
-        </div>
 
         {/* Add-Ons */}
         <div>
@@ -6523,7 +6584,7 @@ function GolfAppInner() {
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: "12px", fontWeight: 600, color: T.text }}>🎯 Birdie-Bonus</div>
-                <div style={{ fontSize: "10px", color: T.textDim }}>+1 Extra-Punkt pro Birdie ans Team</div>
+                <div style={{ fontSize: "10px", color: T.textDim }}>Echter Brutto-Birdie (Score = Par-1) gibt +1</div>
               </div>
             </button>
             <button
@@ -6545,8 +6606,8 @@ function GolfAppInner() {
                 {bestBallConfig.uschiBonus && "✓"}
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: "12px", fontWeight: 600, color: T.text }}>🎀 Uschi-Bonus</div>
-                <div style={{ fontSize: "10px", color: T.textDim }}>+1 Punkt für jede Lady (Net-Eagle oder besser)</div>
+                <div style={{ fontSize: "12px", fontWeight: 600, color: T.text }}>🎀 Uschi auf Par-3</div>
+                <div style={{ fontSize: "10px", color: T.textDim }}>Wie im Uschi-Modus: mit Verbrennung + Carry-Over</div>
               </div>
             </button>
           </div>
@@ -6558,28 +6619,33 @@ function GolfAppInner() {
         <div onClick={() => setShowBestBallExplain(false)}
           style={{ position: "fixed", inset: 0, background: "#000000ee", zIndex: 1300, display: "flex", alignItems: "center", justifyContent: "center", padding: "20px" }}>
           <div onClick={e => e.stopPropagation()}
-            style={{ ...S.card, maxWidth: "440px", width: "100%", padding: "20px", borderColor: `${T.gold}50` }}>
+            style={{ ...S.card, maxWidth: "440px", width: "100%", padding: "20px", borderColor: `${T.gold}50`, maxHeight: "85vh", overflowY: "auto" }}>
             <h4 className="serif" style={{ fontSize: "20px", margin: "0 0 8px", color: T.gold }}>☄️ Best Ball+</h4>
             <p style={{ fontSize: "13px", color: T.textSoft, lineHeight: 1.6, marginBottom: "12px" }}>
-              Ein lockerer Team-Modus für 2-8 Spieler. Alle bilden ein Team, pro Loch zählt der beste Score fürs Team-Total.
+              Loch-für-Loch-Wettbewerb. Jeder Spieler hat seine eigenen Punkte. <b>Keine Minus-Punkte.</b>
             </p>
             <div style={{ background: T.surface2, padding: "12px", borderRadius: "8px", marginBottom: "10px" }}>
-              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "4px" }}>📋 Wertung</div>
+              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "4px" }}>📋 Grund-Mechanik</div>
               <div style={{ fontSize: "11px", color: T.text, lineHeight: 1.5 }}>
-                <b>Netto:</b> SF-Punkte mit HCP-Vorgabe (Default — fairer für gemischte HCPs).<br/>
-                <b>Brutto:</b> rohe SF-Punkte ohne Vorgabe.
+                Pro Loch: bester Netto-SF holt <b>+1</b>. Bei Tie bekommen alle Tied +1.
+                <br/><br/>
+                <b>Beispiel:</b> Bodo SF 1 · Max SF 2 · Thorsten SF 2 · Wagner SF 0
+                <br/>→ Max + Thorsten bekommen je +1
               </div>
             </div>
             <div style={{ background: T.surface2, padding: "12px", borderRadius: "8px", marginBottom: "10px" }}>
-              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "4px" }}>🎯 Birdie-Bonus (optional)</div>
+              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "4px" }}>🎯 Birdie-Bonus</div>
               <div style={{ fontSize: "11px", color: T.text, lineHeight: 1.5 }}>
-                Jeder Birdie eines Spielers bringt dem Team einen <b>Extra-Punkt</b> zusätzlich zum besten Loch-Score.
+                Brutto-Birdie (Score = Par-1) bringt zusätzlich <b>+1</b>. Wenn Bodo das Loch holt UND Birdie spielt: +2.
               </div>
             </div>
             <div style={{ background: T.surface2, padding: "12px", borderRadius: "8px", marginBottom: "16px" }}>
-              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "4px" }}>🎀 Uschi-Bonus (optional)</div>
+              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "4px" }}>🎀 Uschi auf Par-3</div>
               <div style={{ fontSize: "11px", color: T.text, lineHeight: 1.5 }}>
-                Jede „Lady" (Net-Eagle oder besser) bringt einen Extra-Punkt. Markierst du im Score-Screen lange auf einer Zahl.
+                Auf jedem Par-3 wird ein Uschi-Punkt gespielt — startet bei <b>1×</b>.
+                <br/>• Niemand auf Green → <b>verbrennt</b>, nächstes Par-3 zählt 2× (oder mehr)
+                <br/>• Closest auf Green + macht Par/Birdie → <b>holt alle aufgestauten Punkte</b>
+                <br/>• Closest auf Green aber Bogey/schlechter → Punkt geht verloren, Carry resettet
               </div>
             </div>
             <button onClick={() => setShowBestBallExplain(false)} className="gold-hover" style={{ ...S.btnPrimary, width: "100%" }}>
@@ -7509,16 +7575,23 @@ function GolfAppInner() {
                 <div style={{ fontSize: "9px", color: T.gold, letterSpacing: "0.08em", fontWeight: 600 }}>🎯 USCHI-MODUS</div>
               )}
             </div>
-            {/* Sort by uschi points if in uschi mode, else by sf netto */}
+            {/* Sort by uschi/bestball points if in those modes, else by sf netto */}
             {(() => {
-              const withStats = players.map(p => ({ p, s: getStats(p), uschiTotal: uschiResult?.totals?.[p.id]?.total ?? 0 }));
-              const sorted = gameMode !== "stableford" && uschiResult
+              // v50: Best Ball+ liefert eigene "totals" wie Uschi
+              const pointsSource = gameMode === "bestball-plus" ? bestBallResult : uschiResult;
+              const withStats = players.map(p => ({
+                p, s: getStats(p),
+                uschiTotal: pointsSource?.totals?.[p.id]?.total ?? 0,
+              }));
+              const useUschiSort = (gameMode !== "stableford" && uschiResult) || (gameMode === "bestball-plus" && bestBallResult);
+              const sorted = useUschiSort
                 ? [...withStats].sort((a, b) => b.uschiTotal - a.uschiTotal)
                 : [...withStats].sort((a, b) => b.s.sfNT - a.s.sfNT);
               return sorted.map((item, i) => {
                 const p = item.p;
                 const s = item.s;
-                const isUschi = gameMode !== "stableford" && uschiResult;
+                // v50: Best Ball+ wird wie Uschi behandelt für Crown + uschiTotal-Anzeige
+                const isUschi = (gameMode !== "stableford" && uschiResult) || (gameMode === "bestball-plus" && bestBallResult);
                 const uschiTotal = item.uschiTotal;
                 return (
                   <div key={p.id} style={{ display: "flex", alignItems: "center", gap: "12px", padding: "10px 0", borderBottom: i < sorted.length - 1 ? `1px solid ${T.line}` : "none" }}>
@@ -7618,29 +7691,38 @@ function GolfAppInner() {
               </div>
             )}
 
-            {/* v48: Best Ball+ Team-Total */}
+            {/* v50: Best Ball+ Standings (wie Uschi-Logik, ohne Minus) */}
             {gameMode === "bestball-plus" && bestBallResult && (
               <div style={{ marginTop: "10px", paddingTop: "10px", borderTop: `1px solid ${T.lineStrong}` }}>
-                <div style={{ fontSize: "9px", color: T.textDim, letterSpacing: "0.08em", fontWeight: 600, marginBottom: "6px" }}>☄️ TEAM-TOTAL · BEST BALL+</div>
-                <div style={{ background: `${T.gold}15`, borderRadius: "10px", padding: "10px 14px", border: `1px solid ${T.gold}40` }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div style={{ fontSize: "11px", color: T.textSoft }}>
-                      {players.length} Spieler · {bestBallConfig.scoring === "netto" ? "Netto" : "Brutto"}
-                    </div>
-                    <div className="mono" style={{ fontSize: "22px", fontWeight: 800, color: T.gold }}>{bestBallResult.total}</div>
-                  </div>
-                  {(bestBallResult.birdieBonus > 0 || bestBallResult.uschiBonus > 0) && (
-                    <div style={{ display: "flex", gap: "8px", marginTop: "6px", flexWrap: "wrap", fontSize: "10px" }}>
-                      <span style={{ color: T.textDim }}>Beste Löcher: <span className="mono" style={{ color: T.text, fontWeight: 600 }}>{bestBallResult.totalSf}</span></span>
-                      {bestBallResult.birdieBonus > 0 && (
-                        <span style={{ color: T.gold }}>🎯 Birdies: <span className="mono" style={{ fontWeight: 600 }}>+{bestBallResult.birdieBonus}</span></span>
-                      )}
-                      {bestBallResult.uschiBonus > 0 && (
-                        <span style={{ color: T.gold }}>🎀 Ladies: <span className="mono" style={{ fontWeight: 600 }}>+{bestBallResult.uschiBonus}</span></span>
-                      )}
-                    </div>
-                  )}
+                <div style={{ fontSize: "9px", color: T.textDim, letterSpacing: "0.08em", fontWeight: 600, marginBottom: "6px" }}>
+                  ☄️ BEST BALL+ · LOCH-FÜR-LOCH
                 </div>
+                {/* Aktueller Carry-Hinweis */}
+                {bestBallConfig.uschiBonus && bestBallResult.carry > 1 && (
+                  <div style={{ fontSize: "10px", color: T.gold, marginBottom: "8px", padding: "6px 10px", background: `${T.gold}10`, borderRadius: "6px", border: `1px solid ${T.gold}40` }}>
+                    🎀 Aktueller Uschi-Carry: <b>{bestBallResult.carry}×</b> beim nächsten Par-3
+                  </div>
+                )}
+                {/* Ranking */}
+                {[...players].sort((a, b) => (bestBallResult.totals[b.id]?.total || 0) - (bestBallResult.totals[a.id]?.total || 0)).map((p, idx) => {
+                  const t = bestBallResult.totals[p.id] || {};
+                  return (
+                    <div key={p.id} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "5px 0", fontSize: "11px" }}>
+                      <span style={{ width: "20px", color: idx === 0 ? T.gold : T.textDim, fontWeight: 700 }}>
+                        {idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : `${idx + 1}.`}
+                      </span>
+                      <span style={{ flex: 1, color: T.text, fontWeight: 600 }}>{p.name}</span>
+                      <span style={{ fontSize: "9px", color: T.textDim }}>
+                        {t.best || 0}🏆
+                        {t.birdies > 0 && ` · ${t.birdies}🎯`}
+                        {t.uschi > 0 && ` · ${t.uschi}🎀`}
+                      </span>
+                      <span className="mono" style={{ color: T.gold, fontWeight: 700, minWidth: "30px", textAlign: "right" }}>
+                        {t.total || 0}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -9202,6 +9284,17 @@ function GolfAppInner() {
               <div style={{ fontSize: "10px", color: T.textDim, letterSpacing: "0.06em" }}>PAR · SI</div>
               <div className="mono" style={{ fontSize: "18px", color: T.text, fontWeight: 700 }}>{hole.par} · {hole.si}</div>
               {hs > 0 && <div style={{ fontSize: "10px", color: T.gold, marginTop: "2px", fontWeight: 600 }}>+{hs} Vorgabe</div>}
+              {/* v50: Loch-Längen pro Tee */}
+              {hole.lengths && Object.keys(hole.lengths).length > 0 && (
+                <div style={{ fontSize: "9px", color: T.textDim, marginTop: "4px", display: "flex", gap: "5px", justifyContent: "flex-end", flexWrap: "wrap" }}>
+                  {Object.entries(hole.lengths).map(([teeName, m]) => (
+                    <span key={teeName} style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}>
+                      <TeeDot name={teeName} size={6} />
+                      <span className="mono">{m}m</span>
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
 
