@@ -943,8 +943,8 @@ const BUILT_IN_CLUBS = [
 const STRICH = null;
 
 // ─── v40: Versions-Marker — sichtbar im App-Footer ──────────────────────────
-const APP_VERSION = "v47-trip-aware";
-const APP_BUILD_DATE = "2026-04-30";
+const APP_VERSION = "v49";
+const APP_BUILD_DATE = "2026-05-01";
 
 function makeHoles(totalPar, numHoles) {
   const si18 = [1,3,5,7,9,11,13,15,17,2,4,6,8,10,12,14,16,18];
@@ -2618,7 +2618,14 @@ function GolfAppInner() {
   // v38: Loch-Schnellsprung-Modal
   const [showHoleJump, setShowHoleJump] = useState(false);
   // Game mode (Uschi)
-  const [gameMode, setGameMode] = useState("stableford"); // "stableford" | "uschi-single" | "uschi-team"
+  const [gameMode, setGameMode] = useState("stableford"); // "stableford" | "uschi-single" | "uschi-team" | "bestball-plus"
+  // v48: Best Ball+ Config — alle Spieler in einem Team, Toggles für Add-Ons
+  const [bestBallConfig, setBestBallConfig] = useState({
+    uschiBonus: false,    // Uschi-Mechanik aktiv (Trash-Talk-Punkte)
+    birdieBonus: true,    // Birdie-Bonus aktiv
+    scoring: "netto",     // "netto" (mit HCP-Vorgabe) | "brutto" (rohe SF)
+  });
+  const [showBestBallExplain, setShowBestBallExplain] = useState(false);
   const [teams, setTeams] = useState(null); // { A: [pid], B: [pid], nameA?, nameB? } | null
   const [par3Data, setPar3Data] = useState({}); // { [holeIdx]: { greenHits: [pid], closest: pid } }
   const [uschiPromptHole, setUschiPromptHole] = useState(null); // holeIdx currently prompting for par-3 data
@@ -2847,9 +2854,28 @@ function GolfAppInner() {
               const localOnlyClubs = localClubs.filter(c => !cloudClubNames.has(c.name));
               const mergedClubs = [...cloudClubs, ...localOnlyClubs];
 
+              // v47.1: Trips: union by id
+              const cloudTrips = Array.isArray(cloud.data.trips) ? cloud.data.trips : [];
+              const localTripsRaw = await window.storage.get("golf-trips");
+              const localTripsArr = localTripsRaw?.value ? JSON.parse(localTripsRaw.value) : [];
+              const cloudTripIds = new Set(cloudTrips.map(t => t.id));
+              const localOnlyTrips = localTripsArr.filter(t => !cloudTripIds.has(t.id));
+              const mergedTrips = [...cloudTrips, ...localOnlyTrips];
+
               setRounds(merged);
               setFriends(mergedFriends);
               setCustomClubs(mergedClubs);
+              setTrips(mergedTrips);
+              try { await window.storage.set("golf-trips", JSON.stringify(mergedTrips)); } catch {}
+
+              // v47.1: Owner-Profile aus Cloud falls keiner lokal
+              const localOwnerRaw = await window.storage.get("golf-owner-profile");
+              const localOwner = localOwnerRaw?.value ? JSON.parse(localOwnerRaw.value) : null;
+              if (cloud.data.ownerProfile && !localOwner) {
+                setOwnerProfile(cloud.data.ownerProfile);
+                try { await window.storage.set("golf-owner-profile", JSON.stringify(cloud.data.ownerProfile)); } catch {}
+              }
+
               try { await window.storage.set("golf-last-sync", String(cloudTs)); } catch {}
 
               if (localOnlyRounds.length > 0) {
@@ -2898,19 +2924,19 @@ function GolfAppInner() {
   useEffect(() => {
     if (!loaded || !syncCode || !SYNC_ENABLED) return;
     // SAFETY: don't auto-push while a sync conflict modal is open
-    // (otherwise the user's "wait, let me decide" gets overruled by an instant push)
     if (syncConflict) return;
     clearTimeout(syncTimerRef.current);
     syncTimerRef.current = setTimeout(async () => {
       setSyncStatus("syncing");
-      const ok = await cloudPush(syncCode, { rounds, friends, customClubs });
+      // v47.1: trips + ownerProfile mit synchronisieren
+      const ok = await cloudPush(syncCode, { rounds, friends, customClubs, trips, ownerProfile });
       setSyncStatus(ok ? "idle" : "error");
       if (ok) {
         try { await window.storage.set("golf-last-sync", String(Date.now())); } catch {}
       }
     }, 2000);
     return () => clearTimeout(syncTimerRef.current);
-  }, [rounds, friends, customClubs, syncCode, loaded, syncConflict]);
+  }, [rounds, friends, customClubs, trips, ownerProfile, syncCode, loaded, syncConflict]);
 
   // ── Live ticker auto-push (debounced) ─────────────────────────────────────
   // When a live ticker is active, push current round state to Supabase on any change.
@@ -3278,8 +3304,10 @@ function GolfAppInner() {
         dayNumber: i + 1,
         date: d.date || data.startDate,
         roundIds: [],
-        // v43: Flight-Allocation pro Tag
-        flights: {}, // { playerId: "A" | "B" | "C" }
+        // v43+v48: Flight-Allocation pro Tag — bei ≤ 4 Spielern alle in Flight A als Default
+        flights: (data.players || []).length <= 4
+          ? Object.fromEntries((data.players || []).map(p => [p.playerId, "A"]))
+          : {},
       })),
       pots: {
         dayWin: data.pots?.dayWin || 10,
@@ -4120,6 +4148,60 @@ function GolfAppInner() {
     return computeTeamUschiPoints(uschiResult, teams);
   }, [gameMode, uschiResult, teams]);
 
+  // v48: Best Ball+ Result — Team-Total mit Bestem-Score-pro-Loch + optionalen Boni
+  const bestBallResult = useMemo(() => {
+    if (gameMode !== "bestball-plus" || players.length < 2) return null;
+    const result = {
+      perHole: [],          // [{ holeIdx, bestPlayerId, bestSf, bestBrutto, birdies: [pids], ladies: [pids] }]
+      totalSf: 0,           // Team-Gesamt-Score
+      birdieBonus: 0,
+      uschiBonus: 0,
+      total: 0,             // total + bonis
+    };
+    holes.forEach((h, i) => {
+      let bestSf = -Infinity;
+      let bestBrutto = -Infinity;
+      let bestPlayerId = null;
+      const birdiesAtHole = [];
+      const ladiesAtHole = [];
+      players.forEach(p => {
+        const g = scores[p.id]?.[i];
+        if (!isValid(g)) return;
+        // Score je nach Modus
+        const tee = playerTee(p, cfg, selectedClub);
+        if (!tee) return;
+        const { ph } = resolvePlayerPH(p, cfg, selectedClub, par);
+        const hs = holeHS(ph, h.si, holes.length);
+        const sfN = sfNetto(g, hs, h.par) || 0;
+        const sfB = sfBrutto(g, h.par) || 0;
+        const playerSf = bestBallConfig.scoring === "netto" ? sfN : sfB;
+        if (playerSf > bestSf) {
+          bestSf = playerSf;
+          bestBrutto = sfB;
+          bestPlayerId = p.id;
+        }
+        // Birdies (Brutto-Birdie)
+        if (g <= h.par - 1) birdiesAtHole.push(p.id);
+        // Ladies (manuell markiert via ladies-State)
+        if ((ladies[p.id] || []).includes(i)) ladiesAtHole.push(p.id);
+      });
+      if (bestSf < 0) bestSf = 0;
+      result.perHole.push({
+        holeIdx: i,
+        bestPlayerId,
+        bestSf,
+        bestBrutto: Math.max(0, bestBrutto),
+        birdies: birdiesAtHole,
+        ladies: ladiesAtHole,
+      });
+      result.totalSf += bestSf;
+      if (bestBallConfig.birdieBonus) result.birdieBonus += birdiesAtHole.length;
+      if (bestBallConfig.uschiBonus) result.uschiBonus += ladiesAtHole.length;
+    });
+    result.total = result.totalSf + result.birdieBonus + result.uschiBonus;
+    return result;
+  }, [gameMode, players, holes, scores, par, cfg, selectedClub, bestBallConfig, ladies]);
+
   // ── Rounds
   const saveRound = async () => {
     let u;
@@ -4132,7 +4214,7 @@ function GolfAppInner() {
       tees: selectedClub.tees,
       holes: selectedClub.holes,
     } : null;
-    const extra = { gameMode, teams, par3Data, ladies, selectedClubSnapshot: clubSnapshot };
+    const extra = { gameMode, teams, par3Data, ladies, selectedClubSnapshot: clubSnapshot, bestBallConfig: gameMode === "bestball-plus" ? bestBallConfig : null };
     if (loadedRoundId) {
       savedRound = null;
       u = rounds.map(r => {
@@ -4538,6 +4620,18 @@ function GolfAppInner() {
         const cloudClubNames = new Set(cloudClubs.map(c => c.name));
         const mergedClubs = [...cloudClubs, ...customClubs.filter(c => !cloudClubNames.has(c.name))];
 
+        // v47.1: Trips merge — by ID
+        const cloudTrips = Array.isArray(cloud.data.trips) ? cloud.data.trips : [];
+        const cloudTripIds = new Set(cloudTrips.map(t => t.id));
+        const mergedTrips = [...cloudTrips, ...trips.filter(t => !cloudTripIds.has(t.id))];
+
+        // v47.1: Owner-Profile aus Cloud übernehmen falls keiner lokal
+        const cloudOwnerProfile = cloud.data.ownerProfile;
+        if (cloudOwnerProfile && !ownerProfile?.name) {
+          setOwnerProfile(cloudOwnerProfile);
+          try { await window.storage.set("golf-owner-profile", JSON.stringify(cloudOwnerProfile)); } catch {}
+        }
+
         // Now apply the change
         setSyncCode(clean);
         try { await window.storage.set("golf-sync-code", clean); } catch {}
@@ -4546,6 +4640,8 @@ function GolfAppInner() {
         setRounds(merged);
         setFriends(mergedFriends);
         setCustomClubs(mergedClubs);
+        setTrips(mergedTrips);
+        try { await window.storage.set("golf-trips", JSON.stringify(mergedTrips)); } catch {}
 
         setShowSyncModal(false);
         const addedFromCloud = cloudRounds.length;
@@ -5000,6 +5096,39 @@ function GolfAppInner() {
               </div>
             )}
 
+            {/* v48: Sim-HCP-Karte für Focus-Player */}
+            {focusPlayerName && focusPlayerData && (() => {
+              const sim = computeSimHcp(focusPlayerName, allRoundsForStats);
+              if (!sim?.hasEnoughData) return null;
+              return (
+                <div style={{ ...S.card, padding: "12px 14px", marginBottom: "14px", borderColor: `${T.gold}30` }}>
+                  <div style={{ ...S.eyebrow, marginBottom: "10px", color: T.gold }}>📊 Aktuelle Form</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px" }}>
+                    <div style={{ textAlign: "center", padding: "10px 6px", background: T.surface2, borderRadius: "8px" }}>
+                      <div className="mono" style={{ fontSize: "20px", fontWeight: 700, color: T.textSoft, lineHeight: 1 }}>{sim.baseHcp}</div>
+                      <div style={{ fontSize: "9px", color: T.textDim, marginTop: "4px", letterSpacing: "0.06em" }}>OFFIZIELL</div>
+                    </div>
+                    <div style={{ textAlign: "center", padding: "10px 6px", background: `${T.gold}10`, borderRadius: "8px", border: `1px solid ${T.gold}40` }}>
+                      <div className="mono" style={{ fontSize: "20px", fontWeight: 700, color: T.gold, lineHeight: 1 }}>{sim.simHcp}</div>
+                      <div style={{ fontSize: "9px", color: T.textDim, marginTop: "4px", letterSpacing: "0.06em" }}>AKTUELL</div>
+                    </div>
+                    <div style={{ textAlign: "center", padding: "10px 6px", background: T.surface2, borderRadius: "8px" }}>
+                      <div className="mono" style={{
+                        fontSize: "20px", fontWeight: 700, lineHeight: 1,
+                        color: sim.diff > 0 ? T.double : sim.diff < 0 ? T.sage : T.textDim,
+                      }}>
+                        {sim.diff > 0 ? "📈" : sim.diff < 0 ? "📉" : "≈"} {sim.diff > 0 ? "+" : ""}{sim.diff}
+                      </div>
+                      <div style={{ fontSize: "9px", color: T.textDim, marginTop: "4px", letterSpacing: "0.06em" }}>TREND</div>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: "10px", color: T.textDim, marginTop: "8px", textAlign: "center", fontStyle: "italic" }}>
+                    Basierend auf den letzten {sim.roundsUsed} Runden ({Math.round(sim.avgSf)} SF ⌀)
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Personal Hall of Fame for focus player */}
             {focusPlayerName && focusPlayerData && (() => {
               const perHole = focusPlayerData.perHole.filter(h => h.samplesSize > 0);
@@ -5044,7 +5173,10 @@ function GolfAppInner() {
                 <div style={{ ...S.eyebrow, marginBottom: "12px" }}>
                   Spieler-Übersicht <span style={{ fontSize: "10px", color: T.textDim, textTransform: "none", letterSpacing: 0, fontWeight: 400 }}>· tap für Details</span>
                 </div>
-                {stats.playerStats.map((p, i) => (
+                {stats.playerStats.map((p, i) => {
+                  // v49: Sim-HCP für jede Spielerkarte berechnen
+                  const sim = computeSimHcp(p.name, allRoundsForStats);
+                  return (
                   <button key={p.name}
                     onClick={() => setStatsPlayerDetail(p.name)}
                     style={{
@@ -5055,7 +5187,20 @@ function GolfAppInner() {
                       borderRadius: "8px", color: T.text, cursor: "pointer",
                     }}>
                     <div style={{ display: "flex", alignItems: "center", marginBottom: "6px" }}>
-                      <div style={{ fontWeight: 600, fontSize: "14px", color: T.text, flex: 1 }}>{p.name}</div>
+                      <div style={{ fontWeight: 600, fontSize: "14px", color: T.text, flex: 1, display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                        {p.name}
+                        {/* v49: Sim-HCP Trend-Pill direkt am Namen */}
+                        {sim?.hasEnoughData && (
+                          <span style={{
+                            fontSize: "9px", letterSpacing: "0.04em", padding: "2px 6px", borderRadius: "4px",
+                            background: sim.diff > 0 ? `${T.double}15` : sim.diff < 0 ? `${T.sage}15` : `${T.textDim}15`,
+                            color: sim.diff > 0 ? T.double : sim.diff < 0 ? T.sage : T.textDim,
+                            fontWeight: 700,
+                          }}>
+                            Sim {sim.simHcp} {sim.diff > 0 ? "↑" : sim.diff < 0 ? "↓" : "→"}{sim.diff !== 0 ? Math.abs(sim.diff) : ""}
+                          </span>
+                        )}
+                      </div>
                       <div style={{ fontSize: "11px", color: T.textDim, marginRight: "8px" }}>
                         {p.roundsPlayed} Rd
                       </div>
@@ -5105,7 +5250,8 @@ function GolfAppInner() {
                       </div>
                     )}
                   </button>
-                ))}
+                  );
+                })}
               </div>
             )}
 
@@ -6242,10 +6388,12 @@ function GolfAppInner() {
   const renderGameModeCard = () => {
     const canTeam = players.length === 4;
     const canUschi = players.length >= 2;
+    const canBestBall = players.length >= 2 && players.length <= 8;
     const modes = [
-      { k: "stableford",  l: "Stableford Netto",  sub: "Klassisch, Punkte pro Loch",     emoji: "⛳" },
-      { k: "uschi-single",l: "Uschi (Einzel)",    sub: canUschi ? "Low/Best Ball · Birdies · Uschi" : "Braucht ≥ 2 Spieler", emoji: "🎯", needsMin: !canUschi },
-      { k: "uschi-team",  l: "Uschi (2 vs 2)",    sub: canTeam ? "Teamwertung · nur bei 4 Spielern" : "Braucht genau 4 Spieler", emoji: "🎯🤝", needsMin: !canTeam },
+      { k: "stableford",   l: "Stableford Netto", sub: "Klassisch, Punkte pro Loch",     emoji: "⛳" },
+      { k: "bestball-plus",l: "Best Ball+",       sub: canBestBall ? "Bestes Team-Ergebnis pro Loch · 2-8 Spieler" : "Braucht 2-8 Spieler", emoji: "☄️", needsMin: !canBestBall },
+      { k: "uschi-single", l: "Uschi (Einzel)",   sub: canUschi ? "Low/Best Ball · Birdies · Uschi" : "Braucht ≥ 2 Spieler", emoji: "🎯", needsMin: !canUschi },
+      { k: "uschi-team",   l: "Uschi (2 vs 2)",   sub: canTeam ? "Teamwertung · nur bei 4 Spielern" : "Braucht genau 4 Spieler", emoji: "🎯🤝", needsMin: !canTeam },
     ];
 
     return (
@@ -6257,7 +6405,6 @@ function GolfAppInner() {
             return (
               <button key={m.k}
                 onClick={() => {
-                  // v42: Pop-Up statt stumm disabled
                   if (m.k === "uschi-single" && !canUschi) {
                     showUndoToast(`⚠️ Uschi braucht mindestens 2 Spieler — du hast aktuell ${players.length}`, null);
                     return;
@@ -6266,12 +6413,16 @@ function GolfAppInner() {
                     showUndoToast(`⚠️ Uschi 2v2 braucht genau 4 Spieler — du hast aktuell ${players.length}`, null);
                     return;
                   }
+                  if (m.k === "bestball-plus" && !canBestBall) {
+                    showUndoToast(`⚠️ Best Ball+ braucht 2-8 Spieler — du hast aktuell ${players.length}`, null);
+                    return;
+                  }
                   setGameMode(m.k);
                   if (m.k === "uschi-team" && canTeam && !teams) {
                     const strokes = uschiAdjustedStrokes(players, cfg, selectedClub, holes);
                     setTeams(autoAssignTeams(strokes));
                   }
-                  if (m.k === "stableford") setTeams(null);
+                  if (m.k === "stableford" || m.k === "bestball-plus") setTeams(null);
                 }}
                 style={{
                   padding: "14px 16px", textAlign: "left",
@@ -6295,14 +6446,151 @@ function GolfAppInner() {
           })}
         </div>
 
+        {/* v48: Best Ball+ Configuration */}
+        {gameMode === "bestball-plus" && canBestBall && renderBestBallConfig()}
+
         {/* Uschi Strokes Preview */}
-        {gameMode !== "stableford" && players.length >= 2 && renderUschiStrokesPreview()}
+        {(gameMode === "uschi-single" || gameMode === "uschi-team") && players.length >= 2 && renderUschiStrokesPreview()}
 
         {/* Team Assignment UI */}
         {gameMode === "uschi-team" && canTeam && renderTeamAssignmentUI()}
       </div>
     );
   };
+
+  // v48: Best Ball+ Config-UI im Setup
+  const renderBestBallConfig = () => (
+    <>
+      <div style={{ marginTop: "14px", padding: "14px", background: T.surface2, borderRadius: "10px", border: `1px solid ${T.gold}40` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+          <div style={{ ...S.eyebrow, color: T.gold }}>☄️ Best Ball+ · Konfiguration</div>
+          <button
+            onClick={() => setShowBestBallExplain(true)}
+            title="Was ist Best Ball+?"
+            style={{ background: "transparent", border: `1px solid ${T.gold}40`, color: T.gold, borderRadius: "50%", width: "26px", height: "26px", fontSize: "13px", cursor: "pointer", fontWeight: 700 }}>
+            ?
+          </button>
+        </div>
+
+        <p style={{ fontSize: "11px", color: T.textSoft, lineHeight: 1.5, marginBottom: "12px", margin: "0 0 12px" }}>
+          Alle {players.length} Spieler bilden <b>ein Team</b>. Pro Loch zählt der beste Score.
+        </p>
+
+        {/* Scoring-Toggle */}
+        <div style={{ marginBottom: "10px" }}>
+          <div style={{ fontSize: "10px", color: T.textDim, fontWeight: 700, letterSpacing: "0.04em", marginBottom: "5px" }}>WERTUNG</div>
+          <div style={{ display: "flex", gap: "6px" }}>
+            {[
+              { v: "netto", l: "Netto (mit HCP-Vorgabe)" },
+              { v: "brutto", l: "Brutto (rohe SF)" },
+            ].map(opt => (
+              <button key={opt.v}
+                onClick={() => setBestBallConfig(c => ({ ...c, scoring: opt.v }))}
+                style={{
+                  flex: 1, padding: "8px 6px",
+                  background: bestBallConfig.scoring === opt.v ? `${T.gold}25` : T.surface1,
+                  color: bestBallConfig.scoring === opt.v ? T.gold : T.textSoft,
+                  border: `1px solid ${bestBallConfig.scoring === opt.v ? T.gold : T.line}`,
+                  borderRadius: "8px", fontSize: "11px", fontWeight: 600, cursor: "pointer",
+                }}>
+                {opt.l}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Add-Ons */}
+        <div>
+          <div style={{ fontSize: "10px", color: T.textDim, fontWeight: 700, letterSpacing: "0.04em", marginBottom: "5px" }}>OPTIONALE BONI</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+            <button
+              onClick={() => setBestBallConfig(c => ({ ...c, birdieBonus: !c.birdieBonus }))}
+              style={{
+                display: "flex", alignItems: "center", gap: "10px",
+                padding: "10px 12px",
+                background: bestBallConfig.birdieBonus ? `${T.gold}10` : T.surface1,
+                border: `1px solid ${bestBallConfig.birdieBonus ? T.gold : T.line}`,
+                borderRadius: "8px", textAlign: "left", cursor: "pointer",
+              }}>
+              <div style={{
+                width: "18px", height: "18px", borderRadius: "4px",
+                border: `2px solid ${bestBallConfig.birdieBonus ? T.gold : T.textDim}`,
+                background: bestBallConfig.birdieBonus ? T.gold : "transparent",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                color: T.canvas, fontSize: "11px", fontWeight: 700,
+              }}>
+                {bestBallConfig.birdieBonus && "✓"}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: "12px", fontWeight: 600, color: T.text }}>🎯 Birdie-Bonus</div>
+                <div style={{ fontSize: "10px", color: T.textDim }}>+1 Extra-Punkt pro Birdie ans Team</div>
+              </div>
+            </button>
+            <button
+              onClick={() => setBestBallConfig(c => ({ ...c, uschiBonus: !c.uschiBonus }))}
+              style={{
+                display: "flex", alignItems: "center", gap: "10px",
+                padding: "10px 12px",
+                background: bestBallConfig.uschiBonus ? `${T.gold}10` : T.surface1,
+                border: `1px solid ${bestBallConfig.uschiBonus ? T.gold : T.line}`,
+                borderRadius: "8px", textAlign: "left", cursor: "pointer",
+              }}>
+              <div style={{
+                width: "18px", height: "18px", borderRadius: "4px",
+                border: `2px solid ${bestBallConfig.uschiBonus ? T.gold : T.textDim}`,
+                background: bestBallConfig.uschiBonus ? T.gold : "transparent",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                color: T.canvas, fontSize: "11px", fontWeight: 700,
+              }}>
+                {bestBallConfig.uschiBonus && "✓"}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: "12px", fontWeight: 600, color: T.text }}>🎀 Uschi-Bonus</div>
+                <div style={{ fontSize: "10px", color: T.textDim }}>+1 Punkt für jede Lady (Net-Eagle oder besser)</div>
+              </div>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Erklär-Modal */}
+      {showBestBallExplain && (
+        <div onClick={() => setShowBestBallExplain(false)}
+          style={{ position: "fixed", inset: 0, background: "#000000ee", zIndex: 1300, display: "flex", alignItems: "center", justifyContent: "center", padding: "20px" }}>
+          <div onClick={e => e.stopPropagation()}
+            style={{ ...S.card, maxWidth: "440px", width: "100%", padding: "20px", borderColor: `${T.gold}50` }}>
+            <h4 className="serif" style={{ fontSize: "20px", margin: "0 0 8px", color: T.gold }}>☄️ Best Ball+</h4>
+            <p style={{ fontSize: "13px", color: T.textSoft, lineHeight: 1.6, marginBottom: "12px" }}>
+              Ein lockerer Team-Modus für 2-8 Spieler. Alle bilden ein Team, pro Loch zählt der beste Score fürs Team-Total.
+            </p>
+            <div style={{ background: T.surface2, padding: "12px", borderRadius: "8px", marginBottom: "10px" }}>
+              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "4px" }}>📋 Wertung</div>
+              <div style={{ fontSize: "11px", color: T.text, lineHeight: 1.5 }}>
+                <b>Netto:</b> SF-Punkte mit HCP-Vorgabe (Default — fairer für gemischte HCPs).<br/>
+                <b>Brutto:</b> rohe SF-Punkte ohne Vorgabe.
+              </div>
+            </div>
+            <div style={{ background: T.surface2, padding: "12px", borderRadius: "8px", marginBottom: "10px" }}>
+              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "4px" }}>🎯 Birdie-Bonus (optional)</div>
+              <div style={{ fontSize: "11px", color: T.text, lineHeight: 1.5 }}>
+                Jeder Birdie eines Spielers bringt dem Team einen <b>Extra-Punkt</b> zusätzlich zum besten Loch-Score.
+              </div>
+            </div>
+            <div style={{ background: T.surface2, padding: "12px", borderRadius: "8px", marginBottom: "16px" }}>
+              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "4px" }}>🎀 Uschi-Bonus (optional)</div>
+              <div style={{ fontSize: "11px", color: T.text, lineHeight: 1.5 }}>
+                Jede „Lady" (Net-Eagle oder besser) bringt einen Extra-Punkt. Markierst du im Score-Screen lange auf einer Zahl.
+              </div>
+            </div>
+            <button onClick={() => setShowBestBallExplain(false)} className="gold-hover" style={{ ...S.btnPrimary, width: "100%" }}>
+              Verstanden
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+
 
   const renderUschiStrokesPreview = () => {
     const strokes = uschiAdjustedStrokes(players, cfg, selectedClub, holes);
@@ -7261,6 +7549,24 @@ function GolfAppInner() {
                           <>Vorgabe <span className="mono">{s.ph}</span> · Brutto <span className="mono">{s.bT || "—"}{s.strichCount > 0 ? "*" : ""}</span> · Schläge <span className="mono" style={{ color: T.gold }}>{s.totalStr || "—"}</span></>
                         )}
                       </div>
+                      {/* v48: Live-Pace-Anzeige (ab Loch 5) */}
+                      {!isUschi && (() => {
+                        const playedHoles = s.hr.filter(h => isValid(h.g) || isStrich(h.g)).length;
+                        if (playedHoles < 5) return null;
+                        const projectedSf = Math.round(s.sfNT / playedHoles * 18);
+                        const sim = computeSimHcp(p.playerId || p.name, rounds);
+                        const targetSf = 36; // Auf-HCP-gespielt = 36 SF
+                        const trend = projectedSf > targetSf ? "📈" : projectedSf < targetSf - 5 ? "📉" : "→";
+                        const trendColor = projectedSf > targetSf ? T.sage : projectedSf < targetSf - 5 ? T.double : T.textDim;
+                        return (
+                          <div style={{ fontSize: "10px", color: T.textDim, marginTop: "2px", fontStyle: "italic" }}>
+                            {trend} <span style={{ color: trendColor, fontWeight: 600 }}>Pace {projectedSf}</span> SF
+                            {sim?.hasEnoughData && (
+                              <> · ⌀ <span className="mono">{Math.round(sim.avgSf)}</span></>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
                     <div style={{ textAlign: "right" }}>
                       {isUschi ? (
@@ -7308,6 +7614,32 @@ function GolfAppInner() {
                       </div>
                     );
                   })}
+                </div>
+              </div>
+            )}
+
+            {/* v48: Best Ball+ Team-Total */}
+            {gameMode === "bestball-plus" && bestBallResult && (
+              <div style={{ marginTop: "10px", paddingTop: "10px", borderTop: `1px solid ${T.lineStrong}` }}>
+                <div style={{ fontSize: "9px", color: T.textDim, letterSpacing: "0.08em", fontWeight: 600, marginBottom: "6px" }}>☄️ TEAM-TOTAL · BEST BALL+</div>
+                <div style={{ background: `${T.gold}15`, borderRadius: "10px", padding: "10px 14px", border: `1px solid ${T.gold}40` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ fontSize: "11px", color: T.textSoft }}>
+                      {players.length} Spieler · {bestBallConfig.scoring === "netto" ? "Netto" : "Brutto"}
+                    </div>
+                    <div className="mono" style={{ fontSize: "22px", fontWeight: 800, color: T.gold }}>{bestBallResult.total}</div>
+                  </div>
+                  {(bestBallResult.birdieBonus > 0 || bestBallResult.uschiBonus > 0) && (
+                    <div style={{ display: "flex", gap: "8px", marginTop: "6px", flexWrap: "wrap", fontSize: "10px" }}>
+                      <span style={{ color: T.textDim }}>Beste Löcher: <span className="mono" style={{ color: T.text, fontWeight: 600 }}>{bestBallResult.totalSf}</span></span>
+                      {bestBallResult.birdieBonus > 0 && (
+                        <span style={{ color: T.gold }}>🎯 Birdies: <span className="mono" style={{ fontWeight: 600 }}>+{bestBallResult.birdieBonus}</span></span>
+                      )}
+                      {bestBallResult.uschiBonus > 0 && (
+                        <span style={{ color: T.gold }}>🎀 Ladies: <span className="mono" style={{ fontWeight: 600 }}>+{bestBallResult.uschiBonus}</span></span>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -10024,6 +10356,30 @@ WICHTIG:
                 </p>
               </div>
 
+              {/* v48: Sim-HCP — aktuelle Form */}
+              {(() => {
+                const sim = computeSimHcp(focused.playerId || focused.name, rounds);
+                if (!sim?.hasEnoughData) return null;
+                return (
+                  <div style={{ ...S.card, padding: "14px", marginBottom: "12px", borderColor: `${T.gold}30` }}>
+                    <div style={{ ...S.eyebrow, marginBottom: "8px", color: T.gold }}>📊 Sim-HCP · aktuelle Form</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                      <div className="mono" style={{ fontSize: "26px", fontWeight: 700, color: T.gold }}>{sim.simHcp}</div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: "11px", color: T.text }}>
+                          Diff zum offiziellen: <span style={{ color: sim.diff > 0 ? T.double : sim.diff < 0 ? T.sage : T.textDim, fontWeight: 700 }}>
+                            {sim.diff > 0 ? "📈 +" : sim.diff < 0 ? "📉 " : "≈ "}{sim.diff}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: "10px", color: T.textDim, marginTop: "2px" }}>
+                          Aus letzten {sim.roundsUsed} Runden · ⌀ {Math.round(sim.avgSf)} SF
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* HCP-History */}
               {(focused.hcpHistory?.length > 0) && (
                 <div style={{ ...S.card, padding: "14px", marginBottom: "12px" }}>
@@ -10712,6 +11068,12 @@ WICHTIG:
                 {/* Flight-Allocation pro Spieler */}
                 <div style={{ marginTop: "8px" }}>
                   <div style={{ fontSize: "9px", color: T.textDim, fontWeight: 700, letterSpacing: "0.04em", marginBottom: "5px" }}>FLIGHT-ZUTEILUNG</div>
+                  {/* v48: Hinweis bei ≤ 4 Spielern */}
+                  {trip.players.length <= 4 && (
+                    <p style={{ fontSize: "10px", color: T.textDim, marginBottom: "8px", lineHeight: 1.4, fontStyle: "italic" }}>
+                      💡 Bei {trip.players.length} Spielern wird ein Flight gespielt — alle automatisch in A. Aufteilung optional.
+                    </p>
+                  )}
                   <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
                     {trip.players.map(tp => {
                       const flight = day.flights?.[tp.playerId] || "";
@@ -11789,6 +12151,13 @@ WICHTIG:
       setRounds(cloudData.rounds || []);
       setFriends(cloudData.friends || []);
       setCustomClubs(cloudData.customClubs || []);
+      // v47.1: Trips + Owner-Profile aus Cloud
+      setTrips(cloudData.trips || []);
+      try { await window.storage.set("golf-trips", JSON.stringify(cloudData.trips || [])); } catch {}
+      if (cloudData.ownerProfile) {
+        setOwnerProfile(cloudData.ownerProfile);
+        try { await window.storage.set("golf-owner-profile", JSON.stringify(cloudData.ownerProfile)); } catch {}
+      }
       // If manual code entry, commit the code switch
       if (syncConflict.pendingCode) {
         setSyncCode(syncConflict.pendingCode);
@@ -11831,6 +12200,21 @@ WICHTIG:
       setRounds(merged);
       setFriends(mergedFriends);
       setCustomClubs(mergedClubs);
+
+      // v47.1: Trips merge by ID
+      const cloudTrips = syncConflict.cloudData.trips || [];
+      const cloudTripIds = new Set(cloudTrips.map(t => t.id));
+      const localTripsRaw = await window.storage.get("golf-trips");
+      const localTrips = localTripsRaw?.value ? JSON.parse(localTripsRaw.value) : [];
+      const mergedTrips = [...cloudTrips, ...localTrips.filter(t => !cloudTripIds.has(t.id))];
+      setTrips(mergedTrips);
+      try { await window.storage.set("golf-trips", JSON.stringify(mergedTrips)); } catch {}
+
+      // v47.1: Owner-Profile aus Cloud falls keiner lokal
+      if (syncConflict.cloudData.ownerProfile && !ownerProfile?.name) {
+        setOwnerProfile(syncConflict.cloudData.ownerProfile);
+        try { await window.storage.set("golf-owner-profile", JSON.stringify(syncConflict.cloudData.ownerProfile)); } catch {}
+      }
       // If manual code entry, commit the code switch
       if (syncConflict.pendingCode) {
         setSyncCode(syncConflict.pendingCode);
@@ -12807,11 +13191,11 @@ WICHTIG:
                   onClick={async () => {
                     if (!confirm("Lokalen Stand zur Cloud hochladen? Falls Cloud schon Daten hat, werden sie dadurch ersetzt.")) return;
                     setSyncStatus("syncing");
-                    const ok = await cloudPush(syncCode, { rounds, friends, customClubs });
+                    const ok = await cloudPush(syncCode, { rounds, friends, customClubs, trips, ownerProfile });
                     setSyncStatus(ok ? "idle" : "error");
                     if (ok) {
                       try { await window.storage.set("golf-last-sync", String(Date.now())); } catch {}
-                      alert(`✓ ${rounds.length} Runden zur Cloud hochgeladen`);
+                      alert(`✓ ${rounds.length} Runden, ${friends.length} Freunde, ${customClubs.length} Clubs, ${trips.length} Trips zur Cloud hochgeladen`);
                     } else {
                       alert("Push fehlgeschlagen — bist du online?");
                     }
