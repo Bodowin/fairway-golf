@@ -943,7 +943,7 @@ const BUILT_IN_CLUBS = [
 const STRICH = null;
 
 // ─── v40: Versions-Marker — sichtbar im App-Footer ──────────────────────────
-const APP_VERSION = "v53";
+const APP_VERSION = "v54";
 const APP_BUILD_DATE = "2026-05-02";
 
 function makeHoles(totalPar, numHoles) {
@@ -2821,6 +2821,11 @@ function GolfAppInner() {
   const [showStatsImport, setShowStatsImport] = useState(false);
   // v53: Clubs-Übersichts-Modal
   const [showClubsModal, setShowClubsModal] = useState(false);
+  // v54: Daten-Aufräum-Modal
+  const [showCleanup, setShowCleanup] = useState(false);
+  const [cleanupSelection, setCleanupSelection] = useState({ testRounds: true, badNameRounds: false, emptyTrips: true, unfinishedRounds: false });
+  // v54: Saison-Range im Form-Tab
+  const [seasonRangeState, setSeasonRangeState] = useState("30d"); // "30d" | "90d" | "season"
   const [statsImportInput, setStatsImportInput] = useState("");
   const [statsImportLoading, setStatsImportLoading] = useState(false);
   // Round analysis modal — holds the round ID being analyzed (null = closed)
@@ -2926,6 +2931,15 @@ function GolfAppInner() {
   const [lastScoreEntry, setLastScoreEntry] = useState(null);
   // Rounds list search query (only visible when >= 8 rounds saved)
   const [roundsQuery, setRoundsQuery] = useState("");
+  // v54: Runden-Filter
+  const [roundsFilter, setRoundsFilter] = useState({
+    club: "",        // "" = alle, "ClubName"
+    mode: "",        // "" = alle, "stableford" | "uschi-single" | "uschi-team" | "bestball-plus"
+    tripId: "",      // "" = alle, "tripId" oder "__none__" für ohne Trip
+    timeRange: "",   // "" = alle, "30d" | "90d" | "season"
+    playerId: "",    // "" = alle, playerId oder name
+  });
+  const [showRoundsFilter, setShowRoundsFilter] = useState(false);
   const [loadedRoundId, setLoadedRoundId] = useState(null); // track which round is being viewed/edited
   // Scoring mode
   const [scoringMode, setScoringMode] = useState("batch"); // batch | live
@@ -6033,18 +6047,68 @@ function GolfAppInner() {
                 ? <EmptyState icon="🏌️" title="Noch keine Runden" sub="Deine gespielten Runden erscheinen hier." />
                 : (() => {
                     const q = roundsQuery.trim().toLowerCase();
-                    const filtered = q
-                      ? rounds.filter(r => {
-                          const club = (r.cfg?.clubName || "").toLowerCase();
-                          const playerNames = (r.players || []).map(p => p.name.toLowerCase()).join(" ");
-                          return club.includes(q) || playerNames.includes(q);
-                        })
-                      : rounds;
+                    // v54: Filter anwenden
+                    const now = Date.now();
+                    const seasonStart = new Date(new Date().getFullYear(), 3, 1).getTime(); // 1. April
+                    const filterMatches = (r) => {
+                      // Club-Filter
+                      if (roundsFilter.club && r.cfg?.clubName !== roundsFilter.club) return false;
+                      // Modus-Filter
+                      if (roundsFilter.mode) {
+                        const rMode = r.gameMode || "stableford";
+                        if (rMode !== roundsFilter.mode) return false;
+                      }
+                      // Trip-Filter
+                      if (roundsFilter.tripId) {
+                        if (roundsFilter.tripId === "__none__") {
+                          if (r.cfg?.tripContext?.tripId) return false;
+                        } else {
+                          if (r.cfg?.tripContext?.tripId !== roundsFilter.tripId) return false;
+                        }
+                      }
+                      // Zeitraum-Filter
+                      if (roundsFilter.timeRange) {
+                        const rDate = new Date(r.cfg?.date || r.savedAt || 0).getTime();
+                        if (roundsFilter.timeRange === "30d" && (now - rDate) > 30 * 86400 * 1000) return false;
+                        if (roundsFilter.timeRange === "90d" && (now - rDate) > 90 * 86400 * 1000) return false;
+                        if (roundsFilter.timeRange === "season" && rDate < seasonStart) return false;
+                      }
+                      // Spieler-Filter
+                      if (roundsFilter.playerId) {
+                        const hasPlayer = (r.players || []).some(p => {
+                          if (p.playerId && p.playerId === roundsFilter.playerId) return true;
+                          return normName(p.name) === normName(roundsFilter.playerId);
+                        });
+                        if (!hasPlayer) return false;
+                      }
+                      return true;
+                    };
+
+                    let filtered = rounds.filter(filterMatches);
+                    if (q) {
+                      filtered = filtered.filter(r => {
+                        const club = (r.cfg?.clubName || "").toLowerCase();
+                        const playerNames = (r.players || []).map(p => p.name.toLowerCase()).join(" ");
+                        return club.includes(q) || playerNames.includes(q);
+                      });
+                    }
+
                     const showSearch = rounds.length >= 8;
+                    const activeFilterCount = Object.values(roundsFilter).filter(v => v).length;
+                    const allClubs = Array.from(new Set(rounds.map(r => r.cfg?.clubName).filter(Boolean))).sort();
+                    const allModes = Array.from(new Set(rounds.map(r => r.gameMode || "stableford")));
+                    const playedTrips = trips.filter(t => rounds.some(r => r.cfg?.tripContext?.tripId === t.id));
+                    const allPlayerEntries = new Map();
+                    rounds.forEach(r => (r.players || []).forEach(p => {
+                      const key = p.playerId || normName(p.name);
+                      if (!allPlayerEntries.has(key)) allPlayerEntries.set(key, { id: key, name: p.name });
+                    }));
+                    const allPlayers = Array.from(allPlayerEntries.values()).sort((a, b) => a.name.localeCompare(b.name));
+
                     return (
                       <>
                         {showSearch && (
-                          <div style={{ position: "relative", marginBottom: "12px" }}>
+                          <div style={{ position: "relative", marginBottom: "10px" }}>
                             <input
                               type="text"
                               value={roundsQuery}
@@ -6071,15 +6135,118 @@ function GolfAppInner() {
                             )}
                           </div>
                         )}
-                        <div style={{ ...S.eyebrow, marginBottom: "10px" }}>
-                          {q ? `${filtered.length} Treffer` : (rounds.length <= 5 ? "Letzte Runden" : `Alle Runden (${rounds.length})`)}
+
+                        {/* v54: Filter-Bar */}
+                        <div style={{ marginBottom: "12px" }}>
+                          <button
+                            onClick={() => setShowRoundsFilter(!showRoundsFilter)}
+                            style={{
+                              display: "flex", alignItems: "center", gap: "8px",
+                              padding: "8px 12px",
+                              background: activeFilterCount > 0 ? `${T.gold}15` : T.surface2,
+                              border: `1px solid ${activeFilterCount > 0 ? T.gold : T.line}`,
+                              borderRadius: "8px", fontSize: "12px", color: T.text,
+                              cursor: "pointer", width: "100%",
+                            }}>
+                            <span style={{ flex: 1, textAlign: "left", color: activeFilterCount > 0 ? T.gold : T.textSoft }}>
+                              🔍 Filter {activeFilterCount > 0 && `(${activeFilterCount} aktiv)`}
+                            </span>
+                            <span style={{ color: T.textDim }}>{showRoundsFilter ? "▲" : "▼"}</span>
+                          </button>
+                          {showRoundsFilter && (
+                            <div style={{ marginTop: "8px", padding: "12px", background: T.surface1, border: `1px solid ${T.line}`, borderRadius: "10px", display: "flex", flexDirection: "column", gap: "10px" }}>
+                              {/* Club */}
+                              {allClubs.length > 1 && (
+                                <div>
+                                  <div style={{ fontSize: "10px", color: T.textDim, fontWeight: 700, marginBottom: "4px", letterSpacing: "0.04em" }}>CLUB</div>
+                                  <select value={roundsFilter.club} onChange={e => setRoundsFilter(f => ({ ...f, club: e.target.value }))}
+                                    style={{ ...S.input, fontSize: "12px", padding: "8px 10px", width: "100%" }}>
+                                    <option value="">Alle ({allClubs.length})</option>
+                                    {allClubs.map(c => <option key={c} value={c}>{c}</option>)}
+                                  </select>
+                                </div>
+                              )}
+                              {/* Modus */}
+                              {allModes.length > 1 && (
+                                <div>
+                                  <div style={{ fontSize: "10px", color: T.textDim, fontWeight: 700, marginBottom: "4px", letterSpacing: "0.04em" }}>SPIELMODUS</div>
+                                  <select value={roundsFilter.mode} onChange={e => setRoundsFilter(f => ({ ...f, mode: e.target.value }))}
+                                    style={{ ...S.input, fontSize: "12px", padding: "8px 10px", width: "100%" }}>
+                                    <option value="">Alle</option>
+                                    {allModes.includes("stableford") && <option value="stableford">⛳ Stableford</option>}
+                                    {allModes.includes("uschi-single") && <option value="uschi-single">🎯 Uschi (Einzel)</option>}
+                                    {allModes.includes("uschi-team") && <option value="uschi-team">🎯 Uschi (Team)</option>}
+                                    {allModes.includes("bestball-plus") && <option value="bestball-plus">☄️ Best Ball+</option>}
+                                  </select>
+                                </div>
+                              )}
+                              {/* Trip */}
+                              {playedTrips.length > 0 && (
+                                <div>
+                                  <div style={{ fontSize: "10px", color: T.textDim, fontWeight: 700, marginBottom: "4px", letterSpacing: "0.04em" }}>TRIP</div>
+                                  <select value={roundsFilter.tripId} onChange={e => setRoundsFilter(f => ({ ...f, tripId: e.target.value }))}
+                                    style={{ ...S.input, fontSize: "12px", padding: "8px 10px", width: "100%" }}>
+                                    <option value="">Alle</option>
+                                    <option value="__none__">— Ohne Trip —</option>
+                                    {playedTrips.map(t => <option key={t.id} value={t.id}>🏖️ {t.name}</option>)}
+                                  </select>
+                                </div>
+                              )}
+                              {/* Zeitraum */}
+                              <div>
+                                <div style={{ fontSize: "10px", color: T.textDim, fontWeight: 700, marginBottom: "4px", letterSpacing: "0.04em" }}>ZEITRAUM</div>
+                                <div style={{ display: "flex", gap: "4px" }}>
+                                  {[
+                                    { v: "", l: "Alle" },
+                                    { v: "30d", l: "30 Tage" },
+                                    { v: "90d", l: "90 Tage" },
+                                    { v: "season", l: "Saison" },
+                                  ].map(opt => (
+                                    <button key={opt.v}
+                                      onClick={() => setRoundsFilter(f => ({ ...f, timeRange: opt.v }))}
+                                      style={{
+                                        flex: 1, padding: "6px 4px",
+                                        background: roundsFilter.timeRange === opt.v ? `${T.gold}25` : T.surface2,
+                                        color: roundsFilter.timeRange === opt.v ? T.gold : T.textSoft,
+                                        border: `1px solid ${roundsFilter.timeRange === opt.v ? T.gold : T.line}`,
+                                        borderRadius: "6px", fontSize: "11px", fontWeight: 600, cursor: "pointer",
+                                      }}>
+                                      {opt.l}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                              {/* Spieler */}
+                              {allPlayers.length > 1 && (
+                                <div>
+                                  <div style={{ fontSize: "10px", color: T.textDim, fontWeight: 700, marginBottom: "4px", letterSpacing: "0.04em" }}>SPIELER</div>
+                                  <select value={roundsFilter.playerId} onChange={e => setRoundsFilter(f => ({ ...f, playerId: e.target.value }))}
+                                    style={{ ...S.input, fontSize: "12px", padding: "8px 10px", width: "100%" }}>
+                                    <option value="">Alle</option>
+                                    {allPlayers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                                  </select>
+                                </div>
+                              )}
+                              {activeFilterCount > 0 && (
+                                <button
+                                  onClick={() => setRoundsFilter({ club: "", mode: "", tripId: "", timeRange: "", playerId: "" })}
+                                  style={{ ...S.btnGhost, fontSize: "11px", padding: "8px", width: "100%" }}>
+                                  Filter zurücksetzen
+                                </button>
+                              )}
+                            </div>
+                          )}
                         </div>
-                        {filtered.length === 0 && q ? (
+
+                        <div style={{ ...S.eyebrow, marginBottom: "10px" }}>
+                          {q || activeFilterCount > 0 ? `${filtered.length} Treffer` : (rounds.length <= 5 ? "Letzte Runden" : `Alle Runden (${rounds.length})`)}
+                        </div>
+                        {filtered.length === 0 && (q || activeFilterCount > 0) ? (
                           <div style={{ padding: "20px", textAlign: "center", color: T.textDim, fontSize: "13px" }}>
-                            Kein Treffer für „{roundsQuery}"
+                            Kein Treffer{q ? ` für „${roundsQuery}"` : " mit aktuellen Filtern"}
                           </div>
                         ) : (
-                          (q ? filtered : filtered.slice(0, 20)).map(r => renderRoundCard(r, false))
+                          ((q || activeFilterCount > 0) ? filtered : filtered.slice(0, 20)).map(r => renderRoundCard(r, false))
                         )}
                       </>
                     );
@@ -6307,6 +6474,69 @@ function GolfAppInner() {
               ? [...crewData].sort((a, b) => b.sim.diff - a.sim.diff)[0]
               : null;
 
+            // v54: Spielfrequenz für Owner — Tage zwischen Runden im Schnitt (letzte 90 Tage)
+            let avgFrequency = null;
+            let frequencyTrend = null;
+            if (ownerName) {
+              const now = Date.now();
+              const ownerRounds = rounds
+                .filter(r => (r.players || []).some(p => normName(p.name) === normName(ownerName)))
+                .map(r => new Date(r.cfg?.date || r.savedAt || 0).getTime())
+                .filter(t => t > 0)
+                .sort((a, b) => b - a); // neueste zuerst
+
+              if (ownerRounds.length >= 2) {
+                // Letzte 90 Tage
+                const last90 = ownerRounds.filter(t => (now - t) <= 90 * 86400 * 1000);
+                if (last90.length >= 2) {
+                  const span = (last90[0] - last90[last90.length - 1]) / 86400 / 1000;
+                  avgFrequency = Math.round(span / (last90.length - 1));
+                  // Trend: letzte 30 vs vorherige 30
+                  const last30 = ownerRounds.filter(t => (now - t) <= 30 * 86400 * 1000);
+                  const prev30 = ownerRounds.filter(t => (now - t) > 30 * 86400 * 1000 && (now - t) <= 60 * 86400 * 1000);
+                  if (last30.length >= 2 && prev30.length >= 2) {
+                    if (last30.length > prev30.length) frequencyTrend = "up";
+                    else if (last30.length < prev30.length) frequencyTrend = "down";
+                  }
+                }
+              }
+            }
+
+            // v54: Saison-Übersicht — SF-Verlauf für Owner über Zeit
+            const [seasonRange, _x] = [seasonRangeState || "30d", null]; // 30d | 90d | season
+            const seasonRoundsRaw = ownerName ? rounds
+              .filter(r => (r.players || []).some(p => normName(p.name) === normName(ownerName)))
+              .map(r => {
+                const player = (r.players || []).find(p => normName(p.name) === normName(ownerName));
+                if (!player || !r.holes?.length) return null;
+                const par = r.holes.reduce((s, h) => s + h.par, 0);
+                const { ph } = resolvePlayerPH(player, r.cfg, r.selectedClubSnapshot, par);
+                let sf = 0, played = 0;
+                r.holes.forEach((h, i) => {
+                  const g = r.scores?.[player.id]?.[i];
+                  if (!isValid(g) && !isStrich(g)) return;
+                  played++;
+                  const hs = holeHS(ph, h.si, r.holes.length);
+                  sf += sfNetto(g, hs, h.par) || 0;
+                });
+                if (played < r.holes.length * 0.5) return null;
+                return {
+                  sf: r.holes.length === 9 ? sf * 2 : sf,
+                  date: new Date(r.cfg?.date || r.savedAt || 0).getTime(),
+                  club: r.cfg?.clubName,
+                };
+              })
+              .filter(Boolean) : [];
+
+            const now = Date.now();
+            const seasonStart = new Date(new Date().getFullYear(), 3, 1).getTime();
+            const seasonRounds = seasonRoundsRaw.filter(r => {
+              if (seasonRange === "30d") return (now - r.date) <= 30 * 86400 * 1000;
+              if (seasonRange === "90d") return (now - r.date) <= 90 * 86400 * 1000;
+              if (seasonRange === "season") return r.date >= seasonStart;
+              return true;
+            }).sort((a, b) => a.date - b.date);
+
             return (
               <>
                 {/* v53: Rekord-Banner — wenn jemand seinen persönlichen Rekord brach */}
@@ -6413,6 +6643,93 @@ function GolfAppInner() {
                             <div style={{ fontSize: "10px", color: T.textDim, marginTop: "8px", lineHeight: 1.4, fontStyle: "italic" }}>
                               ⌀ {ownerSim.avgSf} SF · {ownerSim.diff > 0 ? "Form unter HCP" : ownerSim.diff < 0 ? "Form über HCP — du bist heiß!" : "Genau auf HCP-Niveau"}
                             </div>
+                          </div>
+                        )}
+
+                        {/* v54: Spielfrequenz */}
+                        {avgFrequency !== null && (
+                          <div style={{ paddingTop: "10px", marginTop: "10px", borderTop: `1px solid ${T.line}`, display: "flex", alignItems: "center", gap: "10px" }}>
+                            <span style={{ fontSize: "20px" }}>📅</span>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontSize: "11px", color: T.textSoft }}>
+                                Spielfrequenz: <b style={{ color: T.text }}>alle {avgFrequency} {avgFrequency === 1 ? "Tag" : "Tage"}</b>
+                                {frequencyTrend === "up" && <span style={{ color: T.sage, marginLeft: "6px" }}>📈 mehr als vorher</span>}
+                                {frequencyTrend === "down" && <span style={{ color: T.double, marginLeft: "6px" }}>📉 weniger als vorher</span>}
+                              </div>
+                              <div style={{ fontSize: "9px", color: T.textDim, marginTop: "1px" }}>letzte 90 Tage</div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* v54: Saison-Übersicht (SF-Verlauf-Graph) */}
+                        {seasonRoundsRaw.length >= 3 && (
+                          <div style={{ paddingTop: "10px", marginTop: "10px", borderTop: `1px solid ${T.line}` }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                              <div style={{ fontSize: "10px", color: T.textDim, letterSpacing: "0.06em", fontWeight: 600 }}>📊 SF-VERLAUF</div>
+                              <div style={{ display: "flex", gap: "3px" }}>
+                                {[
+                                  { v: "30d", l: "30T" },
+                                  { v: "90d", l: "90T" },
+                                  { v: "season", l: "Saison" },
+                                ].map(opt => (
+                                  <button key={opt.v}
+                                    onClick={() => setSeasonRangeState(opt.v)}
+                                    style={{
+                                      padding: "4px 8px",
+                                      background: seasonRangeState === opt.v ? `${T.gold}25` : T.surface2,
+                                      color: seasonRangeState === opt.v ? T.gold : T.textSoft,
+                                      border: `1px solid ${seasonRangeState === opt.v ? T.gold : T.line}`,
+                                      borderRadius: "5px", fontSize: "10px", fontWeight: 600, cursor: "pointer",
+                                    }}>
+                                    {opt.l}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                            {seasonRounds.length >= 2 ? (
+                              <>
+                                {/* SVG Linien-Graph */}
+                                {(() => {
+                                  const w = 460, h = 80;
+                                  const padding = 12;
+                                  const sfValues = seasonRounds.map(r => r.sf);
+                                  const maxSf = Math.max(...sfValues, 36);
+                                  const minSf = Math.min(...sfValues, 0);
+                                  const range = Math.max(1, maxSf - minSf);
+                                  const points = seasonRounds.map((r, i) => {
+                                    const x = padding + (i / Math.max(1, seasonRounds.length - 1)) * (w - 2 * padding);
+                                    const y = h - padding - ((r.sf - minSf) / range) * (h - 2 * padding);
+                                    return { x, y, sf: r.sf };
+                                  });
+                                  const pathD = points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+                                  // 36-Linie als Reference
+                                  const ref36Y = h - padding - ((36 - minSf) / range) * (h - 2 * padding);
+                                  return (
+                                    <svg viewBox={`0 0 ${w} ${h}`} style={{ width: "100%", height: "auto", display: "block" }}>
+                                      {/* 36-SF-Reference-Linie */}
+                                      {ref36Y > padding && ref36Y < h - padding && (
+                                        <>
+                                          <line x1={padding} y1={ref36Y} x2={w - padding} y2={ref36Y} stroke={`${T.sage}40`} strokeWidth="1" strokeDasharray="3,3" />
+                                          <text x={w - padding} y={ref36Y - 3} fontSize="9" fill={T.sage} textAnchor="end" opacity="0.7">36</text>
+                                        </>
+                                      )}
+                                      <path d={pathD} fill="none" stroke={T.gold} strokeWidth="2" strokeLinejoin="round" />
+                                      {points.map((p, i) => (
+                                        <circle key={i} cx={p.x} cy={p.y} r="3" fill={p.sf >= 36 ? T.sage : T.gold} />
+                                      ))}
+                                    </svg>
+                                  );
+                                })()}
+                                <div style={{ fontSize: "10px", color: T.textDim, marginTop: "6px", display: "flex", justifyContent: "space-between" }}>
+                                  <span>{seasonRounds.length} Runden</span>
+                                  <span>⌀ {Math.round(seasonRounds.reduce((s, r) => s + r.sf, 0) / seasonRounds.length)} SF</span>
+                                </div>
+                              </>
+                            ) : (
+                              <div style={{ fontSize: "11px", color: T.textDim, fontStyle: "italic", textAlign: "center", padding: "10px" }}>
+                                Brauche mindestens 2 Runden im gewählten Zeitraum.
+                              </div>
+                            )}
                           </div>
                         )}
                       </>
@@ -10924,6 +11241,226 @@ WICHTIG:
     );
   };
 
+  // ── v54: Daten-Aufräum-Modal ──
+  const renderCleanupModal = () => {
+    if (!showCleanup) return null;
+
+    // Heuristiken
+    const isTestRound = (r) => {
+      const players = r.players || [];
+      return players.length <= 1 && (r.scores ? Object.values(r.scores).every(s => Object.keys(s || {}).length === 0) : true);
+    };
+    const hasBadName = (r) => {
+      const club = (r.cfg?.clubName || "").trim().toLowerCase();
+      return /^(test|asdf|qwer|123|abc|xxx|aaaa)$/.test(club) || club === "";
+    };
+    const isUnfinished = (r) => {
+      const holes = r.holes || [];
+      if (holes.length === 0) return true;
+      const players = r.players || [];
+      if (players.length === 0) return true;
+      // Prüfe ob mindestens ein Spieler weniger als 50% gespielt hat
+      const someUnfinished = players.some(p => {
+        let played = 0;
+        holes.forEach((h, i) => {
+          const g = r.scores?.[p.id]?.[i];
+          if (isValid(g) || isStrich(g)) played++;
+        });
+        return played < holes.length * 0.5;
+      });
+      // Aber NICHT zählen wenn die Runde "läuft" (resumeRoundId)
+      if (r.id === resumeRoundId) return false;
+      return someUnfinished;
+    };
+    const isEmptyTrip = (t) => {
+      const days = t.days || [];
+      const noRounds = days.every(d => (d.roundIds || []).length === 0);
+      return noRounds && (t.players || []).length === 0;
+    };
+
+    // Kandidaten sammeln
+    const testCandidates = rounds.filter(isTestRound);
+    const badNameCandidates = rounds.filter(r => !isTestRound(r) && hasBadName(r));
+    const unfinishedCandidates = rounds.filter(r => !isTestRound(r) && !hasBadName(r) && isUnfinished(r));
+    const emptyTripCandidates = trips.filter(isEmptyTrip);
+
+    // Was zum Aufräumen ausgewählt?
+    const toCleanRounds = [
+      ...(cleanupSelection.testRounds ? testCandidates : []),
+      ...(cleanupSelection.badNameRounds ? badNameCandidates : []),
+      ...(cleanupSelection.unfinishedRounds ? unfinishedCandidates : []),
+    ];
+    const toCleanTrips = cleanupSelection.emptyTrips ? emptyTripCandidates : [];
+
+    const totalToClean = toCleanRounds.length + toCleanTrips.length;
+
+    const performCleanup = async () => {
+      if (totalToClean === 0) return;
+      if (!confirm(`Wirklich ${totalToClean} ${totalToClean === 1 ? "Eintrag" : "Einträge"} aufräumen?\n\n${toCleanRounds.length} Runden + ${toCleanTrips.length} Trips werden in den Papierkorb verschoben (30 Tage rückholbar).`)) return;
+
+      // Runden archivieren (Push to cloud + soft-delete) + lokal löschen
+      let archived = 0;
+      for (const r of toCleanRounds) {
+        try {
+          if (SYNC_ENABLED && syncCode) {
+            await archivePush(r, syncCode);
+            await archiveSoftDelete(r.id);
+          }
+          archived++;
+        } catch (e) { console.error("archive failed", e); }
+      }
+
+      // Lokale Runden filtern
+      const remainingRounds = rounds.filter(r => !toCleanRounds.some(c => c.id === r.id));
+      setRounds(remainingRounds);
+      try { await window.storage.set("golf-rounds", JSON.stringify(remainingRounds)); } catch {}
+
+      // Trips entfernen (kein Cloud-Archive für Trips, einfach löschen)
+      if (toCleanTrips.length > 0) {
+        const remainingTrips = trips.filter(t => !toCleanTrips.some(c => c.id === t.id));
+        setTrips(remainingTrips);
+        try { await window.storage.set("golf-trips", JSON.stringify(remainingTrips)); } catch {}
+      }
+
+      setShowCleanup(false);
+      showUndoToast(`✓ ${toCleanRounds.length} Runden + ${toCleanTrips.length} Trips aufgeräumt${SYNC_ENABLED ? " (im Papierkorb)" : ""}`, null);
+    };
+
+    const sectionStyle = (count, enabled) => ({
+      padding: "12px",
+      background: count > 0 ? T.surface2 : T.surface1,
+      border: `1px solid ${enabled && count > 0 ? T.gold : T.line}`,
+      borderRadius: "10px",
+      marginBottom: "10px",
+    });
+
+    return (
+      <div onClick={() => setShowCleanup(false)}
+        style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+        <div onClick={e => e.stopPropagation()} className="slide-up"
+          style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "85vh", overflowY: "auto" }}>
+          <SwipeHandle onClose={() => setShowCleanup(false)} />
+          <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>
+            🧹 Daten aufräumen
+          </h3>
+          <p style={{ fontSize: "12px", color: T.textSoft, marginTop: 0, marginBottom: "16px" }}>
+            Wähle aus, was bereinigt werden soll. Alles geht in den Papierkorb (30 Tage rückholbar).
+          </p>
+
+          <div style={sectionStyle(testCandidates.length, cleanupSelection.testRounds)}>
+            <button
+              onClick={() => setCleanupSelection(s => ({ ...s, testRounds: !s.testRounds }))}
+              style={{ width: "100%", textAlign: "left", background: "transparent", border: "none", padding: 0, color: T.text, cursor: "pointer", fontFamily: "inherit" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <div style={{
+                  width: "18px", height: "18px", borderRadius: "4px",
+                  border: `2px solid ${cleanupSelection.testRounds ? T.gold : T.textDim}`,
+                  background: cleanupSelection.testRounds ? T.gold : "transparent",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  color: T.canvas, fontSize: "11px", fontWeight: 700,
+                }}>
+                  {cleanupSelection.testRounds && "✓"}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: "13px", fontWeight: 600 }}>Test-Runden ({testCandidates.length})</div>
+                  <div style={{ fontSize: "10px", color: T.textDim, marginTop: "2px" }}>
+                    Runden mit ≤ 1 Spieler und ohne Scores
+                  </div>
+                </div>
+              </div>
+            </button>
+          </div>
+
+          <div style={sectionStyle(badNameCandidates.length, cleanupSelection.badNameRounds)}>
+            <button
+              onClick={() => setCleanupSelection(s => ({ ...s, badNameRounds: !s.badNameRounds }))}
+              style={{ width: "100%", textAlign: "left", background: "transparent", border: "none", padding: 0, color: T.text, cursor: "pointer", fontFamily: "inherit" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <div style={{
+                  width: "18px", height: "18px", borderRadius: "4px",
+                  border: `2px solid ${cleanupSelection.badNameRounds ? T.gold : T.textDim}`,
+                  background: cleanupSelection.badNameRounds ? T.gold : "transparent",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  color: T.canvas, fontSize: "11px", fontWeight: 700,
+                }}>
+                  {cleanupSelection.badNameRounds && "✓"}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: "13px", fontWeight: 600 }}>Verdächtige Namen ({badNameCandidates.length})</div>
+                  <div style={{ fontSize: "10px", color: T.textDim, marginTop: "2px" }}>
+                    Runden mit Club-Namen wie „test", „asdf", oder leer
+                  </div>
+                </div>
+              </div>
+            </button>
+          </div>
+
+          <div style={sectionStyle(unfinishedCandidates.length, cleanupSelection.unfinishedRounds)}>
+            <button
+              onClick={() => setCleanupSelection(s => ({ ...s, unfinishedRounds: !s.unfinishedRounds }))}
+              style={{ width: "100%", textAlign: "left", background: "transparent", border: "none", padding: 0, color: T.text, cursor: "pointer", fontFamily: "inherit" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <div style={{
+                  width: "18px", height: "18px", borderRadius: "4px",
+                  border: `2px solid ${cleanupSelection.unfinishedRounds ? T.gold : T.textDim}`,
+                  background: cleanupSelection.unfinishedRounds ? T.gold : "transparent",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  color: T.canvas, fontSize: "11px", fontWeight: 700,
+                }}>
+                  {cleanupSelection.unfinishedRounds && "✓"}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: "13px", fontWeight: 600 }}>Unfertige Runden ({unfinishedCandidates.length})</div>
+                  <div style={{ fontSize: "10px", color: T.textDim, marginTop: "2px" }}>
+                    Runden wo &lt; 50% der Löcher gespielt wurden
+                  </div>
+                </div>
+              </div>
+            </button>
+          </div>
+
+          <div style={sectionStyle(emptyTripCandidates.length, cleanupSelection.emptyTrips)}>
+            <button
+              onClick={() => setCleanupSelection(s => ({ ...s, emptyTrips: !s.emptyTrips }))}
+              style={{ width: "100%", textAlign: "left", background: "transparent", border: "none", padding: 0, color: T.text, cursor: "pointer", fontFamily: "inherit" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <div style={{
+                  width: "18px", height: "18px", borderRadius: "4px",
+                  border: `2px solid ${cleanupSelection.emptyTrips ? T.gold : T.textDim}`,
+                  background: cleanupSelection.emptyTrips ? T.gold : "transparent",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  color: T.canvas, fontSize: "11px", fontWeight: 700,
+                }}>
+                  {cleanupSelection.emptyTrips && "✓"}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: "13px", fontWeight: 600 }}>Leere Trips ({emptyTripCandidates.length})</div>
+                  <div style={{ fontSize: "10px", color: T.textDim, marginTop: "2px" }}>
+                    Trips ohne Spieler und ohne verknüpfte Runden
+                  </div>
+                </div>
+              </div>
+            </button>
+          </div>
+
+          <div style={{ display: "flex", gap: "8px", marginTop: "16px" }}>
+            <button onClick={() => setShowCleanup(false)}
+              style={{ ...S.btnGhost, flex: 1, fontSize: "13px" }}>Abbrechen</button>
+            <button onClick={performCleanup}
+              disabled={totalToClean === 0}
+              style={{
+                ...S.btnPrimary, flex: 2, fontSize: "13px",
+                opacity: totalToClean === 0 ? 0.4 : 1,
+                cursor: totalToClean === 0 ? "not-allowed" : "pointer",
+              }}>
+              🧹 {totalToClean} {totalToClean === 1 ? "Eintrag" : "Einträge"} aufräumen
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   // ── v38: Loch-Schnellsprung-Modal ──
   const renderHoleJump = () => {
     if (!showHoleJump) return null;
@@ -13772,6 +14309,18 @@ WICHTIG:
             </div>
           )}
 
+          {/* v54: Daten-Aufräum-Tool */}
+          <div style={{ marginTop: "22px", paddingTop: "18px", borderTop: `1px solid ${T.line}` }}>
+            <div style={{ ...S.eyebrow, marginBottom: "10px" }}>🧹 Daten aufräumen</div>
+            <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, marginBottom: "10px" }}>
+              Entferne Test-Runden, leere Trips und alte Daten. Alles wird in den Cloud-Papierkorb verschoben (30 Tage rückholbar).
+            </p>
+            <button onClick={() => setShowCleanup(true)}
+              style={{ ...S.btnSecondary, fontSize: "12px", padding: "10px", width: "100%", color: T.gold, borderColor: `${T.gold}40` }}>
+              🧹 Aufräum-Übersicht öffnen
+            </button>
+          </div>
+
           {/* Backup via JSON export/import — independent of cloud */}
           <div style={{ marginTop: "22px", paddingTop: "18px", borderTop: `1px solid ${T.line}` }}>
             <div style={{ ...S.eyebrow, marginBottom: "10px" }}>Lokales Backup</div>
@@ -14398,6 +14947,7 @@ Wichtig:
       {renderOwnerSetup()}
       {renderOnboardingChoice()}
       {renderClubsModal()}
+      {renderCleanupModal()}
       {renderUndoToast()}
 
       {/* v40: Versions-Footer — sichtbar in jeder Crew, hilft beim Bug-Reporting */}
