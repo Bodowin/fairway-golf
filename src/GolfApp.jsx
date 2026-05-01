@@ -943,7 +943,7 @@ const BUILT_IN_CLUBS = [
 const STRICH = null;
 
 // ─── v40: Versions-Marker — sichtbar im App-Footer ──────────────────────────
-const APP_VERSION = "v44-cyprus-2B";
+const APP_VERSION = "v46-onboarding";
 const APP_BUILD_DATE = "2026-04-30";
 
 function makeHoles(totalPar, numHoles) {
@@ -3443,20 +3443,21 @@ function GolfAppInner() {
           const adjustedHcp = (parseFloat(p.hcp) || 0) + adjustment;
           const adjustedPlayer = { ...p, hcp: adjustedHcp };
           const { ph } = resolvePlayerPH(adjustedPlayer, r.cfg, r.selectedClubSnapshot, par);
-          let sf = 0, played = 0;
+          let sf = 0, sfBrut = 0, played = 0;
           r.holes.forEach((h, i) => {
             const g = r.scores?.[p.id]?.[i];
             if (!isValid(g) && !isStrich(g)) return;
             played++;
             const hs = holeHS(ph, h.si, r.holes.length);
             sf += sfNetto(g, hs, h.par) || 0;
+            sfBrut += sfBrutto(g, h.par) || 0;
           });
           if (played < r.holes.length * 0.5) return;
           const key = p.playerId || `name:${normName(p.name)}`;
           playerScores[key] = {
             playerId: p.playerId,
             name: p.name,
-            sf, hcp: p.hcp, adjustment, adjustedHcp,
+            sf, sfBrut, hcp: p.hcp, adjustment, adjustedHcp,
             roundId: r.id, clubName: r.cfg?.clubName,
           };
         });
@@ -3551,9 +3552,11 @@ function GolfAppInner() {
         const key = r.playerId || `name:${normName(r.name)}`;
         const pm = perPlayer[key];
         if (!pm) return;
-        pm.sfHistory.push({ dayNumber: dr.dayNumber, sf: r.sf });
+        pm.sfHistory.push({ dayNumber: dr.dayNumber, sf: r.sf, sfBrut: r.sfBrut || 0 });
         if (r.sf > pm.bestSf) pm.bestSf = r.sf;
         if (r.sf < pm.worstSf) pm.worstSf = r.sf;
+        // v45: Brutto-Total
+        pm.totalBrut = (pm.totalBrut || 0) + (r.sfBrut || 0);
       });
     });
 
@@ -3648,6 +3651,82 @@ function GolfAppInner() {
       });
     }
 
+    // v45: Team-Wertung — beste 2er-Team-Kombi pro Tag
+    // Wir nehmen für jeden Tag alle möglichen 2er-Teams + finden das Team mit der höchsten Summe der Netto-Punkte beider Spieler.
+    // Pot: weekTeamPot * (playerCount - 2). Team-Sieger teilen sich den Pot fair, alle anderen schulden weekTeamPot.
+    const teamPotPerPlayer = trip.pots?.weekTeamPot || 0;
+    if (teamPotPerPlayer > 0) {
+      // Kumuliere Netto-SF pro Spieler über alle Tage
+      const cumulative = {};
+      standings.dayResults?.forEach(dr => {
+        if (!dr.complete) return;
+        dr.ranked?.forEach(r => {
+          const key = r.playerId || `name:${normName(r.name)}`;
+          cumulative[key] = (cumulative[key] || 0) + r.sf;
+        });
+      });
+      // Finde das beste 2er-Team
+      const playerKeys = Object.keys(cumulative);
+      if (playerKeys.length >= 2) {
+        let bestTeam = null;
+        let bestSum = -1;
+        for (let i = 0; i < playerKeys.length; i++) {
+          for (let j = i + 1; j < playerKeys.length; j++) {
+            const sum = cumulative[playerKeys[i]] + cumulative[playerKeys[j]];
+            if (sum > bestSum) {
+              bestSum = sum;
+              bestTeam = [playerKeys[i], playerKeys[j]];
+            }
+          }
+        }
+        if (bestTeam) {
+          // Pot: jeder Nicht-Team-Mitglied zahlt weekTeamPot, das Team-Pärchen bekommt es geteilt
+          const teamPrizeTotal = teamPotPerPlayer * (playerCount - 2);
+          const teamPrizePerPlayer = Math.floor(teamPrizeTotal / 2);
+          bestTeam.forEach(tk => {
+            if (perPlayer[tk]) {
+              perPlayer[tk].won += teamPrizePerPlayer;
+              const partner = bestTeam.find(x => x !== tk);
+              const partnerName = perPlayer[partner]?.name || "Partner";
+              perPlayer[tk].wins.push({ dayNumber: "TEAM", sf: cumulative[tk], prize: teamPrizePerPlayer, partnerName });
+            }
+          });
+          trip.players.forEach(tp => {
+            const key = tp.playerId || `name:${normName(tp.name)}`;
+            if (!bestTeam.includes(key) && perPlayer[key]) {
+              perPlayer[key].owes += teamPotPerPlayer;
+            }
+          });
+        }
+      }
+    }
+
+    // v45: Nearest-to-Pin — für jeden Par-3 mit Sieger zahlen alle anderen je nearestPinPot
+    const nearestPinPot = trip.pots?.nearestPin || 0;
+    if (nearestPinPot > 0 && trip.nearestPins) {
+      Object.entries(trip.nearestPins).forEach(([npKey, winnerPlayerId]) => {
+        if (!winnerPlayerId) return;
+        // Hole-Info aus key parsen
+        const [roundId, holeIdxStr] = npKey.split("::");
+        const winnerKey = winnerPlayerId.startsWith(PLAYER_ID_PREFIX) ? winnerPlayerId : `name:${normName(winnerPlayerId)}`;
+        const npPrize = nearestPinPot * (playerCount - 1);
+        if (perPlayer[winnerKey]) {
+          perPlayer[winnerKey].won += npPrize;
+          perPlayer[winnerKey].wins.push({
+            dayNumber: "NEAREST",
+            holeInfo: `Loch ${parseInt(holeIdxStr) + 1}`,
+            prize: npPrize,
+          });
+        }
+        trip.players.forEach(tp => {
+          const key = tp.playerId || `name:${normName(tp.name)}`;
+          if (key !== winnerKey && perPlayer[key]) {
+            perPlayer[key].owes += nearestPinPot;
+          }
+        });
+      });
+    }
+
     // Net berechnen
     Object.values(perPlayer).forEach(pm => {
       pm.net = pm.won - pm.owes;
@@ -3666,6 +3745,28 @@ function GolfAppInner() {
     if (!payments[playerKey]) payments[playerKey] = {};
     payments[playerKey][dayKey] = !payments[playerKey][dayKey];
     await updateTrip(tripId, { payments });
+  };
+
+  // v45: Nearest-to-Pin-Sieger setzen
+  // Key-Format: `${roundId}::${holeIdx}` — eindeutig pro Par-3
+  const setNearestPinWinner = async (tripId, key, playerId) => {
+    const trip = trips.find(t => t.id === tripId);
+    if (!trip) return;
+    const np = { ...(trip.nearestPins || {}) };
+    if (!playerId) {
+      delete np[key];
+    } else {
+      np[key] = playerId;
+    }
+    await updateTrip(tripId, { nearestPins: np });
+  };
+
+  // v45: Liste aller Par-3-Löcher einer Trip-Runde
+  const getPar3Holes = (round) => {
+    if (!round?.holes) return [];
+    return round.holes
+      .map((h, i) => ({ holeIdx: i, par: h.par, si: h.si }))
+      .filter(h => h.par === 3);
   };
 
   // ── Scores
@@ -6479,51 +6580,7 @@ function GolfAppInner() {
 
           {players.length === 0
             ? (
-              <>
-                <EmptyState icon="👤" title="Noch keine Spieler" sub="Füge Freunde hinzu oder tippe unten einen Namen ein." />
-                {/* v38: Letzte Crew nochmal — schneller Crew-Setup für Stamm-Crew */}
-                {rounds.length > 0 && (() => {
-                  const last = rounds[0];
-                  const lastPlayers = last?.players || [];
-                  if (lastPlayers.length === 0) return null;
-                  return (
-                    <button
-                      onClick={() => {
-                        // Refresh HCPs aus aktueller Friends-Liste falls vorhanden
-                        const refreshed = lastPlayers.map(p => {
-                          const friend = friends.find(f => f.name === p.name);
-                          return {
-                            id: uid(),
-                            name: p.name,
-                            hcp: friend ? friend.hcp : p.hcp,
-                            teeName: p.teeName,
-                          };
-                        });
-                        setPlayers(refreshed);
-                        showUndoToast(`✓ ${refreshed.length} Spieler übernommen aus „${last.cfg?.clubName || "letzter Runde"}"`, () => setPlayers([]));
-                      }}
-                      className="card-hover"
-                      style={{
-                        ...S.card, width: "100%", padding: "14px 16px",
-                        marginBottom: "12px", textAlign: "left", cursor: "pointer",
-                        border: `1px solid ${T.gold}40`,
-                      }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                        <div style={{ fontSize: "24px" }}>👥</div>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: "13px", fontWeight: 700, color: T.gold, marginBottom: "2px" }}>
-                            Letzte Crew nochmal
-                          </div>
-                          <div style={{ fontSize: "11px", color: T.textSoft, lineHeight: 1.4 }}>
-                            {lastPlayers.map(p => p.name).join(" · ")}
-                          </div>
-                        </div>
-                        <div style={{ color: T.gold, fontSize: "20px" }}>›</div>
-                      </div>
-                    </button>
-                  );
-                })()}
-              </>
+              <EmptyState icon="👤" title="Noch keine Spieler" sub="Füge Freunde hinzu oder tippe unten einen Namen ein." />
             )
             : players.map(p => {
                 const tee = playerTee(p, cfg, selectedClub);
@@ -7046,6 +7103,9 @@ function GolfAppInner() {
                         <>
                           <div className="mono" style={{ fontSize: "22px", fontWeight: 800, color: T.gold, lineHeight: 1 }}>{s.sfNT}</div>
                           <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>SF NETTO</div>
+                          {/* v45: SF Brutto direkt drunter */}
+                          <div className="mono" style={{ fontSize: "13px", fontWeight: 600, color: T.textSoft, lineHeight: 1, marginTop: "4px" }}>{s.sfBT}</div>
+                          <div style={{ fontSize: "8px", color: T.textDim, marginTop: "1px" }}>BRUTTO</div>
                         </>
                       )}
                     </div>
@@ -7985,7 +8045,10 @@ function GolfAppInner() {
                 </div>
                 <div style={{ textAlign: "right" }}>
                   <div className="mono serif" style={{ fontSize: "32px", fontWeight: 700, color: T.gold, lineHeight: 1 }}>{s.sfNT}</div>
-                  <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>PUNKTE</div>
+                  <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>NETTO</div>
+                  {/* v45: SF Brutto */}
+                  <div className="mono" style={{ fontSize: "14px", fontWeight: 600, color: T.textSoft, marginTop: "4px", lineHeight: 1 }}>{s.sfBT}</div>
+                  <div style={{ fontSize: "9px", color: T.textDim, marginTop: "1px" }}>BRUTTO</div>
                 </div>
               </div>
             ))}
@@ -10262,12 +10325,18 @@ WICHTIG:
               {/* Pot-Summary */}
           <div style={{ ...S.card, padding: "12px 14px", marginBottom: "12px", borderColor: `${T.gold}30` }}>
             <div style={{ ...S.eyebrow, marginBottom: "8px", color: T.gold }}>💰 Pot-Übersicht</div>
-            <div style={{ fontSize: "20px", fontWeight: 700, color: T.gold, marginBottom: "4px" }}>
+            <div style={{ fontSize: "20px", fontWeight: 700, color: T.gold, marginBottom: "8px" }}>
               €{totalPot} <span style={{ fontSize: "11px", color: T.textDim, fontWeight: 500 }}>· {trip.players?.length || 0} Spieler</span>
             </div>
-            <div style={{ fontSize: "10px", color: T.textDim, lineHeight: 1.5 }}>
-              €{trip.pots?.dayWin}/Tag · €{trip.pots?.threeDayPot} Gesamt · €{trip.pots?.weekTeamPot} Team · €{trip.pots?.nearestPin}/Par-3
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "5px", fontSize: "10px", color: T.textSoft, lineHeight: 1.4 }}>
+              <div>🥇 <strong>€{trip.pots?.dayWin}</strong> Tagessieger</div>
+              <div>🏆 <strong>€{trip.pots?.threeDayPot}</strong> Gesamt</div>
+              <div>🤝 <strong>€{trip.pots?.weekTeamPot}</strong> Bestes 2er-Team</div>
+              <div>🎯 <strong>€{trip.pots?.nearestPin}</strong> Nearest-to-Pin</div>
             </div>
+            <p style={{ fontSize: "9px", color: T.textDim, marginTop: "8px", lineHeight: 1.4, fontStyle: "italic" }}>
+              Beträge sind „pro Spieler". Sieger bekommt von allen anderen je den Betrag.
+            </p>
           </div>
 
           {/* Tageswertungen */}
@@ -10424,6 +10493,59 @@ WICHTIG:
                     })}
                   </div>
                 </div>
+                {/* v45: Nearest-to-Pin pro Par-3 in Trip-Runden */}
+                {(trip.pots?.nearestPin > 0 && day.roundIds?.length > 0) && (() => {
+                  // Sammle alle Par-3-Löcher aus den Runden dieses Tages
+                  const par3Items = [];
+                  day.roundIds.forEach(rid => {
+                    const r = rounds.find(x => x.id === rid);
+                    if (!r) return;
+                    getPar3Holes(r).forEach(p3 => {
+                      par3Items.push({
+                        roundId: rid,
+                        clubName: r.cfg?.clubName || "",
+                        holeIdx: p3.holeIdx,
+                        par: p3.par,
+                      });
+                    });
+                  });
+                  if (par3Items.length === 0) return null;
+                  return (
+                    <div style={{ marginTop: "8px", paddingTop: "8px", borderTop: `1px solid ${T.line}` }}>
+                      <div style={{ fontSize: "9px", color: T.textDim, fontWeight: 700, letterSpacing: "0.04em", marginBottom: "5px" }}>
+                        🎯 NEAREST-TO-PIN (€{trip.pots.nearestPin}/Spieler)
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+                        {par3Items.map(item => {
+                          const key = `${item.roundId}::${item.holeIdx}`;
+                          const winnerId = trip.nearestPins?.[key] || "";
+                          const winner = trip.players.find(tp => tp.playerId === winnerId);
+                          return (
+                            <div key={key} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                              <span style={{ fontSize: "11px", color: T.text, flex: 1 }}>
+                                Loch {item.holeIdx + 1} · Par {item.par}
+                              </span>
+                              <select
+                                value={winnerId}
+                                onChange={e => setNearestPinWinner(trip.id, key, e.target.value || null)}
+                                style={{ ...S.input, fontSize: "11px", padding: "5px 8px", maxWidth: "150px" }}>
+                                <option value="">— kein Sieger —</option>
+                                {trip.players.map(tp => (
+                                  <option key={tp.playerId} value={tp.playerId}>{tp.name}</option>
+                                ))}
+                              </select>
+                              {winner && (
+                                <span style={{ fontSize: "10px", color: T.gold, fontWeight: 700 }}>
+                                  🏆 €{trip.pots.nearestPin * (trip.players.length - 1)}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             );
             })}
@@ -10452,12 +10574,15 @@ WICHTIG:
                     <div key={p.playerId || p.name} style={{ ...S.card, padding: "12px 14px", marginBottom: "10px" }}>
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
                         <div style={{ fontSize: "14px", fontWeight: 700, color: T.text }}>{p.name}</div>
-                        <div style={{ display: "flex", gap: "8px", fontSize: "11px" }}>
+                        <div style={{ display: "flex", gap: "8px", fontSize: "11px", flexWrap: "wrap", justifyContent: "flex-end" }}>
                           {p.bestSf > 0 && (
                             <span style={{ color: T.gold, fontWeight: 700 }}>Best <span className="mono">{p.bestSf}</span></span>
                           )}
                           {p.avgSf > 0 && (
                             <span style={{ color: T.textSoft }}>⌀ <span className="mono">{p.avgSf}</span></span>
+                          )}
+                          {p.totalBrut > 0 && (
+                            <span style={{ color: T.textDim }}>Br Σ <span className="mono">{p.totalBrut}</span></span>
                           )}
                         </div>
                       </div>
@@ -10479,6 +10604,9 @@ WICHTIG:
                                 fontSize: "13px", fontWeight: 700,
                                 color: h.sf >= 36 ? T.sage : h.sf >= 30 ? T.gold : T.textSoft,
                               }}>{h.sf}</div>
+                              {h.sfBrut > 0 && (
+                                <div className="mono" style={{ fontSize: "9px", color: T.textDim, marginTop: "1px" }}>{h.sfBrut}b</div>
+                              )}
                             </div>
                           ))}
                         </div>
@@ -10575,13 +10703,20 @@ WICHTIG:
                         <div style={{ paddingTop: "8px", borderTop: `1px solid ${T.line}` }}>
                           <div style={{ fontSize: "9px", color: T.textDim, fontWeight: 700, letterSpacing: "0.04em", marginBottom: "5px" }}>SIEGE</div>
                           {p.wins.map((w, wi) => {
-                            const dayKey = String(w.dayNumber);
+                            const dayKey = String(w.dayNumber) + (w.holeInfo ? `_${w.holeInfo}` : "");
                             const paid = !!p.paid[dayKey];
+                            const label = w.dayNumber === "GESAMT" ? "🏆 Gesamtwertung"
+                              : w.dayNumber === "TEAM" ? `🤝 Team mit ${w.partnerName || "Partner"}`
+                              : w.dayNumber === "NEAREST" ? `🎯 Nearest-to-Pin · ${w.holeInfo || ""}`
+                              : `Tag ${w.dayNumber}`;
+                            const subInfo = typeof w.sf === "number"
+                              ? ` · ${w.sf} SF`
+                              : "";
                             return (
                               <div key={wi} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "4px 0" }}>
-                                <span style={{ fontSize: "11px", color: T.text, flex: 1 }}>
-                                  {w.dayNumber === "GESAMT" ? "🏆 Gesamtwertung" : `Tag ${w.dayNumber}`}
-                                  <span style={{ color: T.textDim, marginLeft: "5px" }}>· {w.sf} SF</span>
+                                <span style={{ fontSize: "11px", color: T.text, flex: 1, minWidth: 0 }}>
+                                  {label}
+                                  <span style={{ color: T.textDim, marginLeft: "5px" }}>{subInfo}</span>
                                 </span>
                                 <span style={{ fontSize: "11px", color: T.gold, fontWeight: 700 }}>€{w.prize}</span>
                                 <button
@@ -11050,7 +11185,200 @@ WICHTIG:
   // Also reachable from Settings for editing.
   // ═══════════════════════════════════════════════════════════════════════════
   const [ownerSetupOpen, setOwnerSetupOpen] = useState(false);
+  // v46: Onboarding-Choice — vor Owner-Setup zeigen
+  const [showOnboardingChoice, setShowOnboardingChoice] = useState(false);
+  const [onboardingMode, setOnboardingMode] = useState("choice"); // choice | sync-input | name-pick
   const [ownerForm, setOwnerForm] = useState({ name: "", hcp: "" });
+
+  // ── v46: Onboarding-Choice — vor dem ersten Owner-Setup ──
+  const renderOnboardingChoice = () => {
+    if (!showOnboardingChoice) return null;
+
+    const close = () => { setShowOnboardingChoice(false); setOnboardingMode("choice"); };
+    const proceedToOwnerSetup = () => {
+      setShowOnboardingChoice(false);
+      setOnboardingMode("choice");
+      setOwnerSetupOpen(true);
+      setOwnerForm({ name: "", hcp: "" });
+    };
+
+    return (
+      <div style={{ position: "fixed", inset: 0, background: "#000000ee", zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center", padding: "20px" }}>
+        <div className="slide-up"
+          style={{ width: "100%", maxWidth: "440px", background: T.surface1, borderRadius: "20px", border: `1px solid ${T.line}`, padding: "24px 20px", maxHeight: "92vh", overflowY: "auto" }}>
+
+          {/* ── MODE: Choice ── */}
+          {onboardingMode === "choice" && (
+            <>
+              <div style={{ textAlign: "center", marginBottom: "20px" }}>
+                <div style={{ fontSize: "40px", marginBottom: "8px" }}>👋</div>
+                <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>Willkommen bei Fairway</h3>
+                <p style={{ fontSize: "12px", color: T.textSoft, margin: 0, lineHeight: 1.5 }}>
+                  Wie möchtest du starten?
+                </p>
+              </div>
+
+              <button
+                onClick={() => { setOnboardingMode("sync-input"); setSyncInput(""); }}
+                className="card-hover"
+                style={{ ...S.card, width: "100%", padding: "14px", marginBottom: "10px", textAlign: "left", cursor: "pointer", border: `1px solid ${T.gold}40` }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                  <div style={{ fontSize: "28px" }}>☁️</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: "14px", fontWeight: 700, color: T.gold, marginBottom: "2px" }}>
+                      Sync-Code eingeben
+                    </div>
+                    <div style={{ fontSize: "11px", color: T.textSoft, lineHeight: 1.5 }}>
+                      Wenn dich jemand aus deiner Crew eingeladen hat — du übernimmst Freunde + Clubs
+                    </div>
+                  </div>
+                  <div style={{ color: T.gold, fontSize: "20px" }}>›</div>
+                </div>
+              </button>
+
+              <button
+                onClick={proceedToOwnerSetup}
+                className="card-hover"
+                style={{ ...S.card, width: "100%", padding: "14px", marginBottom: "16px", textAlign: "left", cursor: "pointer" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                  <div style={{ fontSize: "28px" }}>🆕</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: "14px", fontWeight: 700, color: T.text, marginBottom: "2px" }}>
+                      Neu starten
+                    </div>
+                    <div style={{ fontSize: "11px", color: T.textSoft, lineHeight: 1.5 }}>
+                      Eigenes Profil + neuer Sync-Code für deine eigene Crew
+                    </div>
+                  </div>
+                  <div style={{ color: T.textSoft, fontSize: "20px" }}>›</div>
+                </div>
+              </button>
+
+              <button
+                onClick={async () => {
+                  try { await window.storage.set("golf-owner-setup-skipped", "1"); } catch {}
+                  close();
+                }}
+                style={{ ...S.btnGhost, width: "100%", fontSize: "11px", padding: "8px" }}>
+                Später · ohne Profil starten
+              </button>
+            </>
+          )}
+
+          {/* ── MODE: Sync-Input ── */}
+          {onboardingMode === "sync-input" && (
+            <>
+              <button onClick={() => setOnboardingMode("choice")} style={{ ...S.btnGhost, fontSize: "11px", padding: "4px 8px", marginBottom: "12px" }}>← zurück</button>
+              <h3 className="serif" style={{ fontSize: "20px", margin: "0 0 4px", color: T.text }}>☁️ Sync-Code eingeben</h3>
+              <p style={{ fontSize: "12px", color: T.textSoft, lineHeight: 1.5, marginBottom: "14px" }}>
+                Tipp den Code deiner Gruppe ein. Wir laden dann Freunde + Clubs aus der Cloud.
+              </p>
+
+              <div style={{ ...S.eyebrow, marginBottom: "6px" }}>Sync-Code</div>
+              <input value={syncInput}
+                onChange={e => setSyncInput(cleanSync(e.target.value))}
+                placeholder="z.B. FLIGHT-CLUB"
+                maxLength={20}
+                autoFocus
+                style={{ ...S.input, textTransform: "uppercase", letterSpacing: "0.1em", fontFamily: "JetBrains Mono, monospace", fontSize: "16px", marginBottom: "10px" }}/>
+
+              <div style={{ fontSize: "10px", color: T.textDim, marginBottom: "14px", lineHeight: 1.4 }}>
+                💡 Code ist 4-20 Zeichen lang. Buchstaben, Zahlen, Bindestrich. Wird wie ein Passwort behandelt.
+              </div>
+
+              <button
+                onClick={async () => {
+                  if (!isValidSyncCode(syncInput)) {
+                    showUndoToast("⚠️ Code muss 4-20 Zeichen lang sein", null);
+                    return;
+                  }
+                  // Setup sync first → das lädt Friends + Clubs aus der Cloud
+                  await setupSync(syncInput);
+                  // Dann zur Name-Auswahl wechseln
+                  setOnboardingMode("name-pick");
+                }}
+                disabled={!isValidSyncCode(syncInput)}
+                className="gold-hover"
+                style={{ ...S.btnPrimary, width: "100%", opacity: !isValidSyncCode(syncInput) ? 0.4 : 1 }}>
+                ☁️ Verbinden & Daten laden
+              </button>
+            </>
+          )}
+
+          {/* ── MODE: Name-Pick (nach Sync-Connect) ── */}
+          {onboardingMode === "name-pick" && (
+            <>
+              <h3 className="serif" style={{ fontSize: "20px", margin: "0 0 4px", color: T.text }}>👤 Wer bist du?</h3>
+              <p style={{ fontSize: "12px", color: T.textSoft, lineHeight: 1.5, marginBottom: "14px" }}>
+                {friends.length > 0
+                  ? `Wähle deinen Namen aus der Crew oder lege dich neu an.`
+                  : `Es sind noch keine Freunde in der Cloud. Lege dein Profil an.`}
+              </p>
+
+              {friends.length > 0 && (
+                <>
+                  <div style={{ ...S.eyebrow, marginBottom: "8px" }}>👥 Bestehende Crew</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginBottom: "14px" }}>
+                    {friends.map(f => (
+                      <button
+                        key={f.playerId || f.name}
+                        onClick={async () => {
+                          const profile = { name: f.name, hcp: f.hcp };
+                          await saveOwnerProfile(profile);
+                          showUndoToast(`✓ Willkommen zurück, ${f.name}!`, null);
+                          close();
+                        }}
+                        className="card-hover"
+                        style={{
+                          display: "flex", alignItems: "center", gap: "10px",
+                          padding: "10px 12px",
+                          background: T.surface2,
+                          border: `1px solid ${T.line}`,
+                          borderRadius: "10px",
+                          textAlign: "left",
+                          cursor: "pointer",
+                        }}>
+                        <div style={{
+                          width: "32px", height: "32px", borderRadius: "50%",
+                          background: `${T.gold}20`, border: `1px solid ${T.gold}40`,
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          fontSize: "13px", fontWeight: 700, color: T.gold,
+                        }}>
+                          {(f.name || "?").charAt(0).toUpperCase()}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: "13px", fontWeight: 600, color: T.text }}>{f.name}</div>
+                          <div style={{ fontSize: "10px", color: T.textSoft }}>HCP {f.hcp}</div>
+                        </div>
+                        <span style={{ color: T.textSoft, fontSize: "16px" }}>›</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px", margin: "12px 0" }}>
+                    <div style={{ flex: 1, height: "1px", background: T.line }}/>
+                    <div style={{ fontSize: "10px", color: T.textDim, letterSpacing: "0.06em" }}>ODER</div>
+                    <div style={{ flex: 1, height: "1px", background: T.line }}/>
+                  </div>
+                </>
+              )}
+
+              <button
+                onClick={() => {
+                  setShowOnboardingChoice(false);
+                  setOnboardingMode("choice");
+                  setOwnerSetupOpen(true);
+                  setOwnerForm({ name: "", hcp: "" });
+                }}
+                style={{ ...S.btnSecondary, width: "100%" }}>
+                🆕 Neuen Namen anlegen
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  };
 
   const renderOwnerSetup = () => {
     if (!ownerSetupOpen) return null;
@@ -11148,16 +11476,16 @@ WICHTIG:
     );
   };
 
-  // Open owner setup automatically once after welcome, if not yet set
+  // Open onboarding choice automatically once after welcome, if not yet set
+  // v46: Erst Choice-Screen ("Sync-Code eingeben" oder "Neu starten"), dann Owner-Setup
   useEffect(() => {
-    if (loaded && !ownerProfile && !showWelcome && !ownerSetupOpen) {
-      // Check if user has dismissed this prompt before
+    if (loaded && !ownerProfile && !showWelcome && !ownerSetupOpen && !showOnboardingChoice) {
       (async () => {
         try {
           const skipped = await window.storage.get("golf-owner-setup-skipped");
           if (!skipped?.value) {
-            setOwnerSetupOpen(true);
-            setOwnerForm({ name: "", hcp: "" });
+            setShowOnboardingChoice(true);
+            setOnboardingMode("choice");
           }
         } catch {}
       })();
@@ -11434,9 +11762,46 @@ WICHTIG:
                 Gemeinsamen Code teilen (z.B. <span className="mono">STAMMRUNDE-2026</span>) → alle Gruppen-Mitglieder sehen dieselben Runden, Freunde und Clubs.
               </div>
             </div>
-            <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, margin: 0, fontStyle: "italic" }}>
+            <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, margin: "0 0 12px", fontStyle: "italic" }}>
               Wichtig: Jeder mit dem Code kann Daten lesen und schreiben. Teile ihn nur mit Leuten denen du vertraust.
             </p>
+            <button
+              onClick={() => {
+                setShowWelcome(false);
+                setShowSyncModal(true);
+              }}
+              style={{ ...S.btnSecondary, width: "100%", color: T.gold, borderColor: `${T.gold}50`, background: `${T.gold}10`, fontSize: "12px" }}>
+              ☁️ Direkt zu Sync-Settings
+            </button>
+          </>
+        ),
+      },
+      {
+        icon: "📊",
+        title: "Stats & Form-Trends",
+        body: (
+          <>
+            <p style={{ fontSize: "13px", color: T.textSoft, lineHeight: 1.6, margin: "0 0 12px" }}>
+              Drei Tabs helfen dir den Überblick zu behalten:
+            </p>
+            <div style={{ background: T.surface2, border: `1px solid ${T.line}`, borderRadius: "8px", padding: "12px", marginBottom: "8px" }}>
+              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "4px" }}>📊 Stats-Tab</div>
+              <div style={{ fontSize: "11px", color: T.text, lineHeight: 1.5 }}>
+                Pro-Club-Statistiken: Birdies, Pars, Striche, schwerste Löcher. Tap auf einen Spieler für Details.
+              </div>
+            </div>
+            <div style={{ background: T.surface2, border: `1px solid ${T.line}`, borderRadius: "8px", padding: "12px", marginBottom: "8px" }}>
+              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "4px" }}>📈 Form-Tab</div>
+              <div style={{ fontSize: "11px", color: T.text, lineHeight: 1.5 }}>
+                Sim-HCP zeigt wie du <b>aktuell</b> spielst (vs. offiziellem HCP). Top-Block: deine Form. Mittel: Crew-Trends. Unten: Highlights.
+              </div>
+            </div>
+            <div style={{ background: T.surface2, border: `1px solid ${T.line}`, borderRadius: "8px", padding: "12px" }}>
+              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "4px" }}>🎯 Pick-Up-Regel</div>
+              <div style={{ fontSize: "11px", color: T.text, lineHeight: 1.5 }}>
+                Auto-Strich wenn dein Score so hoch ist dass keine SF-Punkte mehr drin sind. Lang drücken auf Score-Feld = Strich direkt.
+              </div>
+            </div>
           </>
         ),
       },
@@ -12667,6 +13032,7 @@ Wichtig:
       {renderHoleJump()}
       {renderStatDrilldown()}
       {renderOwnerSetup()}
+      {renderOnboardingChoice()}
       {renderUndoToast()}
 
       {/* v40: Versions-Footer — sichtbar in jeder Crew, hilft beim Bug-Reporting */}
