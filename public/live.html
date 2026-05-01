@@ -600,7 +600,7 @@
               ${isCrown && isUschi ? `<span class="crown">👑</span>` : ""}
             </div>
             <div class="player-meta">
-              HCP ${s.p.hcp} · Vorgabe ${s.ph} · Brutto ${s.bT || "—"}${s.strichCount > 0 ? "*" : ""} · SF ${s.sfNT} · Schläge ${s.totalStr || "—"}${s.ladyCount > 0 ? ` · 👯 ${s.ladyCount}` : ""}
+              HCP ${s.p.hcp} · Vorgabe ${s.ph} · Brutto ${s.bT || "—"}${s.strichCount > 0 ? "*" : ""} · SF ${s.sfNT}${typeof s.sfBT === "number" ? ` (Br ${s.sfBT})` : ""} · Schläge ${s.totalStr || "—"}${s.ladyCount > 0 ? ` · 👯 ${s.ladyCount}` : ""}
             </div>
           </div>
           <div class="player-pts">
