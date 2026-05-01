@@ -943,8 +943,8 @@ const BUILT_IN_CLUBS = [
 const STRICH = null;
 
 // ─── v40: Versions-Marker — sichtbar im App-Footer ──────────────────────────
-const APP_VERSION = "v42-cyprus.3";
-const APP_BUILD_DATE = "2026-04-27";
+const APP_VERSION = "v44-cyprus-2B";
+const APP_BUILD_DATE = "2026-04-30";
 
 function makeHoles(totalPar, numHoles) {
   const si18 = [1,3,5,7,9,11,13,15,17,2,4,6,8,10,12,14,16,18];
@@ -2552,6 +2552,8 @@ function GolfAppInner() {
   const [showTripSetup, setShowTripSetup] = useState(false);
   const [tripFormData, setTripFormData] = useState(null); // { name, startDate, endDate, location, dayCount, ... }
   const [showTripDetail, setShowTripDetail] = useState(false);
+  // v44: Tab-View im Trip-Detail
+  const [tripDetailView, setTripDetailView] = useState("overview"); // overview | stats | money
   const [aliasInput, setAliasInput] = useState("");
   // UI state
   const [clubQ, setClubQ] = useState("");
@@ -3276,12 +3278,20 @@ function GolfAppInner() {
         dayNumber: i + 1,
         date: d.date || data.startDate,
         roundIds: [],
+        // v43: Flight-Allocation pro Tag
+        flights: {}, // { playerId: "A" | "B" | "C" }
       })),
       pots: {
         dayWin: data.pots?.dayWin || 10,
         threeDayPot: data.pots?.threeDayPot || 50,
         weekTeamPot: data.pots?.weekTeamPot || 50,
         nearestPin: data.pots?.nearestPin || 10,
+      },
+      // v43: HCP-Regeln
+      hcpRules: data.hcpRules || {
+        enabled: true,
+        bestAdj: [-3, -2, -1],
+        worstAdj: [1, 2, 3],
       },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -3334,6 +3344,87 @@ function GolfAppInner() {
   };
 
   // Berechne Trip-Wertung: Tagessieger pro Tag, Gesamt-Sieger
+  // v43: HCP-Adjustments für einen bestimmten Tag berechnen + anwenden
+  // Basis: Alle Tage VOR diesem Tag (also Tag 2 nutzt Ergebnis von Tag 1, Tag 3 nutzt Tag 1+2)
+  const applyHcpAdjustmentsForDay = async (tripId, targetDayNumber) => {
+    const trip = trips.find(t => t.id === tripId);
+    if (!trip) return false;
+    if (!trip.hcpRules?.enabled) {
+      showUndoToast("⚠️ HCP-Adjustments sind im Trip-Setup deaktiviert", null);
+      return false;
+    }
+    if (targetDayNumber <= 1) {
+      showUndoToast("⚠️ Tag 1 ist der Start-Tag, hat keine HCP-Adjustments", null);
+      return false;
+    }
+    // Wir berechnen Ranking aus dem direkt vorhergehenden Tag (sauber + diskutierbar)
+    const prevDay = trip.days.find(d => d.dayNumber === targetDayNumber - 1);
+    if (!prevDay || prevDay.roundIds.length === 0) {
+      showUndoToast(`⚠️ Tag ${targetDayNumber - 1} hat noch keine Runden — erst Runden zuweisen`, null);
+      return false;
+    }
+
+    // Tag-Ergebnis berechnen
+    const standings = computeTripStandings(trip);
+    const dayStanding = standings?.dayResults?.find(d => d.dayNumber === targetDayNumber - 1);
+    if (!dayStanding?.complete) {
+      showUndoToast(`⚠️ Tag ${targetDayNumber - 1} hat noch keine Ergebnisse`, null);
+      return false;
+    }
+
+    const ranked = dayStanding.ranked;
+    const bestAdj = trip.hcpRules.bestAdj || [-3, -2, -1];
+    const worstAdj = trip.hcpRules.worstAdj || [1, 2, 3];
+
+    // Adjustments pro Spieler bestimmen
+    const adjustmentsForPlayer = {};
+    ranked.forEach((p, i) => {
+      const fromBest = i; // 0 = bester
+      const fromWorst = ranked.length - 1 - i; // 0 = schlechtester
+      let adj = 0;
+      if (fromBest < bestAdj.length) {
+        adj = bestAdj[fromBest];
+      } else if (fromWorst < worstAdj.length) {
+        adj = worstAdj[fromWorst];
+      }
+      const key = p.playerId || `name:${normName(p.name)}`;
+      adjustmentsForPlayer[key] = adj;
+    });
+
+    // In Trip persistieren
+    const updatedPlayers = trip.players.map(tp => {
+      const key = tp.playerId || `name:${normName(tp.name)}`;
+      const adj = adjustmentsForPlayer[key] || 0;
+      return {
+        ...tp,
+        hcpAdjustments: { ...tp.hcpAdjustments, [targetDayNumber]: adj },
+      };
+    });
+
+    await updateTrip(tripId, { players: updatedPlayers });
+
+    const summary = ranked.slice(0, 3).map((p, i) => `${p.name} ${bestAdj[i] > 0 ? "+" : ""}${bestAdj[i]}`).join(", ");
+    showUndoToast(`✓ Tag-${targetDayNumber}-HCP angewendet · Top 3: ${summary}`, null);
+    return true;
+  };
+
+  // v43: Flight für einen Spieler an einem Tag setzen
+  const setPlayerFlightForDay = async (tripId, dayNumber, playerId, flight) => {
+    const trip = trips.find(t => t.id === tripId);
+    if (!trip) return;
+    const days = trip.days.map(d => {
+      if (d.dayNumber !== dayNumber) return d;
+      const flights = { ...(d.flights || {}) };
+      if (flight === null || flight === "") {
+        delete flights[playerId];
+      } else {
+        flights[playerId] = flight;
+      }
+      return { ...d, flights };
+    });
+    await updateTrip(tripId, { days });
+  };
+
   const computeTripStandings = (trip) => {
     if (!trip || !rounds.length) return null;
 
@@ -3397,6 +3488,184 @@ function GolfAppInner() {
     const totalRanked = Object.values(totalScores).sort((a, b) => b.totalSf - a.totalSf);
 
     return { dayResults, totalRanked };
+  };
+
+  // v44: Trip-Statistiken — Ladies, Flight-Historie, Geld-Bilanz
+  const computeTripStats = (trip) => {
+    if (!trip) return null;
+    const tripRoundIds = (trip.days || []).flatMap(d => d.roundIds || []);
+    const tripRounds = rounds.filter(r => tripRoundIds.includes(r.id));
+
+    const standings = computeTripStandings(trip);
+
+    // Pro Spieler: Ladies, Birdies, Pars, Bogeys, Striche, Flight-Historie
+    const perPlayer = {};
+    trip.players.forEach(tp => {
+      const key = tp.playerId || `name:${normName(tp.name)}`;
+      perPlayer[key] = {
+        playerId: tp.playerId,
+        name: tp.name,
+        ladies: 0,
+        birdies: 0,
+        pars: 0,
+        bogeys: 0,
+        doubles: 0,
+        strichCount: 0,
+        bestSf: 0,
+        worstSf: Infinity,
+        avgSf: 0,
+        sfHistory: [],
+        flights: [],
+      };
+    });
+
+    // Aggregate über alle Trip-Runden
+    tripRounds.forEach(r => {
+      (r.players || []).forEach(p => {
+        const key = p.playerId || `name:${normName(p.name)}`;
+        const pm = perPlayer[key];
+        if (!pm) return;
+        // Ladies
+        const playerLadies = (r.ladies || {})[p.id];
+        if (Array.isArray(playerLadies)) pm.ladies += playerLadies.length;
+        // Score-Stats
+        (r.holes || []).forEach((h, i) => {
+          const g = r.scores?.[p.id]?.[i];
+          if (isStrich(g)) {
+            pm.strichCount++;
+            return;
+          }
+          if (!isValid(g)) return;
+          const diff = g - h.par;
+          if (diff <= -1) pm.birdies++;
+          else if (diff === 0) pm.pars++;
+          else if (diff === 1) pm.bogeys++;
+          else if (diff >= 2) pm.doubles++;
+        });
+      });
+    });
+
+    // SF-Historie pro Spieler aus dayResults
+    standings?.dayResults?.forEach(dr => {
+      dr.ranked?.forEach(r => {
+        const key = r.playerId || `name:${normName(r.name)}`;
+        const pm = perPlayer[key];
+        if (!pm) return;
+        pm.sfHistory.push({ dayNumber: dr.dayNumber, sf: r.sf });
+        if (r.sf > pm.bestSf) pm.bestSf = r.sf;
+        if (r.sf < pm.worstSf) pm.worstSf = r.sf;
+      });
+    });
+
+    // Flight-Historie aufbauen
+    trip.days?.forEach(day => {
+      Object.entries(day.flights || {}).forEach(([pid, flight]) => {
+        // Find by playerId or name fallback
+        const player = trip.players.find(tp => tp.playerId === pid);
+        if (!player) return;
+        const key = player.playerId || `name:${normName(player.name)}`;
+        const pm = perPlayer[key];
+        if (!pm) return;
+        pm.flights.push({ dayNumber: day.dayNumber, flight });
+      });
+    });
+
+    // Avg-SF berechnen
+    Object.values(perPlayer).forEach(pm => {
+      if (pm.sfHistory.length > 0) {
+        pm.avgSf = Math.round(pm.sfHistory.reduce((s, x) => s + x.sf, 0) / pm.sfHistory.length);
+      } else {
+        pm.worstSf = 0;
+      }
+    });
+
+    return {
+      perPlayer,
+      tripRounds: tripRounds.length,
+      tripRoundIds,
+    };
+  };
+
+  // v44: Geld-Bilanz pro Spieler
+  // Berechnet wer pro Tag gewonnen hat (Tagessieger) und wie viel.
+  // Tag-Sieger bekommt Pot vom Rest aller Mitspieler an dem Tag.
+  const computeTripMoney = (trip) => {
+    if (!trip) return null;
+    const standings = computeTripStandings(trip);
+    if (!standings) return null;
+
+    const playerCount = (trip.players || []).length;
+    const dayWinPerPlayer = trip.pots?.dayWin || 0;
+    const totalPotPerPlayer = trip.pots?.threeDayPot || 0;
+
+    // pro Spieler: gewonnen, verloren, netto
+    const perPlayer = {};
+    trip.players.forEach(tp => {
+      const key = tp.playerId || `name:${normName(tp.name)}`;
+      perPlayer[key] = {
+        playerId: tp.playerId,
+        name: tp.name,
+        won: 0,
+        owes: 0,
+        net: 0,
+        wins: [],
+        paid: trip.payments?.[key] || {}, // { dayNumber: true/false } für tracking
+      };
+    });
+
+    // Tagessiege auswerten
+    standings.dayResults?.forEach(dr => {
+      if (!dr.complete || !dr.winner) return;
+      const wKey = dr.winner.playerId || `name:${normName(dr.winner.name)}`;
+      const winnerWin = dayWinPerPlayer * (playerCount - 1);
+      if (perPlayer[wKey]) {
+        perPlayer[wKey].won += winnerWin;
+        perPlayer[wKey].wins.push({ dayNumber: dr.dayNumber, sf: dr.winner.sf, prize: winnerWin });
+      }
+      // Alle anderen schulden je dayWinPerPlayer
+      trip.players.forEach(tp => {
+        const key = tp.playerId || `name:${normName(tp.name)}`;
+        if (key !== wKey && perPlayer[key]) {
+          perPlayer[key].owes += dayWinPerPlayer;
+        }
+      });
+    });
+
+    // Gesamtwertung: Sieger über alle Tage holt Gesamt-Pot
+    if (standings.totalRanked?.length > 0 && totalPotPerPlayer > 0) {
+      const overallWinner = standings.totalRanked[0];
+      const overallKey = overallWinner.playerId || `name:${normName(overallWinner.name)}`;
+      const overallWin = totalPotPerPlayer * (playerCount - 1);
+      if (perPlayer[overallKey]) {
+        perPlayer[overallKey].won += overallWin;
+        perPlayer[overallKey].wins.push({ dayNumber: "GESAMT", sf: overallWinner.totalSf, prize: overallWin });
+      }
+      trip.players.forEach(tp => {
+        const key = tp.playerId || `name:${normName(tp.name)}`;
+        if (key !== overallKey && perPlayer[key]) {
+          perPlayer[key].owes += totalPotPerPlayer;
+        }
+      });
+    }
+
+    // Net berechnen
+    Object.values(perPlayer).forEach(pm => {
+      pm.net = pm.won - pm.owes;
+    });
+
+    const ranked = Object.values(perPlayer).sort((a, b) => b.net - a.net);
+    return { perPlayer, ranked };
+  };
+
+  // v44: Toggle "bezahlt"-Status für einen Spieler an einem Tag
+  const togglePlayerPaid = async (tripId, playerId, dayKey) => {
+    const trip = trips.find(t => t.id === tripId);
+    if (!trip) return;
+    const playerKey = playerId;
+    const payments = { ...(trip.payments || {}) };
+    if (!payments[playerKey]) payments[playerKey] = {};
+    payments[playerKey][dayKey] = !payments[playerKey][dayKey];
+    await updateTrip(tripId, { payments });
   };
 
   // ── Scores
@@ -5524,6 +5793,12 @@ function GolfAppInner() {
                       syncCode: syncCode || "",
                       selectedFriendIds: [],
                       pots: { dayWin: 10, threeDayPot: 50, weekTeamPot: 50, nearestPin: 10 },
+                      // v43: HCP-Adjustments-Regeln (Cyprus-Defaults nach Max)
+                      hcpRules: {
+                        enabled: true,
+                        bestAdj: [-3, -2, -1],   // Top 3 bekommen weniger HCP für nächsten Tag
+                        worstAdj: [1, 2, 3],     // Bottom 3 bekommen mehr HCP
+                      },
                     });
                     setShowTripSetup(true);
                   }}
@@ -9720,7 +9995,14 @@ WICHTIG:
 
           {/* Spieler */}
           <div style={{ ...S.card, padding: "12px 14px", marginBottom: "12px" }}>
-            <div style={{ ...S.eyebrow, marginBottom: "10px" }}>👥 Spieler ({f.selectedFriendIds.length} ausgewählt)</div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "10px" }}>
+              <div style={{ ...S.eyebrow }}>👥 Spieler ({f.selectedFriendIds.length}/8)</div>
+              {f.selectedFriendIds.length >= 7 && (
+                <span style={{ fontSize: "9px", color: f.selectedFriendIds.length === 8 ? T.double : T.gold, fontWeight: 700, letterSpacing: "0.06em" }}>
+                  {f.selectedFriendIds.length === 8 ? "MAX ERREICHT" : "FAST VOLL"}
+                </span>
+              )}
+            </div>
             {friends.length === 0 ? (
               <div style={{ padding: "12px", background: `${T.gold}10`, border: `1px solid ${T.gold}40`, borderRadius: "8px" }}>
                 <p style={{ fontSize: "13px", color: T.gold, fontWeight: 600, marginTop: 0, marginBottom: "8px" }}>
@@ -9739,9 +10021,14 @@ WICHTIG:
               <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                 {friends.map(fr => {
                   const checked = f.selectedFriendIds.includes(fr.playerId);
+                  const atLimit = f.selectedFriendIds.length >= 8 && !checked;
                   return (
                     <button key={fr.playerId}
                       onClick={() => {
+                        if (atLimit) {
+                          showUndoToast("⚠️ Maximum erreicht — ein Trip kann höchstens 8 Spieler haben", null);
+                          return;
+                        }
                         setF({
                           selectedFriendIds: checked
                             ? f.selectedFriendIds.filter(id => id !== fr.playerId)
@@ -9755,6 +10042,8 @@ WICHTIG:
                         border: `1px solid ${checked ? T.gold : T.line}`,
                         borderRadius: "8px",
                         textAlign: "left",
+                        opacity: atLimit ? 0.4 : 1,
+                        cursor: "pointer",
                       }}>
                       <div style={{
                         width: "20px", height: "20px", borderRadius: "4px",
@@ -9771,6 +10060,71 @@ WICHTIG:
                   );
                 })}
               </div>
+            )}
+          </div>
+
+          {/* v43: HCP-Adjustments-Regeln */}
+          <div style={{ ...S.card, padding: "12px 14px", marginBottom: "16px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+              <div style={{ ...S.eyebrow }}>⚖️ HCP-Adjustments für Folgetage</div>
+              <button
+                onClick={() => setF({ hcpRules: { ...f.hcpRules, enabled: !f.hcpRules.enabled } })}
+                style={{
+                  background: f.hcpRules.enabled ? T.gold : T.surface2,
+                  color: f.hcpRules.enabled ? T.canvas : T.textSoft,
+                  border: `1px solid ${f.hcpRules.enabled ? T.gold : T.line}`,
+                  borderRadius: "6px",
+                  padding: "4px 10px",
+                  fontSize: "10px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  letterSpacing: "0.04em",
+                }}>
+                {f.hcpRules.enabled ? "AKTIV" : "AUS"}
+              </button>
+            </div>
+            {f.hcpRules.enabled && (
+              <>
+                <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px", lineHeight: 1.5, fontStyle: "italic" }}>
+                  Nach jedem Spieltag werden HCPs angepasst. Die besten 3 bekommen Abzug, die schlechtesten 3 bekommen Aufschlag. Default: Cyprus-Regeln.
+                </p>
+                <div style={{ background: T.surface2, borderRadius: "8px", padding: "10px", marginBottom: "8px" }}>
+                  <div style={{ fontSize: "10px", color: T.gold, fontWeight: 700, marginBottom: "6px", letterSpacing: "0.04em" }}>BESTE 3 → HCP-ABZUG</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px" }}>
+                    {[0, 1, 2].map(i => (
+                      <div key={i}>
+                        <label style={{ fontSize: "9px", color: T.textDim, display: "block", marginBottom: "2px" }}>{i + 1}. Platz</label>
+                        <input type="number" value={f.hcpRules.bestAdj[i]}
+                          onChange={e => {
+                            const v = parseInt(e.target.value) || 0;
+                            const arr = [...f.hcpRules.bestAdj];
+                            arr[i] = v;
+                            setF({ hcpRules: { ...f.hcpRules, bestAdj: arr } });
+                          }}
+                          style={{ ...S.input, fontSize: "13px", padding: "6px 8px", textAlign: "center", color: T.sage, fontWeight: 700 }}/>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div style={{ background: T.surface2, borderRadius: "8px", padding: "10px" }}>
+                  <div style={{ fontSize: "10px", color: T.double, fontWeight: 700, marginBottom: "6px", letterSpacing: "0.04em" }}>SCHLECHTESTE 3 → HCP-AUFSCHLAG</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px" }}>
+                    {[0, 1, 2].map(i => (
+                      <div key={i}>
+                        <label style={{ fontSize: "9px", color: T.textDim, display: "block", marginBottom: "2px" }}>{i + 1}. Letzter</label>
+                        <input type="number" value={f.hcpRules.worstAdj[i]}
+                          onChange={e => {
+                            const v = parseInt(e.target.value) || 0;
+                            const arr = [...f.hcpRules.worstAdj];
+                            arr[i] = v;
+                            setF({ hcpRules: { ...f.hcpRules, worstAdj: arr } });
+                          }}
+                          style={{ ...S.input, fontSize: "13px", padding: "6px 8px", textAlign: "center", color: T.double, fontWeight: 700 }}/>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
             )}
           </div>
 
@@ -9822,6 +10176,10 @@ WICHTIG:
                   showUndoToast("⚠️ Wähle mindestens 2 Spieler — ein Trip macht alleine wenig Sinn", null);
                   return;
                 }
+                if (f.selectedFriendIds.length > 8) {
+                  showUndoToast("⚠️ Maximum 8 Spieler pro Trip", null);
+                  return;
+                }
                 const selectedPlayers = friends.filter(fr => f.selectedFriendIds.includes(fr.playerId));
                 const startDate = new Date(f.startDate);
                 const days = Array.from({ length: f.dayCount }, (_, i) => {
@@ -9835,6 +10193,7 @@ WICHTIG:
                   syncCode: f.syncCode,
                   players: selectedPlayers,
                   days, pots: f.pots,
+                  hcpRules: f.hcpRules,
                 });
                 close();
                 showUndoToast(`✓ Trip "${f.name}" angelegt`, null);
@@ -9854,7 +10213,7 @@ WICHTIG:
     if (!showTripDetail || !activeTripId) return null;
     const trip = trips.find(t => t.id === activeTripId);
     if (!trip) return null;
-    const close = () => { setShowTripDetail(false); setActiveTripId(null); };
+    const close = () => { setShowTripDetail(false); setActiveTripId(null); setTripDetailView("overview"); };
     const standings = computeTripStandings(trip);
     const totalPot = (trip.players?.length || 0) * (
       (trip.pots?.dayWin || 0) * (trip.days?.length || 0) +
@@ -9874,7 +10233,33 @@ WICHTIG:
             {fmtDate(trip.startDate)} – {fmtDate(trip.endDate)}
           </div>
 
-          {/* Pot-Summary */}
+          {/* v44: Tab-Switcher */}
+          <div style={{ display: "flex", background: T.surface2, borderRadius: "10px", padding: "3px", marginBottom: "14px" }}>
+            {[
+              { k: "overview", l: "🏆 Übersicht" },
+              { k: "stats", l: "📊 Stats" },
+              { k: "money", l: "💰 Geld" },
+            ].map(({ k, l }) => (
+              <button key={k}
+                onClick={() => setTripDetailView(k)}
+                style={{
+                  flex: 1, padding: "8px 6px",
+                  background: tripDetailView === k ? T.gold : "transparent",
+                  color: tripDetailView === k ? T.canvas : T.textSoft,
+                  border: "none", borderRadius: "8px",
+                  fontSize: "11px", fontWeight: tripDetailView === k ? 700 : 500,
+                  cursor: "pointer",
+                  transition: "all 0.2s",
+                }}>
+                {l}
+              </button>
+            ))}
+          </div>
+
+          {/* Übersicht-View (= bisheriger Inhalt) */}
+          {tripDetailView === "overview" && (
+            <>
+              {/* Pot-Summary */}
           <div style={{ ...S.card, padding: "12px 14px", marginBottom: "12px", borderColor: `${T.gold}30` }}>
             <div style={{ ...S.eyebrow, marginBottom: "8px", color: T.gold }}>💰 Pot-Übersicht</div>
             <div style={{ fontSize: "20px", fontWeight: 700, color: T.gold, marginBottom: "4px" }}>
@@ -9938,11 +10323,18 @@ WICHTIG:
             <p style={{ fontSize: "10px", color: T.textDim, marginBottom: "10px", lineHeight: 1.4, fontStyle: "italic" }}>
               Spielt eine Runde wie gewohnt und weist sie hier dem entsprechenden Tag zu.
             </p>
-            {trip.days?.map(day => (
+            {trip.days?.map(day => {
+              const dayHasAdjustments = day.dayNumber > 1 && trip.players.some(p => p.hcpAdjustments?.[day.dayNumber] !== undefined);
+              return (
               <div key={day.dayNumber} style={{ marginBottom: "12px", padding: "10px", background: T.surface2, borderRadius: "8px" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px", alignItems: "center" }}>
                   <span style={{ fontSize: "12px", fontWeight: 600, color: T.gold }}>Tag {day.dayNumber}</span>
-                  <span style={{ fontSize: "10px", color: T.textDim }}>{fmtDate(day.date)}</span>
+                  <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                    {dayHasAdjustments && (
+                      <span style={{ fontSize: "9px", color: T.gold, background: `${T.gold}15`, padding: "2px 5px", borderRadius: "3px", fontWeight: 700, letterSpacing: "0.04em" }}>HCP+</span>
+                    )}
+                    <span style={{ fontSize: "10px", color: T.textDim }}>{fmtDate(day.date)}</span>
+                  </div>
                 </div>
                 {day.roundIds?.length > 0 ? (
                   day.roundIds.map(rid => {
@@ -9977,9 +10369,252 @@ WICHTIG:
                     </option>
                   ))}
                 </select>
+
+                {/* v43: HCP-Adjustment-Anwenden + Flight-Allocation */}
+                {day.dayNumber > 1 && trip.hcpRules?.enabled && (
+                  <button
+                    onClick={() => applyHcpAdjustmentsForDay(trip.id, day.dayNumber)}
+                    style={{
+                      ...S.btnSecondary, width: "100%", marginTop: "8px",
+                      fontSize: "11px", padding: "8px 10px",
+                      color: dayHasAdjustments ? T.gold : T.textSoft,
+                      borderColor: dayHasAdjustments ? `${T.gold}50` : T.line,
+                      background: dayHasAdjustments ? `${T.gold}10` : T.surface2,
+                    }}>
+                    {dayHasAdjustments ? "🔄 HCP-Adjustments aktualisieren" : "⚖️ HCP-Adjustments anwenden"}
+                  </button>
+                )}
+
+                {/* Flight-Allocation pro Spieler */}
+                <div style={{ marginTop: "8px" }}>
+                  <div style={{ fontSize: "9px", color: T.textDim, fontWeight: 700, letterSpacing: "0.04em", marginBottom: "5px" }}>FLIGHT-ZUTEILUNG</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                    {trip.players.map(tp => {
+                      const flight = day.flights?.[tp.playerId] || "";
+                      const adjustment = tp.hcpAdjustments?.[day.dayNumber];
+                      return (
+                        <div key={tp.playerId} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          <span style={{ flex: 1, fontSize: "11px", color: T.text }}>
+                            {tp.name}
+                            {adjustment !== undefined && adjustment !== 0 && (
+                              <span style={{ fontSize: "10px", color: adjustment > 0 ? T.double : T.sage, marginLeft: "5px", fontWeight: 700 }}>
+                                {adjustment > 0 ? "+" : ""}{adjustment}
+                              </span>
+                            )}
+                          </span>
+                          <div style={{ display: "flex", gap: "3px" }}>
+                            {["A", "B", "C", ""].map(opt => (
+                              <button
+                                key={opt || "none"}
+                                onClick={() => setPlayerFlightForDay(trip.id, day.dayNumber, tp.playerId, opt || null)}
+                                style={{
+                                  width: "26px", height: "26px",
+                                  background: flight === opt ? T.gold : T.surface1,
+                                  color: flight === opt ? T.canvas : T.textSoft,
+                                  border: `1px solid ${flight === opt ? T.gold : T.line}`,
+                                  borderRadius: "5px", fontSize: "10px",
+                                  fontWeight: 700, cursor: "pointer",
+                                }}>
+                                {opt || "—"}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
-            ))}
+            );
+            })}
           </div>
+            </>
+          )}
+
+          {/* v44: Stats-View */}
+          {tripDetailView === "stats" && (() => {
+            const stats = computeTripStats(trip);
+            if (!stats || stats.tripRounds === 0) {
+              return <EmptyState icon="📊" title="Noch keine Trip-Stats" sub="Stats erscheinen sobald die ersten Runden den Trip-Tagen zugewiesen sind." />;
+            }
+            const playersList = Object.values(stats.perPlayer).sort((a, b) => b.bestSf - a.bestSf);
+
+            return (
+              <>
+                <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "12px", lineHeight: 1.5, fontStyle: "italic" }}>
+                  Aggregierte Statistiken über alle Trip-Runden ({stats.tripRounds} Runde{stats.tripRounds === 1 ? "" : "n"}).
+                </p>
+
+                {/* Pro-Spieler-Karten */}
+                {playersList.map(p => {
+                  const totalScores = p.birdies + p.pars + p.bogeys + p.doubles;
+                  return (
+                    <div key={p.playerId || p.name} style={{ ...S.card, padding: "12px 14px", marginBottom: "10px" }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+                        <div style={{ fontSize: "14px", fontWeight: 700, color: T.text }}>{p.name}</div>
+                        <div style={{ display: "flex", gap: "8px", fontSize: "11px" }}>
+                          {p.bestSf > 0 && (
+                            <span style={{ color: T.gold, fontWeight: 700 }}>Best <span className="mono">{p.bestSf}</span></span>
+                          )}
+                          {p.avgSf > 0 && (
+                            <span style={{ color: T.textSoft }}>⌀ <span className="mono">{p.avgSf}</span></span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* SF-Verlauf pro Tag */}
+                      {p.sfHistory.length > 0 && (
+                        <div style={{ display: "flex", gap: "4px", marginBottom: "8px" }}>
+                          {p.sfHistory.map(h => (
+                            <div key={h.dayNumber} style={{
+                              flex: 1,
+                              padding: "6px 4px",
+                              background: T.surface2,
+                              borderRadius: "5px",
+                              border: `1px solid ${h.sf >= 36 ? T.sage + "40" : T.line}`,
+                              textAlign: "center",
+                            }}>
+                              <div style={{ fontSize: "9px", color: T.textDim }}>T{h.dayNumber}</div>
+                              <div className="mono" style={{
+                                fontSize: "13px", fontWeight: 700,
+                                color: h.sf >= 36 ? T.sage : h.sf >= 30 ? T.gold : T.textSoft,
+                              }}>{h.sf}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Stats-Pills */}
+                      {totalScores > 0 && (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "5px", marginBottom: p.flights.length > 0 ? "8px" : 0 }}>
+                          {p.birdies > 0 && <span style={{ background: `${T.gold}15`, color: T.gold, padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700 }}>🎯 {p.birdies} Birdies</span>}
+                          <span style={{ background: T.surface2, color: T.text, padding: "3px 8px", borderRadius: "6px", fontSize: "10px" }}>⛳ {p.pars}</span>
+                          <span style={{ background: T.surface2, color: T.textSoft, padding: "3px 8px", borderRadius: "6px", fontSize: "10px" }}>⚠️ {p.bogeys}</span>
+                          <span style={{ background: T.surface2, color: T.textSoft, padding: "3px 8px", borderRadius: "6px", fontSize: "10px" }}>💀 {p.doubles}</span>
+                          {p.strichCount > 0 && <span style={{ background: `${T.double}15`, color: T.double, padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700 }}>✗ {p.strichCount}</span>}
+                          {p.ladies > 0 && <span style={{ background: `${T.gold}25`, color: T.gold, padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700 }}>👯 {p.ladies} Ladies</span>}
+                        </div>
+                      )}
+
+                      {/* Flight-Historie */}
+                      {p.flights.length > 0 && (
+                        <div style={{ paddingTop: "6px", borderTop: `1px solid ${T.line}` }}>
+                          <div style={{ fontSize: "9px", color: T.textDim, fontWeight: 700, letterSpacing: "0.04em", marginBottom: "4px" }}>FLIGHT-HISTORIE</div>
+                          <div style={{ display: "flex", gap: "5px", flexWrap: "wrap" }}>
+                            {p.flights.sort((a, b) => a.dayNumber - b.dayNumber).map(f => (
+                              <span key={f.dayNumber} style={{
+                                background: T.surface2, color: T.gold,
+                                padding: "3px 6px", borderRadius: "5px",
+                                fontSize: "10px", fontWeight: 600,
+                              }}>
+                                T{f.dayNumber}: <strong>{f.flight}</strong>
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </>
+            );
+          })()}
+
+          {/* v44: Money-View */}
+          {tripDetailView === "money" && (() => {
+            const money = computeTripMoney(trip);
+            if (!money) return <EmptyState icon="💰" title="Noch keine Geld-Bilanz" sub="Bilanz erscheint sobald die ersten Tagesergebnisse da sind." />;
+            const ranked = money.ranked;
+            const maxAbs = Math.max(...ranked.map(p => Math.abs(p.net)), 1);
+
+            return (
+              <>
+                <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "12px", lineHeight: 1.5, fontStyle: "italic" }}>
+                  Geld-Bilanz pro Spieler. Tippe ein Datum-Häkchen wenn jemand bezahlt hat.
+                </p>
+
+                {/* Bilanz-Karten */}
+                {ranked.map(p => {
+                  const isWin = p.net > 0;
+                  const isEven = p.net === 0;
+                  return (
+                    <div key={p.playerId || p.name} style={{
+                      ...S.card, padding: "12px 14px", marginBottom: "10px",
+                      borderColor: isWin ? `${T.sage}50` : isEven ? T.line : `${T.double}50`,
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+                        <div style={{ fontSize: "14px", fontWeight: 700, color: T.text }}>{p.name}</div>
+                        <div className="mono" style={{
+                          fontSize: "20px", fontWeight: 700,
+                          color: isWin ? T.sage : isEven ? T.textDim : T.double,
+                        }}>
+                          {isWin ? "+" : ""}€{p.net}
+                        </div>
+                      </div>
+
+                      {/* Bilanz-Bar */}
+                      <div style={{ height: "4px", background: T.surface2, borderRadius: "2px", overflow: "hidden", marginBottom: "8px", position: "relative" }}>
+                        <div style={{
+                          height: "100%",
+                          width: `${Math.abs(p.net) / maxAbs * 50}%`,
+                          background: isWin ? T.sage : T.double,
+                          marginLeft: isWin ? "50%" : `${50 - Math.abs(p.net) / maxAbs * 50}%`,
+                        }}/>
+                        <div style={{
+                          position: "absolute", left: "50%", top: 0, bottom: 0,
+                          width: "1px", background: T.line,
+                        }}/>
+                      </div>
+
+                      <div style={{ fontSize: "10px", color: T.textDim, marginBottom: p.wins.length > 0 ? "8px" : 0 }}>
+                        Gewonnen: <span style={{ color: T.sage, fontWeight: 600 }}>€{p.won}</span> · Schuldet: <span style={{ color: T.double, fontWeight: 600 }}>€{p.owes}</span>
+                      </div>
+
+                      {/* Wins-Liste */}
+                      {p.wins.length > 0 && (
+                        <div style={{ paddingTop: "8px", borderTop: `1px solid ${T.line}` }}>
+                          <div style={{ fontSize: "9px", color: T.textDim, fontWeight: 700, letterSpacing: "0.04em", marginBottom: "5px" }}>SIEGE</div>
+                          {p.wins.map((w, wi) => {
+                            const dayKey = String(w.dayNumber);
+                            const paid = !!p.paid[dayKey];
+                            return (
+                              <div key={wi} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "4px 0" }}>
+                                <span style={{ fontSize: "11px", color: T.text, flex: 1 }}>
+                                  {w.dayNumber === "GESAMT" ? "🏆 Gesamtwertung" : `Tag ${w.dayNumber}`}
+                                  <span style={{ color: T.textDim, marginLeft: "5px" }}>· {w.sf} SF</span>
+                                </span>
+                                <span style={{ fontSize: "11px", color: T.gold, fontWeight: 700 }}>€{w.prize}</span>
+                                <button
+                                  onClick={() => togglePlayerPaid(trip.id, p.playerId || `name:${normName(p.name)}`, dayKey)}
+                                  style={{
+                                    width: "22px", height: "22px",
+                                    background: paid ? T.sage : T.surface2,
+                                    color: paid ? T.canvas : T.textSoft,
+                                    border: `1px solid ${paid ? T.sage : T.line}`,
+                                    borderRadius: "5px",
+                                    fontSize: "13px",
+                                    fontWeight: 700,
+                                    cursor: "pointer",
+                                  }}
+                                  title={paid ? "Bezahlt — tippen zum Zurücksetzen" : "Tippen wenn bezahlt"}>
+                                  {paid ? "✓" : ""}
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+                {/* Hinweis */}
+                <div style={{ ...S.card, padding: "10px 12px", background: T.surface2, fontSize: "10px", color: T.textDim, lineHeight: 1.5, marginTop: "8px" }}>
+                  💡 Tippe das Häkchen rechts neben einem Sieg wenn der Schuldner bezahlt hat. Die Geld-Bilanz wird basierend auf den Trip-Pots berechnet.
+                </div>
+              </>
+            );
+          })()}
 
           <div style={{ display: "flex", gap: "8px" }}>
             <button
