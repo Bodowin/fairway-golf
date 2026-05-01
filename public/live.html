@@ -420,7 +420,38 @@
       });
       // Lady count for this player from the live data — defensive against missing/invalid arrays
       const ladyCount = Array.isArray((d.ladies || {})[p.id]) ? d.ladies[p.id].length : 0;
-      return { p, ph, bT, sfNT, sfBT, strichCount, ladyCount, totalStr, teeName };
+
+      // v49: Pro-Spieler Loch-für-Loch Daten + Streak-Tracking + letzte Aktion
+      const holeLog = []; // [{ holeIdx, score, vsPar, type: "birdie"|"par"|"bogey"|"double"|"strich" }]
+      let played = 0;
+      holes.forEach((h, i) => {
+        const g = scores[p.id] && scores[p.id][i];
+        if (isStrich(g)) {
+          played++;
+          holeLog.push({ holeIdx: i, score: null, vsPar: null, type: "strich" });
+          return;
+        }
+        if (!isValid(g)) return;
+        played++;
+        const diff = g - h.par;
+        let type = "double";
+        if (diff <= -1) type = "birdie";
+        else if (diff === 0) type = "par";
+        else if (diff === 1) type = "bogey";
+        holeLog.push({ holeIdx: i, score: g, vsPar: diff, type });
+      });
+
+      // Hot-Streak: 3 Löcher in Folge Birdie/Par
+      let hotStreak = 0;
+      for (let k = holeLog.length - 1; k >= 0; k--) {
+        if (holeLog[k].type === "birdie" || holeLog[k].type === "par") hotStreak++;
+        else break;
+      }
+
+      // Pace projection (ab 5 Löchern)
+      const projectedSf = played >= 5 ? Math.round(sfNT / played * holes.length) : null;
+
+      return { p, ph, bT, sfNT, sfBT, strichCount, ladyCount, totalStr, teeName, holeLog, hotStreak, projectedSf, played };
     });
 
     const isUschi = gameMode !== "stableford";
@@ -453,9 +484,41 @@
     });
 
     // ── Build HTML ───────────────────────────────────────────────────────────
+
+    // v49: Letzte Aktion finden (höchstes-Loch das gespielt wurde)
+    let lastAction = null;
+    let highestPlayedIdx = -1;
+    stats.forEach(s => {
+      s.holeLog.forEach(hl => {
+        if (hl.holeIdx > highestPlayedIdx) {
+          highestPlayedIdx = hl.holeIdx;
+          lastAction = { player: s.p, hole: hl };
+        }
+      });
+    });
+
+    // v49: Aktuelles Loch = nächstes nicht komplett gespieltes
+    let currentHole = null;
+    for (let i = 0; i < holes.length; i++) {
+      const allPlayedThisHole = players.every(p => {
+        const g = scores[p.id] && scores[p.id][i];
+        return isValid(g) || isStrich(g);
+      });
+      if (!allPlayedThisHole) {
+        currentHole = { idx: i, par: holes[i].par, si: holes[i].si };
+        break;
+      }
+    }
+
+    // v49: Hot-Streak-Spieler finden
+    const hotPlayers = stats.filter(s => s.hotStreak >= 3).sort((a, b) => b.hotStreak - a.hotStreak);
+
     let html = `
       <div class="status-bar">
-        <span class="status-live">LIVE · Loch ${holesPlayed}/${holes.length}</span>
+        <span class="status-live">
+          <span style="display:inline-block;width:8px;height:8px;background:#d67a5c;border-radius:50%;animation:pulse 1.2s ease-in-out infinite;margin-right:6px"></span>
+          LIVE · Loch ${holesPlayed}/${holes.length}
+        </span>
         <span>Aktualisiert ${fmtLastUpdate(row.updated_at)}</span>
       </div>
 
@@ -469,6 +532,55 @@
         ${isUschi ? `<div class="meta">🎯 ${gameMode === "uschi-team" ? "Uschi 2 vs 2" : "Uschi-Modus"}</div>` : ""}
       </div>
     `;
+
+    // v49: Aktuelles Loch hervorgehoben
+    if (currentHole && holesPlayed > 0 && holesPlayed < holes.length) {
+      html += `
+        <div style="background:linear-gradient(135deg, #c9a85c20 0%, #c9a85c08 100%); border:1px solid #c9a85c40; border-radius:14px; padding:12px 16px; margin-bottom:14px; display:flex; align-items:center; gap:12px;">
+          <div style="font-size:28px">🏌️</div>
+          <div style="flex:1">
+            <div style="font-size:9px; color:#5d6e63; letter-spacing:0.08em; font-weight:700">AKTUELL AUF</div>
+            <div style="font-size:18px; color:#c9a85c; font-weight:700; margin-top:2px">Loch ${currentHole.idx + 1}</div>
+            <div style="font-size:10px; color:#7a9281; margin-top:1px">Par ${currentHole.par} · SI ${currentHole.si}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    // v49: Letzte Aktion-Banner (nur wenn frisch und besonders)
+    if (lastAction && (lastAction.hole.type === "birdie" || lastAction.hole.type === "strich")) {
+      const lastIcon = lastAction.hole.type === "birdie" ? "🎯" : "✗";
+      const lastLabel = lastAction.hole.type === "birdie" ? "BIRDIE!" : "STRICH";
+      const lastColor = lastAction.hole.type === "birdie" ? "#c9a85c" : "#d67a5c";
+      const lastBg = lastAction.hole.type === "birdie" ? "#c9a85c15" : "#d67a5c15";
+      html += `
+        <div style="background:${lastBg}; border:1px solid ${lastColor}40; border-radius:12px; padding:10px 14px; margin-bottom:14px; display:flex; align-items:center; gap:10px;">
+          <div style="font-size:22px">${lastIcon}</div>
+          <div style="flex:1; min-width:0">
+            <div style="font-size:9px; color:#5d6e63; letter-spacing:0.08em; font-weight:700">LETZTE AKTION</div>
+            <div style="font-size:13px; color:#cdd5c8; font-weight:600; margin-top:1px">
+              ${escapeHtml(lastAction.player.name)} · Loch ${lastAction.hole.holeIdx + 1} · <span style="color:${lastColor}; font-weight:700">${lastLabel}</span>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    // v49: Hot-Streak-Banner
+    if (hotPlayers.length > 0) {
+      const hp = hotPlayers[0];
+      html += `
+        <div style="background:linear-gradient(135deg, #d67a5c25 0%, #d67a5c10 100%); border:1px solid #d67a5c50; border-radius:12px; padding:10px 14px; margin-bottom:14px; display:flex; align-items:center; gap:10px;">
+          <div style="font-size:24px">🔥</div>
+          <div style="flex:1; min-width:0">
+            <div style="font-size:9px; color:#d67a5c; letter-spacing:0.08em; font-weight:700">HOT STREAK</div>
+            <div style="font-size:13px; color:#cdd5c8; font-weight:600; margin-top:1px">
+              <span style="color:#d67a5c; font-weight:700">${escapeHtml(hp.p.name)}</span> · ${hp.hotStreak} Löcher in Folge Birdie/Par
+            </div>
+          </div>
+        </div>
+      `;
+    }
 
     // Team ranking (if team mode)
     if (isTeamMode) {
@@ -589,6 +701,43 @@
         mainColor = "#c9a85c";
       }
 
+      // v49: Sparkline aus holeLog (kumulative SF pro Loch)
+      let cumSf = 0;
+      const sparkPts = [];
+      const sparkPh = s.ph;
+      s.holeLog.forEach(hl => {
+        if (hl.score !== null) {
+          const h = holes[hl.holeIdx];
+          const hs = holeHS(sparkPh, h.si, holes.length);
+          cumSf += sfNetto(hl.score, hs, h.par) || 0;
+        }
+        sparkPts.push({ holeIdx: hl.holeIdx, cumSf });
+      });
+      // SVG Sparkline
+      let sparklineSvg = "";
+      if (sparkPts.length >= 3) {
+        const w = 80, h = 22;
+        const maxSf = Math.max(...sparkPts.map(p => p.cumSf), 1);
+        const points = sparkPts.map((p, i) => {
+          const x = (i / Math.max(1, sparkPts.length - 1)) * w;
+          const y = h - (p.cumSf / maxSf) * (h - 2) - 1;
+          return `${x.toFixed(1)},${y.toFixed(1)}`;
+        }).join(" ");
+        sparklineSvg = `
+          <svg width="${w}" height="${h}" style="margin-top:3px; opacity:0.75">
+            <polyline points="${points}" fill="none" stroke="${mainColor}" stroke-width="1.5" stroke-linejoin="round"/>
+          </svg>
+        `;
+      }
+
+      // v49: Pace-Anzeige
+      let paceHtml = "";
+      if (!isUschi && s.projectedSf !== null) {
+        const trend = s.projectedSf > 36 ? "📈" : s.projectedSf < 28 ? "📉" : "→";
+        const trendColor = s.projectedSf > 36 ? "#7ea88a" : s.projectedSf < 28 ? "#d67a5c" : "#5d6e63";
+        paceHtml = `<span style="color:${trendColor}; font-weight:600">${trend} Pace ${s.projectedSf}</span>`;
+      }
+
       html += `
         <div class="player-row">
           ${teamColor
@@ -598,10 +747,14 @@
             <div class="player-name">
               ${escapeHtml(s.p.name)}
               ${isCrown && isUschi ? `<span class="crown">👑</span>` : ""}
+              ${isCrown && !isUschi ? `<span style="color:#c9a85c; font-size:13px">🏆</span>` : ""}
+              ${s.hotStreak >= 3 ? `<span style="background:#d67a5c25; color:#d67a5c; font-size:9px; padding:2px 5px; border-radius:3px; font-weight:700; letter-spacing:0.04em">🔥 ${s.hotStreak}</span>` : ""}
             </div>
             <div class="player-meta">
               HCP ${s.p.hcp} · Vorgabe ${s.ph} · Brutto ${s.bT || "—"}${s.strichCount > 0 ? "*" : ""} · SF ${s.sfNT}${typeof s.sfBT === "number" ? ` (Br ${s.sfBT})` : ""} · Schläge ${s.totalStr || "—"}${s.ladyCount > 0 ? ` · 👯 ${s.ladyCount}` : ""}
             </div>
+            ${paceHtml ? `<div style="font-size:10px; color:#5d6e63; margin-top:2px">${paceHtml}</div>` : ""}
+            ${sparklineSvg}
           </div>
           <div class="player-pts">
             <div class="player-pts-main" style="color:${mainColor}">${mainVal}</div>
