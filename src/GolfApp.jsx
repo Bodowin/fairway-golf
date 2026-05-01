@@ -943,8 +943,8 @@ const BUILT_IN_CLUBS = [
 const STRICH = null;
 
 // ─── v40: Versions-Marker — sichtbar im App-Footer ──────────────────────────
-const APP_VERSION = "v50";
-const APP_BUILD_DATE = "2026-05-01";
+const APP_VERSION = "v52";
+const APP_BUILD_DATE = "2026-05-02";
 
 function makeHoles(totalPar, numHoles) {
   const si18 = [1,3,5,7,9,11,13,15,17,2,4,6,8,10,12,14,16,18];
@@ -2249,6 +2249,44 @@ function uschiAdjustedStrokes(players, cfg, club, holes) {
 }
 
 /**
+ * v52: Normal-HCP-Strokes für Best Ball+
+ * Jeder Spieler bekommt seinen vollen Course-HCP als Strokes verteilt.
+ * Im Gegensatz zu uschiAdjustedStrokes wird KEIN Bester als Baseline genommen
+ * und es gibt KEINE 0.8-Multiplikation.
+ * Returns [{ playerId, ch, strokes, perHole: [...] }, ...]
+ */
+function normalHcpStrokes(players, cfg, club, holes) {
+  const numHoles = holes.length;
+  const par = sumPar(holes);
+
+  const withCH = players.map(p => {
+    const tee = playerTee(p, cfg, club);
+    if (!tee) return { playerId: p.id, ch: p.hcp || 0 };
+    const { ph } = resolvePlayerPH(p, cfg, club, par);
+    return { playerId: p.id, ch: ph };
+  });
+  if (withCH.length === 0) return [];
+
+  const sortedByHardness = holes.map((h, i) => ({ i, si: h.si })).sort((a, b) => a.si - b.si);
+
+  return withCH.map(({ playerId, ch }) => {
+    const strokes = Math.max(0, ch);
+    const perHole = new Array(numHoles).fill(0);
+    let remaining = strokes;
+    let safety = 4;
+    while (remaining > 0 && safety > 0) {
+      for (const { i } of sortedByHardness) {
+        if (remaining === 0) break;
+        perHole[i]++;
+        remaining--;
+      }
+      safety--;
+    }
+    return { playerId, ch, diff: ch, strokes, perHole };
+  });
+}
+
+/**
  * Compute per-hole Uschi points and totals for all players.
  *
  * Per hole:
@@ -2751,11 +2789,13 @@ function GolfAppInner() {
   const [showHoleJump, setShowHoleJump] = useState(false);
   // Game mode (Uschi)
   const [gameMode, setGameMode] = useState("stableford"); // "stableford" | "uschi-single" | "uschi-team" | "bestball-plus"
-  // v48+v50: Best Ball+ Config — Loch-für-Loch ohne Minus
+  // v48+v50+v52: Best Ball+ Config — Loch-für-Loch ohne Minus
   // Always Netto. Bonus-Toggles sind optional.
+  // hcpMode: "adjusted" = 0.8-Regel (Best Ball Standard), "normal" = volle HCPs für alle
   const [bestBallConfig, setBestBallConfig] = useState({
     birdieBonus: true,    // Brutto-Birdie als +1 Bonus
     uschiBonus: false,    // Uschi-Verbrennungs-Mechanik bei Par-3 (wie Uschi-Modus)
+    hcpMode: "adjusted",  // "adjusted" = 0.8-Regel | "normal" = volle HCPs
   });
   const [showBestBallExplain, setShowBestBallExplain] = useState(false);
   const [teams, setTeams] = useState(null); // { A: [pid], B: [pid], nameA?, nameB? } | null
@@ -4280,11 +4320,23 @@ function GolfAppInner() {
     return computeTeamUschiPoints(uschiResult, teams);
   }, [gameMode, uschiResult, teams]);
 
-  // v48+v50: Best Ball+ — Loch-für-Loch Logik (wie Uschi aber ohne Minus)
+  // v48+v50+v52: Best Ball+ — Loch-für-Loch Logik (wie Uschi aber ohne Minus)
   const bestBallResult = useMemo(() => {
     if (gameMode !== "bestball-plus" || players.length < 2) return null;
-    return computeBestBallPlusPoints(players, holes, scores, uschiStrokes, par3Data, bestBallConfig);
-  }, [gameMode, players, holes, scores, uschiStrokes, par3Data, bestBallConfig]);
+    // v52: hcpMode "adjusted" = 0.8-Regel (wie Uschi), "normal" = volle HCPs
+    const strokes = bestBallConfig.hcpMode === "normal"
+      ? normalHcpStrokes(players, cfg, selectedClub, holes)
+      : uschiStrokes;
+    return computeBestBallPlusPoints(players, holes, scores, strokes, par3Data, bestBallConfig);
+  }, [gameMode, players, holes, scores, uschiStrokes, par3Data, bestBallConfig, cfg, selectedClub]);
+
+  // v52: Best Ball+ Strokes für UI-Anzeige (welche Strokes der Spieler bekommt)
+  const bestBallStrokes = useMemo(() => {
+    if (gameMode !== "bestball-plus" || players.length < 2) return [];
+    return bestBallConfig.hcpMode === "normal"
+      ? normalHcpStrokes(players, cfg, selectedClub, holes)
+      : uschiStrokes;
+  }, [gameMode, players, cfg, selectedClub, holes, uschiStrokes, bestBallConfig.hcpMode]);
 
   // ── Rounds
   const saveRound = async () => {
@@ -5950,13 +6002,29 @@ function GolfAppInner() {
               })
               .filter(Boolean) : [];
 
-            // Crew-Block: Alle Friends mit ≥ 3 Runden, sortiert nach Trend (größte Abweichung zuerst)
-            const crewData = friends.map(f => {
+            // Crew-Block: Alle Friends — v51: Hybrid mit zwei Sektionen
+            // Sektion 1: mit Sim-HCP (hasEnoughData)
+            // Sektion 2: Datensammlung läuft (zeigt fehlende Runden)
+            const crewWithData = [];
+            const crewBuilding = [];
+            friends.forEach(f => {
               const sim = computeSimHcp(f.playerId || f.name, rounds);
-              return { friend: f, sim };
-            })
-            .filter(x => x.sim?.hasEnoughData)
-            .sort((a, b) => Math.abs(b.sim.diff) - Math.abs(a.sim.diff));
+              if (sim?.hasEnoughData) {
+                crewWithData.push({ friend: f, sim });
+              } else {
+                // v51: zähle wie viele Runden dieser Friend hat
+                const friendRoundCount = rounds.filter(r =>
+                  (r.players || []).some(p =>
+                    (f.playerId && p.playerId === f.playerId) ||
+                    normName(p.name) === normName(f.name)
+                  )
+                ).length;
+                crewBuilding.push({ friend: f, roundCount: friendRoundCount });
+              }
+            });
+            crewWithData.sort((a, b) => Math.abs(b.sim.diff) - Math.abs(a.sim.diff));
+            crewBuilding.sort((a, b) => b.roundCount - a.roundCount);
+            const crewData = crewWithData; // legacy alias für unten
 
             // Highlights-Block
             const allRoundSfStats = rounds.flatMap(r => {
@@ -6065,40 +6133,86 @@ function GolfAppInner() {
                   </div>
                 )}
 
-                {/* ── Crew-Block ── */}
-                {crewData.length > 0 && (
+                {/* ── Crew-Block ── v51: Hybrid */}
+                {(crewWithData.length > 0 || crewBuilding.length > 0) && (
                   <div style={{ ...S.card, padding: "16px", marginBottom: "14px" }}>
                     <div style={{ ...S.eyebrow, marginBottom: "12px" }}>👥 Crew · Form-Trends</div>
-                    <p style={{ fontSize: "10px", color: T.textDim, marginBottom: "10px", lineHeight: 1.4, fontStyle: "italic" }}>
-                      Sortiert nach größter Form-Abweichung. 📈 = aktuell schlechter als HCP, 📉 = besser.
-                    </p>
-                    {crewData.map(({ friend, sim }) => (
-                      <div key={friend.playerId || friend.name}
-                        style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 0", borderTop: `1px solid ${T.line}` }}>
-                        <div style={{ width: "30px", height: "30px", borderRadius: "50%", background: `${T.gold}20`, border: `1px solid ${T.gold}40`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", fontWeight: 700, color: T.gold }}>
-                          {(friend.name || "?").charAt(0).toUpperCase()}
-                        </div>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: "13px", fontWeight: 600, color: T.text, marginBottom: "2px", display: "flex", alignItems: "center", gap: "6px" }}>
-                            {friend.name}
-                            {friend.isOwner && <span style={{ fontSize: "9px", color: T.gold, background: `${T.gold}15`, padding: "1px 5px", borderRadius: "3px", fontWeight: 700, letterSpacing: "0.04em" }}>DU</span>}
+
+                    {/* Sektion 1: mit Sim-HCP */}
+                    {crewWithData.length > 0 && (
+                      <>
+                        <div style={{ fontSize: "10px", color: T.gold, fontWeight: 700, letterSpacing: "0.06em", marginBottom: "8px" }}>📈 MIT SIM-HCP</div>
+                        <p style={{ fontSize: "10px", color: T.textDim, marginBottom: "10px", lineHeight: 1.4, fontStyle: "italic" }}>
+                          Sortiert nach größter Form-Abweichung. 📈 = aktuell schlechter als HCP, 📉 = besser.
+                        </p>
+                        {crewWithData.map(({ friend, sim }) => (
+                          <div key={friend.playerId || friend.name}
+                            style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 0", borderTop: `1px solid ${T.line}` }}>
+                            <div style={{ width: "30px", height: "30px", borderRadius: "50%", background: `${T.gold}20`, border: `1px solid ${T.gold}40`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", fontWeight: 700, color: T.gold }}>
+                              {(friend.name || "?").charAt(0).toUpperCase()}
+                            </div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: "13px", fontWeight: 600, color: T.text, marginBottom: "2px", display: "flex", alignItems: "center", gap: "6px" }}>
+                                {friend.name}
+                                {friend.isOwner && <span style={{ fontSize: "9px", color: T.gold, background: `${T.gold}15`, padding: "1px 5px", borderRadius: "3px", fontWeight: 700, letterSpacing: "0.04em" }}>DU</span>}
+                              </div>
+                              <div style={{ fontSize: "10px", color: T.textSoft }}>
+                                HCP <span className="mono">{sim.baseHcp}</span> · Sim <span className="mono" style={{ color: T.gold, fontWeight: 700 }}>{sim.simHcp}</span> · {sim.roundsUsed} Runden
+                              </div>
+                            </div>
+                            <span style={{
+                              fontSize: "12px",
+                              fontWeight: 700,
+                              color: sim.diff > 0 ? T.double : sim.diff < 0 ? T.sage : T.textDim,
+                              minWidth: "60px",
+                              textAlign: "right",
+                              fontFamily: "JetBrains Mono, monospace",
+                            }}>
+                              {sim.diff > 0 ? "📈" : sim.diff < 0 ? "📉" : "≈"} {sim.diff > 0 ? "+" : ""}{sim.diff}
+                            </span>
                           </div>
-                          <div style={{ fontSize: "10px", color: T.textSoft }}>
-                            HCP <span className="mono">{sim.baseHcp}</span> · Sim <span className="mono" style={{ color: T.gold, fontWeight: 700 }}>{sim.simHcp}</span> · {sim.roundsUsed} Runden
-                          </div>
-                        </div>
-                        <span style={{
-                          fontSize: "12px",
-                          fontWeight: 700,
-                          color: sim.diff > 0 ? T.double : sim.diff < 0 ? T.sage : T.textDim,
-                          minWidth: "60px",
-                          textAlign: "right",
-                          fontFamily: "JetBrains Mono, monospace",
-                        }}>
-                          {sim.diff > 0 ? "📈" : sim.diff < 0 ? "📉" : "≈"} {sim.diff > 0 ? "+" : ""}{sim.diff}
-                        </span>
-                      </div>
-                    ))}
+                        ))}
+                      </>
+                    )}
+
+                    {/* Sektion 2: Datensammlung läuft */}
+                    {crewBuilding.length > 0 && (
+                      <>
+                        <div style={{ fontSize: "10px", color: T.textDim, fontWeight: 700, letterSpacing: "0.06em", marginBottom: "8px", marginTop: crewWithData.length > 0 ? "18px" : 0 }}>⏳ DATENSAMMLUNG LÄUFT</div>
+                        <p style={{ fontSize: "10px", color: T.textDim, marginBottom: "10px", lineHeight: 1.4, fontStyle: "italic" }}>
+                          Brauchen noch mehr Runden für eine zuverlässige Sim-HCP-Berechnung.
+                        </p>
+                        {crewBuilding.map(({ friend, roundCount }) => {
+                          const needed = Math.max(0, 3 - roundCount);
+                          return (
+                            <div key={friend.playerId || friend.name}
+                              style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 0", borderTop: `1px solid ${T.line}` }}>
+                              <div style={{ width: "30px", height: "30px", borderRadius: "50%", background: T.surface2, border: `1px solid ${T.line}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", fontWeight: 700, color: T.textDim }}>
+                                {(friend.name || "?").charAt(0).toUpperCase()}
+                              </div>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: "13px", fontWeight: 600, color: T.text, marginBottom: "2px", display: "flex", alignItems: "center", gap: "6px" }}>
+                                  {friend.name}
+                                  {friend.isOwner && <span style={{ fontSize: "9px", color: T.gold, background: `${T.gold}15`, padding: "1px 5px", borderRadius: "3px", fontWeight: 700, letterSpacing: "0.04em" }}>DU</span>}
+                                </div>
+                                <div style={{ fontSize: "10px", color: T.textSoft }}>
+                                  HCP <span className="mono">{friend.hcp}</span> · {roundCount} {roundCount === 1 ? "Runde" : "Runden"}
+                                </div>
+                              </div>
+                              <span style={{
+                                fontSize: "10px",
+                                color: T.textDim,
+                                textAlign: "right",
+                                fontStyle: "italic",
+                                minWidth: "80px",
+                              }}>
+                                {needed === 0 ? "fast genug" : needed === 1 ? "noch 1 Runde" : `noch ${needed} Runden`}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </>
+                    )}
                   </div>
                 )}
 
@@ -6149,7 +6263,7 @@ function GolfAppInner() {
                 )}
 
                 {/* Hinweis falls noch nichts da */}
-                {!ownerName && crewData.length === 0 && (
+                {!ownerName && crewWithData.length === 0 && crewBuilding.length === 0 && (
                   <EmptyState icon="📈" title="Noch zu wenig Daten" sub={`Form-Trends erscheinen ab ${SIM_HCP_MIN_ROUNDS} Runden pro Spieler. Spiele weiter — ${rounds.length} ${rounds.length === 1 ? "Runde" : "Runden"} schon im System!`} />
                 )}
               </>
@@ -6560,6 +6674,39 @@ function GolfAppInner() {
           Pro Loch: Bester Netto-Stableford holt <b>+1 Punkt</b>. Bei Gleichstand bekommen alle Tied +1. Keine Minus-Punkte.
         </p>
 
+        {/* v52: HCP-Modus-Toggle */}
+        <div style={{ marginBottom: "14px" }}>
+          <div style={{ fontSize: "10px", color: T.textDim, fontWeight: 700, letterSpacing: "0.04em", marginBottom: "5px" }}>HCP-MODUS</div>
+          <div style={{ display: "flex", gap: "6px" }}>
+            {[
+              { v: "adjusted", l: "0.8-Regel", sub: "Best Ball Standard" },
+              { v: "normal", l: "Voller HCP", sub: "Wie Stableford" },
+            ].map(opt => (
+              <button key={opt.v}
+                onClick={() => setBestBallConfig(c => ({ ...c, hcpMode: opt.v }))}
+                style={{
+                  flex: 1, padding: "10px 6px",
+                  background: bestBallConfig.hcpMode === opt.v ? `${T.gold}25` : T.surface1,
+                  color: bestBallConfig.hcpMode === opt.v ? T.gold : T.textSoft,
+                  border: `1px solid ${bestBallConfig.hcpMode === opt.v ? T.gold : T.line}`,
+                  borderRadius: "8px", cursor: "pointer", textAlign: "center",
+                }}>
+                <div style={{ fontSize: "12px", fontWeight: 700 }}>{opt.l}</div>
+                <div style={{ fontSize: "9px", marginTop: "2px", opacity: 0.85 }}>{opt.sub}</div>
+              </button>
+            ))}
+          </div>
+          {bestBallConfig.hcpMode === "adjusted" ? (
+            <p style={{ fontSize: "10px", color: T.textDim, marginTop: "6px", lineHeight: 1.4, fontStyle: "italic" }}>
+              ⚖️ Bester Spieler = Baseline. Andere bekommen <b>(Diff × 0.8)</b> Strokes auf den schwersten Löchern. Fairer für gemischte HCPs.
+            </p>
+          ) : (
+            <p style={{ fontSize: "10px", color: T.textDim, marginTop: "6px", lineHeight: 1.4, fontStyle: "italic" }}>
+              📊 Jeder spielt mit vollem Course-HCP. Wie ein normaler Stableford.
+            </p>
+          )}
+        </div>
+
         {/* Add-Ons */}
         <div>
           <div style={{ fontSize: "10px", color: T.textDim, fontWeight: 700, letterSpacing: "0.04em", marginBottom: "5px" }}>OPTIONALE BONI</div>
@@ -6614,6 +6761,54 @@ function GolfAppInner() {
         </div>
       </div>
 
+      {/* v52: Strokes-Preview — zeigt welche Strokes jeder Spieler bekommt */}
+      {(() => {
+        const strokes = bestBallConfig.hcpMode === "normal"
+          ? normalHcpStrokes(players, cfg, selectedClub, holes)
+          : uschiAdjustedStrokes(players, cfg, selectedClub, holes);
+        if (strokes.length < 2) return null;
+        const sorted = [...strokes].sort((a, b) => a.ch - b.ch);
+        const best = sorted[0];
+        const bestPlayer = players.find(p => p.id === best.playerId);
+        const isAdjusted = bestBallConfig.hcpMode === "adjusted";
+
+        return (
+          <div style={{ marginTop: "10px", padding: "12px", background: T.surface1, border: `1px solid ${T.line}`, borderRadius: "10px" }}>
+            <div style={{ ...S.eyebrow, marginBottom: "8px" }}>Strokes-Vorschau</div>
+            <div style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px", lineHeight: 1.5 }}>
+              {isAdjusted ? (
+                <><span style={{ color: T.gold, fontWeight: 600 }}>{bestPlayer?.name || "Scratch"}</span> (CH {best.ch}) ist der Maßstab. Andere bekommen <span className="mono">Diff × 0.8</span>.</>
+              ) : (
+                <>Jeder spielt mit vollem Course-HCP — keine Anpassung.</>
+              )}
+            </div>
+            {sorted.map(s => {
+              const p = players.find(pl => pl.id === s.playerId);
+              if (!p) return null;
+              const isRef = isAdjusted && s.playerId === best.playerId;
+              return (
+                <div key={s.playerId} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "5px 0", fontSize: "12px" }}>
+                  <div style={{ width: "22px", height: "22px", borderRadius: "50%", background: `${T.gold}20`, border: `1px solid ${T.gold}40`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "10px", fontWeight: 700, color: T.gold }}>
+                    {p.name.charAt(0).toUpperCase()}
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <span style={{ color: T.text, fontWeight: 500 }}>{p.name}</span>
+                    <span style={{ color: T.textDim, marginLeft: "6px" }}>CH {s.ch}</span>
+                  </div>
+                  {isRef ? (
+                    <span style={{ fontSize: "10px", color: T.gold, fontWeight: 600, letterSpacing: "0.05em" }}>MASSSTAB</span>
+                  ) : (
+                    <span className="mono" style={{ fontSize: "12px", color: T.gold, fontWeight: 700 }}>
+                      +{s.strokes} {s.strokes === 1 ? "Stroke" : "Strokes"}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
+
       {/* Erklär-Modal */}
       {showBestBallExplain && (
         <div onClick={() => setShowBestBallExplain(false)}
@@ -6631,6 +6826,16 @@ function GolfAppInner() {
                 <br/><br/>
                 <b>Beispiel:</b> Bodo SF 1 · Max SF 2 · Thorsten SF 2 · Wagner SF 0
                 <br/>→ Max + Thorsten bekommen je +1
+              </div>
+            </div>
+            <div style={{ background: T.surface2, padding: "12px", borderRadius: "8px", marginBottom: "10px" }}>
+              <div style={{ fontSize: "12px", color: T.gold, fontWeight: 700, marginBottom: "4px" }}>⚖️ HCP-Modus</div>
+              <div style={{ fontSize: "11px", color: T.text, lineHeight: 1.5 }}>
+                <b>0.8-Regel (Standard):</b> Bester Spieler ist Baseline. Andere bekommen <b>(Diff × 0.8)</b> Strokes auf den schwersten Löchern. Macht's fair bei großer HCP-Spreizung.
+                <br/><br/>
+                <b>Beispiel:</b> Wagner CH 13, Thorsten CH 31 → Diff 18 → Thorsten bekommt 14 Strokes (statt 18)
+                <br/><br/>
+                <b>Voller HCP:</b> Jeder spielt mit vollem Course-HCP wie in einem normalen Stableford.
               </div>
             </div>
             <div style={{ background: T.surface2, padding: "12px", borderRadius: "8px", marginBottom: "10px" }}>
