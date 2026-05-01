@@ -943,7 +943,7 @@ const BUILT_IN_CLUBS = [
 const STRICH = null;
 
 // ─── v40: Versions-Marker — sichtbar im App-Footer ──────────────────────────
-const APP_VERSION = "v46-onboarding";
+const APP_VERSION = "v47-trip-aware";
 const APP_BUILD_DATE = "2026-04-30";
 
 function makeHoles(totalPar, numHoles) {
@@ -3443,7 +3443,12 @@ function GolfAppInner() {
           const adjustedHcp = (parseFloat(p.hcp) || 0) + adjustment;
           const adjustedPlayer = { ...p, hcp: adjustedHcp };
           const { ph } = resolvePlayerPH(adjustedPlayer, r.cfg, r.selectedClubSnapshot, par);
-          let sf = 0, sfBrut = 0, played = 0;
+          let sf = 0, sfBrut = 0, realSf = 0, played = 0;
+          // v47: Real-HCP-Vergleich (ohne Trip-Adjustment)
+          const realFriend = friends.find(f => f.playerId === p.playerId || normName(f.name) === normName(p.name));
+          const realHcp = realFriend ? parseFloat(realFriend.hcp) || 0 : (parseFloat(p.hcp) || 0);
+          const realPlayer = { ...p, hcp: realHcp };
+          const { ph: realPh } = resolvePlayerPH(realPlayer, r.cfg, r.selectedClubSnapshot, par);
           r.holes.forEach((h, i) => {
             const g = r.scores?.[p.id]?.[i];
             if (!isValid(g) && !isStrich(g)) return;
@@ -3451,13 +3456,16 @@ function GolfAppInner() {
             const hs = holeHS(ph, h.si, r.holes.length);
             sf += sfNetto(g, hs, h.par) || 0;
             sfBrut += sfBrutto(g, h.par) || 0;
+            // Real-HCP basierte SF
+            const hsReal = holeHS(realPh, h.si, r.holes.length);
+            realSf += sfNetto(g, hsReal, h.par) || 0;
           });
           if (played < r.holes.length * 0.5) return;
           const key = p.playerId || `name:${normName(p.name)}`;
           playerScores[key] = {
             playerId: p.playerId,
             name: p.name,
-            sf, sfBrut, hcp: p.hcp, adjustment, adjustedHcp,
+            sf, sfBrut, realSf, hcp: p.hcp, realHcp, adjustment, adjustedHcp,
             roundId: r.id, clubName: r.cfg?.clubName,
           };
         });
@@ -3552,7 +3560,7 @@ function GolfAppInner() {
         const key = r.playerId || `name:${normName(r.name)}`;
         const pm = perPlayer[key];
         if (!pm) return;
-        pm.sfHistory.push({ dayNumber: dr.dayNumber, sf: r.sf, sfBrut: r.sfBrut || 0 });
+        pm.sfHistory.push({ dayNumber: dr.dayNumber, sf: r.sf, sfBrut: r.sfBrut || 0, realSf: r.realSf || 0 });
         if (r.sf > pm.bestSf) pm.bestSf = r.sf;
         if (r.sf < pm.worstSf) pm.worstSf = r.sf;
         // v45: Brutto-Total
@@ -4056,17 +4064,32 @@ function GolfAppInner() {
     const played = hr.filter(h => isValid(h.g));
     const bT = played.reduce((s, h) => s + h.g, 0);
     const strichCount = hr.filter(h => isStrich(h.g)).length;
-    // v34: totalStr = Total Strokes (Schläge gesamt). Striche zählen mit ihrem Cap-Wert (Par + HS + 2).
     const totalStr = hr.reduce((s, h) => {
       if (isStrich(h.g)) return s + capValue(h.par, h.hs);
       if (isValid(h.g)) return s + h.g;
       return s;
     }, 0);
+
+    // v47: Real-HCP-Berechnung wenn Trip-Spieler mit Adjustment
+    let realSfNT = null, realPh = null;
+    if (player.tripAdjustment && player.tripAdjustment !== 0 && typeof player.realHcp === "number") {
+      // Berechne mit dem Original-HCP statt dem angepassten
+      const realPlayer = { ...player, hcp: player.realHcp };
+      const realPhResult = resolvePlayerPH(realPlayer, cfg, selectedClub, par);
+      realPh = realPhResult.ph;
+      realSfNT = holes.reduce((s, h, i) => {
+        const g = scores[player.id]?.[i];
+        const hsReal = holeHS(realPh, h.si, cfg.numHoles);
+        return s + (sfNetto(g, hsReal, h.par) || 0);
+      }, 0);
+    }
+
     return {
       ph, hr, bT, tee, phSource, strichCount, totalStr,
       nT: played.length ? bT - ph : 0,
       sfNT: hr.reduce((s, h) => s + (h.sfN || 0), 0),
       sfBT: hr.reduce((s, h) => s + (h.sfB || 0), 0),
+      realSfNT, realPh,
     };
   };
 
@@ -4129,6 +4152,13 @@ function GolfAppInner() {
     }
     setRounds(u);
     try { await window.storage.set("golf-rounds", JSON.stringify(u)); } catch {}
+
+    // v47: Auto-Verlinkung mit Trip-Tag wenn cfg.tripContext gesetzt
+    if (savedRound && cfg.tripContext?.tripId && cfg.tripContext?.dayNumber) {
+      try {
+        await linkRoundToTripDay(cfg.tripContext.tripId, cfg.tripContext.dayNumber, savedRound.id);
+      } catch (e) { console.error("Trip-link failed", e); }
+    }
 
     // ── v33: Auto-Push to cloud archive ──────────────────────────────────────
     // Only push completed rounds (or rounds with at least 1 hole scored).
@@ -4292,10 +4322,46 @@ function GolfAppInner() {
     }
   };
 
-  const newRound = () => {
+  const newRound = (tripContext = null) => {
     setLoadedRoundId(null);
-    setCfg({ name: "", date: toDay(), numHoles: 18, clubName: "", defaultTeeName: "" });
+    setCfg({
+      name: "", date: toDay(), numHoles: 18, clubName: "", defaultTeeName: "",
+      // v47: Trip-Kontext — wenn gesetzt, werden Spieler-HCPs bei Save mit Trip-Adjustment berechnet
+      tripContext: tripContext, // { tripId, dayNumber } oder null
+    });
     setHoles(makeHoles(72, 18));
+
+    // v47: Wenn Runde zu einem Trip-Tag gehört → Spieler aus Trip übernehmen mit angepasstem HCP
+    if (tripContext) {
+      const trip = trips.find(t => t.id === tripContext.tripId);
+      if (trip) {
+        const tripPlayers = (trip.players || []).map(tp => {
+          const adjustment = tp.hcpAdjustments?.[tripContext.dayNumber] || 0;
+          // v47: Real-HCP = aktueller Friend-Liste-HCP (oder baseHcp falls Friend nicht mehr da)
+          const friend = friends.find(f => f.playerId === tp.playerId || normName(f.name) === normName(tp.name));
+          const realHcp = friend ? parseFloat(friend.hcp) || 0 : (parseFloat(tp.hcp) || 0);
+          const adjustedHcp = realHcp + adjustment;
+          return {
+            id: uid(),
+            playerId: tp.playerId,
+            name: tp.name,
+            hcp: adjustedHcp, // angepasster HCP für diese Runde
+            realHcp: realHcp, // Original-HCP (für „Real-HCP"-Anzeige)
+            tripAdjustment: adjustment, // damit wir's anzeigen können
+            teeName: "",
+          };
+        });
+        setPlayers(tripPlayers);
+        setScores({});
+        setGameMode("stableford"); setTeams(null); setPar3Data({});
+        setLadies({});
+        setClubQ(""); setPickedClub(null);
+        setCurrentHole(0); setScoringMode("batch");
+        setView("setup");
+        return;
+      }
+    }
+
     // Auto-add owner as first player so the user doesn't have to search themselves
     if (ownerProfile?.name) {
       setPlayers([{
@@ -5278,25 +5344,6 @@ function GolfAppInner() {
             <span style={{ fontSize: "18px" }}>→</span>
           </button>
 
-          {rounds.length > 0 && (
-            <button onClick={copyLastRound}
-              style={{
-                width: "100%", marginTop: "8px",
-                padding: "12px 16px",
-                background: T.surface2,
-                color: T.text,
-                border: `1px solid ${T.line}`,
-                borderRadius: "10px",
-                fontSize: "13px",
-                fontFamily: "Inter, sans-serif",
-                display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
-                cursor: "pointer",
-              }}>
-              <span>🔁</span>
-              <span>Wie letztes Mal — gleiche Besetzung</span>
-            </button>
-          )}
-
           {/* Live rounds: own round at top (clickable to score), then community */}
           {(() => {
             // Build the displayed list:
@@ -5893,12 +5940,13 @@ function GolfAppInner() {
                       dayCount: 3,
                       syncCode: syncCode || "",
                       selectedFriendIds: [],
+                      quickAddName: "",
+                      quickAddHcp: "",
                       pots: { dayWin: 10, threeDayPot: 50, weekTeamPot: 50, nearestPin: 10 },
-                      // v43: HCP-Adjustments-Regeln (Cyprus-Defaults nach Max)
                       hcpRules: {
                         enabled: true,
-                        bestAdj: [-3, -2, -1],   // Top 3 bekommen weniger HCP für nächsten Tag
-                        worstAdj: [1, 2, 3],     // Bottom 3 bekommen mehr HCP
+                        bestAdj: [-3, -2, -1],
+                        worstAdj: [1, 2, 3],
                       },
                     });
                     setShowTripSetup(true);
@@ -6401,6 +6449,118 @@ function GolfAppInner() {
         <p style={{ fontSize: "13px", color: T.textSoft, marginTop: 0, marginBottom: "22px" }}>
           Club, Abschlag und Spieler wählen
         </p>
+
+        {/* v47: TRIP-CONTEXT-CARD */}
+        {(() => {
+          const activeTrip = cfg.tripContext ? trips.find(t => t.id === cfg.tripContext.tripId) : null;
+          const activeDay = activeTrip?.days?.find(d => d.dayNumber === cfg.tripContext?.dayNumber);
+          const availableTrips = trips.filter(t => (t.days || []).length > 0);
+
+          // Wenn keine Trips: Card nicht anzeigen
+          if (availableTrips.length === 0 && !activeTrip) return null;
+
+          return (
+            <div style={{ ...S.card, marginBottom: "12px", borderColor: activeTrip ? `${T.gold}50` : T.line, background: activeTrip ? `${T.gold}10` : T.surface1 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                <div style={{ ...S.eyebrow, color: activeTrip ? T.gold : T.textDim }}>
+                  🏖️ Trip-Zuweisung
+                </div>
+                {activeTrip && (
+                  <button
+                    onClick={() => setCfg(c => ({ ...c, tripContext: null }))}
+                    style={{ background: "transparent", border: "none", color: T.textDim, fontSize: "11px", cursor: "pointer", textDecoration: "underline" }}>
+                    entfernen
+                  </button>
+                )}
+              </div>
+
+              {!activeTrip && (
+                <>
+                  <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px", lineHeight: 1.5, fontStyle: "italic" }}>
+                    Gehört diese Runde zu einem Trip? Dann werden die Spieler mit angepasstem HCP automatisch geladen.
+                  </p>
+                  <select
+                    onChange={(e) => {
+                      if (!e.target.value) return;
+                      const [tripId, dayNum] = e.target.value.split("::");
+                      const trip = trips.find(t => t.id === tripId);
+                      if (!trip) return;
+                      const dayNumber = parseInt(dayNum);
+
+                      // Spieler aus Trip übernehmen mit angepasstem HCP
+                      const tripPlayers = (trip.players || []).map(tp => {
+                        const adjustment = tp.hcpAdjustments?.[dayNumber] || 0;
+                        const friend = friends.find(f => f.playerId === tp.playerId || normName(f.name) === normName(tp.name));
+                        const realHcp = friend ? parseFloat(friend.hcp) || 0 : (parseFloat(tp.hcp) || 0);
+                        const adjustedHcp = realHcp + adjustment;
+                        return {
+                          id: uid(),
+                          playerId: tp.playerId,
+                          name: tp.name,
+                          hcp: adjustedHcp,
+                          realHcp: realHcp,
+                          tripAdjustment: adjustment,
+                          teeName: "",
+                        };
+                      });
+                      setPlayers(tripPlayers);
+                      setCfg(c => ({ ...c, tripContext: { tripId, dayNumber } }));
+                      e.target.value = "";
+                    }}
+                    style={{ ...S.input, fontSize: "13px", padding: "10px 12px" }}
+                    defaultValue="">
+                    <option value="">— kein Trip ausgewählt —</option>
+                    {availableTrips.map(trip =>
+                      (trip.days || []).map(day => (
+                        <option key={`${trip.id}::${day.dayNumber}`} value={`${trip.id}::${day.dayNumber}`}>
+                          🏖️ {trip.name} — Tag {day.dayNumber} ({fmtDate(day.date)})
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </>
+              )}
+
+              {activeTrip && activeDay && (
+                <>
+                  <div style={{ fontSize: "14px", color: T.gold, fontWeight: 700, marginBottom: "4px" }}>
+                    {activeTrip.name} · Tag {activeDay.dayNumber}
+                  </div>
+                  <div style={{ fontSize: "11px", color: T.textSoft, marginBottom: "10px" }}>
+                    {fmtDate(activeDay.date)} · {activeTrip.players?.length || 0} Spieler übernommen
+                  </div>
+                  {/* Spieler-Vorschau mit HCP-Adjustments */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: "4px", padding: "8px", background: T.surface2, borderRadius: "6px" }}>
+                    {(activeTrip.players || []).map(tp => {
+                      const adj = tp.hcpAdjustments?.[activeDay.dayNumber] || 0;
+                      const friend = friends.find(f => f.playerId === tp.playerId || normName(f.name) === normName(tp.name));
+                      const realHcp = friend ? parseFloat(friend.hcp) || 0 : (parseFloat(tp.hcp) || 0);
+                      const adjusted = realHcp + adj;
+                      return (
+                        <div key={tp.playerId} style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px" }}>
+                          <span style={{ flex: 1, color: T.text, fontWeight: 600 }}>{tp.name}</span>
+                          <span className="mono" style={{ color: T.textSoft }}>HCP {realHcp}</span>
+                          {adj !== 0 && (
+                            <>
+                              <span style={{ color: T.textDim }}>→</span>
+                              <span className="mono" style={{ color: T.gold, fontWeight: 700 }}>{adjusted}</span>
+                              <span style={{ fontSize: "10px", color: adj > 0 ? T.double : T.sage, fontWeight: 700 }}>
+                                ({adj > 0 ? "+" : ""}{adj})
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <p style={{ fontSize: "10px", color: T.textDim, marginTop: "8px", lineHeight: 1.4, fontStyle: "italic" }}>
+                    Beim Speichern wird die Runde automatisch diesem Trip-Tag zugewiesen.
+                  </p>
+                </>
+              )}
+            </div>
+          );
+        })()}
 
         {/* CLUB */}
         <div style={S.card}>
@@ -7078,10 +7238,21 @@ function GolfAppInner() {
                       {p.name.charAt(0).toUpperCase()}
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 600, fontSize: "14px", color: T.text, display: "flex", alignItems: "center", gap: "6px" }}>
+                      <div style={{ fontWeight: 600, fontSize: "14px", color: T.text, display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
                         {p.name}
                         {s.tee?.teeName && <TeeDot name={s.tee.teeName} size={8} />}
                         {i === 0 && isUschi && <span style={{ fontSize: "14px" }}>👑</span>}
+                        {/* v47: Trip-Adjustment-Badge */}
+                        {p.tripAdjustment && p.tripAdjustment !== 0 && (
+                          <span style={{
+                            fontSize: "9px", fontWeight: 700, letterSpacing: "0.04em",
+                            color: p.tripAdjustment > 0 ? T.double : T.sage,
+                            background: p.tripAdjustment > 0 ? `${T.double}15` : `${T.sage}15`,
+                            padding: "1px 5px", borderRadius: "3px",
+                          }}>
+                            TRIP {p.tripAdjustment > 0 ? "+" : ""}{p.tripAdjustment}
+                          </span>
+                        )}
                       </div>
                       <div style={{ fontSize: "11px", color: T.textSoft }}>
                         {isUschi ? (
@@ -7106,6 +7277,13 @@ function GolfAppInner() {
                           {/* v45: SF Brutto direkt drunter */}
                           <div className="mono" style={{ fontSize: "13px", fontWeight: 600, color: T.textSoft, lineHeight: 1, marginTop: "4px" }}>{s.sfBT}</div>
                           <div style={{ fontSize: "8px", color: T.textDim, marginTop: "1px" }}>BRUTTO</div>
+                          {/* v47: Real-HCP (offizieller HCP, ohne Trip-Adjustment) */}
+                          {typeof s.realSfNT === "number" && s.realSfNT !== s.sfNT && (
+                            <>
+                              <div className="mono" style={{ fontSize: "11px", fontWeight: 600, color: T.textDim, lineHeight: 1, marginTop: "4px" }}>{s.realSfNT}</div>
+                              <div style={{ fontSize: "8px", color: T.textDim, marginTop: "1px" }} title="Mit deinem offiziellen HCP, ohne Trip-Adjustment">REAL</div>
+                            </>
+                          )}
                         </>
                       )}
                     </div>
@@ -8035,13 +8213,30 @@ function GolfAppInner() {
                   {!isUschi && medals[i] || <span className="mono" style={{ fontSize: "15px", color: T.textSoft, fontWeight: 700 }}>{i+1}.</span>}
                 </div>
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 700, fontSize: "15px", color: T.text, display: "flex", alignItems: "center", gap: "6px" }}>
+                  <div style={{ fontWeight: 700, fontSize: "15px", color: T.text, display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
                     {s.p.name}
                     {s.tee?.teeName && <TeeDot name={s.tee.teeName} size={9} />}
+                    {/* v47: Trip-Badge */}
+                    {s.p.tripAdjustment && s.p.tripAdjustment !== 0 && (
+                      <span style={{
+                        fontSize: "9px", fontWeight: 700, letterSpacing: "0.04em",
+                        color: s.p.tripAdjustment > 0 ? T.double : T.sage,
+                        background: s.p.tripAdjustment > 0 ? `${T.double}15` : `${T.sage}15`,
+                        padding: "1px 5px", borderRadius: "3px",
+                      }}>
+                        TRIP {s.p.tripAdjustment > 0 ? "+" : ""}{s.p.tripAdjustment}
+                      </span>
+                    )}
                   </div>
                   <div style={{ fontSize: "11px", color: T.textSoft, marginTop: "1px" }}>
                     HCP <span className="mono">{s.p.hcp}</span> · Vorgabe <span className="mono">{s.ph}</span> · Brutto <span className="mono">{s.bT || "—"}{s.strichCount > 0 ? "*" : ""}</span> · Schläge <span className="mono" style={{ color: T.gold }}>{s.totalStr || "—"}</span>
                   </div>
+                  {/* v47: Real-HCP-Zeile (offizieller HCP, ohne Trip-Adjustment) */}
+                  {typeof s.realSfNT === "number" && s.realSfNT !== s.sfNT && (
+                    <div style={{ fontSize: "10px", color: T.textDim, marginTop: "2px", fontStyle: "italic" }}>
+                      🌐 Mit offiziellem HCP <span className="mono">{s.p.realHcp}</span>: <span className="mono" style={{ color: T.text, fontWeight: 600 }}>{s.realSfNT} SF</span> · Vorgabe <span className="mono">{s.realPh}</span>
+                    </div>
+                  )}
                 </div>
                 <div style={{ textAlign: "right" }}>
                   <div className="mono serif" style={{ fontSize: "32px", fontWeight: 700, color: T.gold, lineHeight: 1 }}>{s.sfNT}</div>
@@ -10067,18 +10262,13 @@ WICHTIG:
               )}
             </div>
             {friends.length === 0 ? (
-              <div style={{ padding: "12px", background: `${T.gold}10`, border: `1px solid ${T.gold}40`, borderRadius: "8px" }}>
-                <p style={{ fontSize: "13px", color: T.gold, fontWeight: 600, marginTop: 0, marginBottom: "8px" }}>
-                  ⚠️ Du hast noch keine Spieler in deiner Friend-Liste.
+              <div style={{ padding: "12px", background: `${T.gold}10`, border: `1px solid ${T.gold}40`, borderRadius: "8px", marginBottom: "10px" }}>
+                <p style={{ fontSize: "12px", color: T.gold, fontWeight: 600, marginTop: 0, marginBottom: "4px" }}>
+                  💡 Noch keine Friends in der Liste
                 </p>
-                <p style={{ fontSize: "11px", color: T.textSoft, marginBottom: "10px", lineHeight: 1.5 }}>
-                  Lege zuerst Spieler an: Tab „Freunde" → Name + HCP eingeben → „+" drücken.
-                  Auch dein eigenes Owner-Profil zählt als Spieler.
+                <p style={{ fontSize: "11px", color: T.textSoft, marginBottom: 0, lineHeight: 1.5 }}>
+                  Du kannst direkt unten Spieler anlegen — sie werden zur Friend-Liste hinzugefügt und im Trip ausgewählt.
                 </p>
-                <button onClick={() => { close(); setTab("friends"); }}
-                  style={{ ...S.btnSecondary, width: "100%", color: T.gold, borderColor: `${T.gold}50` }}>
-                  → Zum Friends-Tab
-                </button>
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
@@ -10124,6 +10314,71 @@ WICHTIG:
                 })}
               </div>
             )}
+
+            {/* v46.2: Schnell-Spieler-Hinzufügen direkt im Trip-Setup */}
+            <div style={{ marginTop: "12px", paddingTop: "12px", borderTop: `1px solid ${T.line}` }}>
+              <div style={{ ...S.eyebrow, marginBottom: "8px", fontSize: "10px" }}>➕ Neuen Spieler anlegen</div>
+              <div style={{ display: "flex", gap: "6px" }}>
+                <input
+                  type="text"
+                  value={f.quickAddName || ""}
+                  onChange={e => setF({ quickAddName: e.target.value })}
+                  placeholder="Name"
+                  style={{ ...S.input, flex: 2, fontSize: "13px", padding: "8px 10px" }}/>
+                <input
+                  type="number" step="0.1"
+                  value={f.quickAddHcp || ""}
+                  onChange={e => setF({ quickAddHcp: e.target.value })}
+                  placeholder="HCP"
+                  style={{ ...S.input, flex: 1, fontSize: "13px", padding: "8px 10px", textAlign: "center", maxWidth: "70px" }}/>
+                <button
+                  onClick={async () => {
+                    const name = (f.quickAddName || "").trim();
+                    if (!name) {
+                      showUndoToast("⚠️ Bitte Namen eingeben", null);
+                      return;
+                    }
+                    if (friends.find(fr => normName(fr.name) === normName(name))) {
+                      showUndoToast(`⚠️ "${name}" gibt's schon — wähle ihn aus der Liste oben`, null);
+                      return;
+                    }
+                    if (f.selectedFriendIds.length >= 8) {
+                      showUndoToast("⚠️ Maximum 8 Spieler erreicht", null);
+                      return;
+                    }
+                    const hcp = parseFloat(f.quickAddHcp) || 0;
+                    const newFriend = {
+                      name,
+                      hcp,
+                      playerId: newPlayerId(),
+                      aliases: [],
+                      hcpHistory: [{ date: toDay(), hcp }],
+                    };
+                    const updatedFriends = [...friends, newFriend];
+                    setFriends(updatedFriends);
+                    try { await window.storage.set("golf-friends", JSON.stringify(updatedFriends)); } catch {}
+                    // Sofort zum Trip hinzufügen
+                    setF({
+                      selectedFriendIds: [...f.selectedFriendIds, newFriend.playerId],
+                      quickAddName: "",
+                      quickAddHcp: "",
+                    });
+                    showUndoToast(`✓ "${name}" angelegt + zum Trip hinzugefügt`, null);
+                  }}
+                  className="gold-hover"
+                  style={{
+                    background: T.gold, color: T.canvas,
+                    border: "none", borderRadius: "8px",
+                    padding: "8px 14px", fontSize: "16px", fontWeight: 700,
+                    cursor: "pointer",
+                  }}>
+                  +
+                </button>
+              </div>
+              <p style={{ fontSize: "10px", color: T.textDim, marginTop: "6px", lineHeight: 1.4, fontStyle: "italic" }}>
+                Spieler wird zur Friend-Liste hinzugefügt und automatisch im Trip ausgewählt.
+              </p>
+            </div>
           </div>
 
           {/* v43: HCP-Adjustments-Regeln */}
@@ -10606,6 +10861,10 @@ WICHTIG:
                               }}>{h.sf}</div>
                               {h.sfBrut > 0 && (
                                 <div className="mono" style={{ fontSize: "9px", color: T.textDim, marginTop: "1px" }}>{h.sfBrut}b</div>
+                              )}
+                              {/* v47: Real-SF in Klammern wenn != Trip-SF */}
+                              {h.realSf > 0 && h.realSf !== h.sf && (
+                                <div className="mono" style={{ fontSize: "9px", color: T.textDim, marginTop: "1px" }}>({h.realSf})</div>
                               )}
                             </div>
                           ))}
