@@ -943,7 +943,7 @@ const BUILT_IN_CLUBS = [
 const STRICH = null;
 
 // ─── v40: Versions-Marker — sichtbar im App-Footer ──────────────────────────
-const APP_VERSION = "v52";
+const APP_VERSION = "v53";
 const APP_BUILD_DATE = "2026-05-02";
 
 function makeHoles(totalPar, numHoles) {
@@ -1233,14 +1233,46 @@ function getRaceStatus(rankedStats, holesLeft) {
 const SIM_HCP_ROUNDS = 5;       // letzte N Runden zur Berechnung
 const SIM_HCP_MIN_ROUNDS = 3;   // mindestens N Runden nötig sonst keine Anzeige
 
-function computeSimHcp(playerNameOrId, allRounds) {
+function computeSimHcp(playerNameOrId, allRounds, fallbackName) {
   if (!playerNameOrId || !allRounds?.length) return null;
+
+  // v53: Robuste Match-Logic — egal ob ID oder Name übergeben wird,
+  // matche immer SOWOHL auf playerId als auch auf normName.
+  // Plus: bei ID-Übergabe versuche auch den Friend-Namen zu finden für Name-Fallback.
+  // fallbackName: optional — wird verwendet wenn lookupId angegeben ist aber keine Runde sie kennt
   const isId = typeof playerNameOrId === "string" && playerNameOrId.startsWith(PLAYER_ID_PREFIX);
-  // v39: Match auf playerId ODER Name (Backwards-Compat)
+  let lookupId = isId ? playerNameOrId : null;
+  let lookupName = isId ? (fallbackName || null) : playerNameOrId;
+  let lookupNormName = lookupName ? normName(lookupName) : null;
+
+  // v53: Wenn ID übergeben, sammle alle Namen die je zu dieser ID gehörten
+  // (aus den Runden selbst — falls eine Runde ID hat, lernen wir dort den Namen)
+  const knownNames = new Set();
+  if (isId) {
+    allRounds.forEach(r => {
+      (r.players || []).forEach(p => {
+        if (p.playerId === lookupId && p.name) knownNames.add(normName(p.name));
+      });
+    });
+  }
+  if (lookupNormName) knownNames.add(lookupNormName);
+
+  // Helper: matcht ein Spieler-Eintrag auf den gesuchten Spieler?
+  const matches = (p) => {
+    if (!p) return false;
+    // 1. ID-Match (wenn beide eine ID haben)
+    if (lookupId && p.playerId === lookupId) return true;
+    // 2. Name-Match (immer probieren — auch wenn ID übergeben)
+    if (p.name) {
+      const pNorm = normName(p.name);
+      if (knownNames.has(pNorm)) return true;
+      if (lookupNormName && pNorm === lookupNormName) return true;
+    }
+    return false;
+  };
+
   const playerRounds = allRounds
-    .filter(r => (r.players || []).some(p =>
-      isId ? p.playerId === playerNameOrId : (p.name === playerNameOrId || normName(p.name) === normName(playerNameOrId))
-    ))
+    .filter(r => (r.players || []).some(matches))
     .sort((a, b) => {
       const da = new Date(a.cfg?.date || a.savedAt || 0).getTime();
       const db = new Date(b.cfg?.date || b.savedAt || 0).getTime();
@@ -1249,19 +1281,28 @@ function computeSimHcp(playerNameOrId, allRounds) {
     .slice(0, SIM_HCP_ROUNDS);
 
   if (playerRounds.length < SIM_HCP_MIN_ROUNDS) {
-    return { simHcp: null, baseHcp: null, diff: null, roundsUsed: playerRounds.length, hasEnoughData: false };
+    return {
+      simHcp: null, baseHcp: null, diff: null,
+      roundsUsed: playerRounds.length, hasEnoughData: false,
+      failReason: `${playerRounds.length} Runden gefunden, brauche ${SIM_HCP_MIN_ROUNDS}`,
+    };
   }
 
   const sfList = [];
   let baseHcp = null;
+  let droppedRounds = []; // v53: Diagnose
   for (const r of playerRounds) {
-    const player = (r.players || []).find(p =>
-      isId ? p.playerId === playerNameOrId : (p.name === playerNameOrId || normName(p.name) === normName(playerNameOrId))
-    );
-    if (!player) continue;
+    const player = (r.players || []).find(matches);
+    if (!player) {
+      droppedRounds.push({ date: r.cfg?.date, reason: "Spieler nicht gefunden" });
+      continue;
+    }
     if (baseHcp === null) baseHcp = parseFloat(player.hcp) || 0;
     const holes = r.holes || [];
-    if (holes.length === 0) continue;
+    if (holes.length === 0) {
+      droppedRounds.push({ date: r.cfg?.date, reason: "keine Löcher" });
+      continue;
+    }
     const par = holes.reduce((s, h) => s + h.par, 0);
     const { ph } = resolvePlayerPH(player, r.cfg, r.selectedClubSnapshot, par);
     let sfTotal = 0;
@@ -1273,14 +1314,25 @@ function computeSimHcp(playerNameOrId, allRounds) {
       const hs = holeHS(ph, h.si, holes.length);
       sfTotal += sfNetto(g, hs, h.par) || 0;
     });
-    if (played >= holes.length * 0.5) {
+    // v53: Lockerere Schwelle — entweder ≥50% der Runde ODER ≥5 Löcher
+    const minPlayed = Math.min(Math.ceil(holes.length * 0.5), 5);
+    if (played >= minPlayed) {
       const normalizedSf = holes.length === 9 ? sfTotal * 2 : sfTotal;
       sfList.push(normalizedSf);
+    } else {
+      droppedRounds.push({ date: r.cfg?.date, reason: `nur ${played}/${holes.length} Löcher gespielt` });
     }
   }
 
   if (sfList.length < SIM_HCP_MIN_ROUNDS || baseHcp === null) {
-    return { simHcp: null, baseHcp, diff: null, roundsUsed: sfList.length, hasEnoughData: false };
+    return {
+      simHcp: null, baseHcp, diff: null,
+      roundsUsed: sfList.length, hasEnoughData: false,
+      failReason: sfList.length < SIM_HCP_MIN_ROUNDS
+        ? `Nur ${sfList.length} verwertbare Runden${droppedRounds.length > 0 ? ` (${droppedRounds.length} aussortiert)` : ""}`
+        : "Kein HCP gefunden",
+      droppedRounds,
+    };
   }
 
   const avgSf = sfList.reduce((s, v) => s + v, 0) / sfList.length;
@@ -1295,6 +1347,7 @@ function computeSimHcp(playerNameOrId, allRounds) {
     avgSf: Math.round(avgSf * 10) / 10,
     roundsUsed: sfList.length,
     hasEnoughData: true,
+    droppedRounds, // v53: Diagnose
   };
 }
 
@@ -1545,6 +1598,96 @@ function aggregateClubStats(clubName, allRounds) {
       birdieKing: birdieKing && birdieKing.birdies > 0 ? { name: birdieKing.name, count: birdieKing.birdies } : null,
       uschiMaster: uschiMaster && uschiMaster.uschi.total > 0 ? { name: uschiMaster.name, points: uschiMaster.uschi.total } : null,
     },
+  };
+}
+
+/**
+ * v53: Aggregate Spieler-Stats über ALLE Clubs zusammen.
+ * Nimmt aggregateClubStats für jeden Club, mergt die playerStats per playerId/Name.
+ * Returns vereinfachte Struktur ohne holeStats (machen Cross-Club keinen Sinn).
+ */
+function aggregateAllClubsStats(allRounds) {
+  if (!allRounds || allRounds.length === 0) return null;
+  const clubsPlayed = Array.from(new Set(allRounds.map(r => r.cfg?.clubName).filter(Boolean)));
+  if (clubsPlayed.length === 0) return null;
+
+  // Pro Club aggregieren, dann Spieler per Identity-Key mergen
+  const merged = {}; // idKey → mergedStats
+  let totalRounds = 0;
+
+  clubsPlayed.forEach(club => {
+    const stats = aggregateClubStats(club, allRounds);
+    if (!stats) return;
+    totalRounds += stats.totalRounds || 0;
+    (stats.playerStats || []).forEach(p => {
+      const idKey = p.playerId || `name:${normName(p.name)}`;
+      if (!merged[idKey]) {
+        merged[idKey] = {
+          name: p.name,
+          playerId: p.playerId || null,
+          roundsPlayed: 0,
+          sfList: [],
+          birdies: 0, pars: 0, bogeys: 0, doubles: 0, strichCount: 0,
+          ladiesTotal: 0,
+          uschi: { total: 0, par3Wins: 0, bestCarry: 0, burntCount: 0 },
+          birdiesList: [],
+          parsList: [],
+          bogeysList: [],
+          doublesList: [],
+          strichList: [],
+          ladiesList: [],
+          clubsPlayed: new Set(),
+        };
+      }
+      const m = merged[idKey];
+      m.roundsPlayed += p.roundsPlayed || 0;
+      m.sfList = m.sfList.concat(p.sfList || []);
+      m.birdies += p.birdies || 0;
+      m.pars += p.pars || 0;
+      m.bogeys += p.bogeys || 0;
+      m.doubles += p.doubles || 0;
+      m.strichCount += p.strichCount || 0;
+      m.ladiesTotal += p.ladiesTotal || 0;
+      m.uschi.total += p.uschi?.total || 0;
+      m.uschi.par3Wins += p.uschi?.par3Wins || 0;
+      m.uschi.bestCarry = Math.max(m.uschi.bestCarry, p.uschi?.bestCarry || 0);
+      m.uschi.burntCount += p.uschi?.burntCount || 0;
+      m.birdiesList = m.birdiesList.concat(p.birdiesList || []);
+      m.parsList = m.parsList.concat(p.parsList || []);
+      m.bogeysList = m.bogeysList.concat(p.bogeysList || []);
+      m.doublesList = m.doublesList.concat(p.doublesList || []);
+      m.strichList = m.strichList.concat(p.strichList || []);
+      m.ladiesList = m.ladiesList.concat(p.ladiesList || []);
+      m.clubsPlayed.add(club);
+
+      // Sim-HCP: für jeden Spieler einmal berechnen
+      if (!m.simHcp) {
+        m.simHcp = computeSimHcp(p.playerId || p.name, allRounds);
+      }
+    });
+  });
+
+  // Finalisieren: bestSF/avgSF/worstSF aus mergedSfList, clubsPlayed als Array
+  const playerStats = Object.values(merged).map(m => {
+    const sfScores = m.sfList.map(x => x.score);
+    return {
+      ...m,
+      bestSF: sfScores.length ? Math.max(...sfScores) : 0,
+      avgSF: sfScores.length ? Math.round(sfScores.reduce((s, v) => s + v, 0) / sfScores.length) : 0,
+      worstSF: sfScores.length ? Math.min(...sfScores) : 0,
+      clubsPlayed: Array.from(m.clubsPlayed),
+      // perHole macht über mehrere Clubs keinen Sinn
+      perHole: [],
+    };
+  }).sort((a, b) => b.avgSF - a.avgSF);
+
+  return {
+    clubName: null,
+    isAllClubs: true,
+    totalRounds: allRounds.length,
+    clubsCount: clubsPlayed.length,
+    playerStats,
+    holeStats: [], // nicht sinnvoll cross-club
   };
 }
 
@@ -2676,6 +2819,8 @@ function GolfAppInner() {
   const [statsHoleDetail, setStatsHoleDetail] = useState(null); // hole index for drill-down modal
   const [statsImportedRounds, setStatsImportedRounds] = useState([]); // rounds from other sync codes, merged into stats
   const [showStatsImport, setShowStatsImport] = useState(false);
+  // v53: Clubs-Übersichts-Modal
+  const [showClubsModal, setShowClubsModal] = useState(false);
   const [statsImportInput, setStatsImportInput] = useState("");
   const [statsImportLoading, setStatsImportLoading] = useState(false);
   // Round analysis modal — holds the round ID being analyzed (null = closed)
@@ -5105,8 +5250,12 @@ function GolfAppInner() {
       );
     }
 
-    const activeClub = statsClubName && clubsPlayed.includes(statsClubName) ? statsClubName : clubsPlayed[0];
-    const stats = aggregateClubStats(activeClub, allRoundsForStats);
+    // v53: "Alle Clubs"-Mode wenn statsClubName === "__ALL__"
+    const isAllClubsMode = statsClubName === "__ALL__";
+    const activeClub = isAllClubsMode ? null : (statsClubName && clubsPlayed.includes(statsClubName) ? statsClubName : clubsPlayed[0]);
+    const stats = isAllClubsMode
+      ? aggregateAllClubsStats(allRoundsForStats)
+      : aggregateClubStats(activeClub, allRoundsForStats);
 
     // Active focus player — must exist in stats for this club
     const availablePlayers = stats?.playerStats.map(p => p.name) || [];
@@ -5119,9 +5268,10 @@ function GolfAppInner() {
         <div style={{ marginBottom: "12px" }}>
           <div style={{ ...S.eyebrow, marginBottom: "6px" }}>🏌️ Club</div>
           <select
-            value={activeClub}
+            value={isAllClubsMode ? "__ALL__" : activeClub}
             onChange={(e) => { setStatsClubName(e.target.value); setStatsFocusPlayer(null); }}
             style={{ ...S.input, padding: "10px 12px", fontSize: "13px", width: "100%" }}>
+            <option value="__ALL__">🌍 Alle Clubs ({allRoundsForStats.length} Runden)</option>
             {clubsPlayed.map(name => {
               const count = allRoundsForStats.filter(r => r.cfg?.clubName === name).length;
               return <option key={name} value={name}>{name} ({count} Runde{count === 1 ? "" : "n"})</option>;
@@ -5823,14 +5973,22 @@ function GolfAppInner() {
           <div style={{ padding: "0 16px 20px" }}>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px", background: T.surface1, border: `1px solid ${T.line}`, borderRadius: "16px", padding: "4px" }}>
               {[
-                { label: "Runden", value: totalRounds },
-                { label: "Clubs", value: clubsPlayed },
-                { label: "Bester SF", value: bestSF || "—", accent: true },
+                { label: "Runden", value: totalRounds, action: () => setTab("rounds") },
+                { label: "Clubs", value: clubsPlayed, action: () => setShowClubsModal(true) },
+                { label: "Bester SF", value: bestSF || "—", accent: true, action: () => setTab("stats") },
               ].map((s,i,arr) => (
-                <div key={s.label} style={{ padding: "14px 8px", textAlign: "center", borderRight: i < arr.length-1 ? `1px solid ${T.line}` : "none" }}>
+                <button key={s.label}
+                  onClick={s.action}
+                  style={{
+                    padding: "14px 8px", textAlign: "center",
+                    borderRight: i < arr.length-1 ? `1px solid ${T.line}` : "none",
+                    background: "transparent", border: "none",
+                    cursor: "pointer", color: "inherit",
+                    fontFamily: "inherit",
+                  }}>
                   <div className="mono" style={{ fontSize: "22px", fontWeight: 700, color: s.accent ? T.gold : T.text }}>{s.value}</div>
                   <div style={{ ...S.eyebrow, marginTop: "4px", fontSize: "9px" }}>{s.label}</div>
-                </div>
+                </button>
               ))}
             </div>
           </div>
@@ -6008,16 +6166,19 @@ function GolfAppInner() {
             const crewWithData = [];
             const crewBuilding = [];
             friends.forEach(f => {
-              const sim = computeSimHcp(f.playerId || f.name, rounds);
+              const sim = computeSimHcp(f.playerId || f.name, rounds, f.name);
               if (sim?.hasEnoughData) {
                 crewWithData.push({ friend: f, sim });
               } else {
-                // v51: zähle wie viele Runden dieser Friend hat
+                // v51+v53: Robustes Round-Count — gleiche Match-Logic wie computeSimHcp
+                const fNormName = normName(f.name);
                 const friendRoundCount = rounds.filter(r =>
-                  (r.players || []).some(p =>
-                    (f.playerId && p.playerId === f.playerId) ||
-                    normName(p.name) === normName(f.name)
-                  )
+                  (r.players || []).some(p => {
+                    if (!p) return false;
+                    if (f.playerId && p.playerId === f.playerId) return true;
+                    if (p.name && normName(p.name) === fNormName) return true;
+                    return false;
+                  })
                 ).length;
                 crewBuilding.push({ friend: f, roundCount: friendRoundCount });
               }
@@ -6054,6 +6215,89 @@ function GolfAppInner() {
               ? allRoundSfStats.reduce((b, c) => (c.sf > b.sf ? c : b), allRoundSfStats[0])
               : null;
 
+            // v53: Rekord-Detection — bricht jemand seinen persönlichen Rekord in der NEUESTEN Runde?
+            const newestRound = rounds.length > 0
+              ? [...rounds].sort((a, b) => new Date(b.cfg?.date || b.savedAt || 0).getTime() - new Date(a.cfg?.date || a.savedAt || 0).getTime())[0]
+              : null;
+            const recordsBroken = []; // [{ name, sf, prevBest, club, date }]
+            if (newestRound && newestRound.holes?.length) {
+              const newPar = newestRound.holes.reduce((s, h) => s + h.par, 0);
+              (newestRound.players || []).forEach(p => {
+                const tee = playerTee(p, newestRound.cfg, newestRound.selectedClubSnapshot);
+                if (!tee) return;
+                const { ph } = resolvePlayerPH(p, newestRound.cfg, newestRound.selectedClubSnapshot, newPar);
+                let sf = 0, played = 0;
+                newestRound.holes.forEach((h, i) => {
+                  const g = newestRound.scores?.[p.id]?.[i];
+                  if (!isValid(g) && !isStrich(g)) return;
+                  played++;
+                  const hs = holeHS(ph, h.si, newestRound.holes.length);
+                  sf += sfNetto(g, hs, h.par) || 0;
+                });
+                if (played < newestRound.holes.length * 0.5) return;
+                const newSf = newestRound.holes.length === 9 ? sf * 2 : sf;
+
+                // Suche bestes SF in allen ANDEREN Runden für diesen Spieler
+                const playerNorm = normName(p.name);
+                let prevBest = 0;
+                rounds.forEach(r => {
+                  if (r.id === newestRound.id) return;
+                  const player = (r.players || []).find(rp =>
+                    (p.playerId && rp.playerId === p.playerId) || normName(rp.name) === playerNorm
+                  );
+                  if (!player || !r.holes?.length) return;
+                  const par = r.holes.reduce((s, h) => s + h.par, 0);
+                  const { ph: prevPh } = resolvePlayerPH(player, r.cfg, r.selectedClubSnapshot, par);
+                  let prevSf = 0, prevPlayed = 0;
+                  r.holes.forEach((h, i) => {
+                    const g = r.scores?.[player.id]?.[i];
+                    if (!isValid(g) && !isStrich(g)) return;
+                    prevPlayed++;
+                    const hs = holeHS(prevPh, h.si, r.holes.length);
+                    prevSf += sfNetto(g, hs, h.par) || 0;
+                  });
+                  if (prevPlayed < r.holes.length * 0.5) return;
+                  const norm = r.holes.length === 9 ? prevSf * 2 : prevSf;
+                  if (norm > prevBest) prevBest = norm;
+                });
+                if (newSf > prevBest && prevBest > 0) {
+                  recordsBroken.push({
+                    name: p.name,
+                    sf: newSf,
+                    prevBest,
+                    club: newestRound.cfg?.clubName,
+                    date: newestRound.cfg?.date || newestRound.savedAt,
+                  });
+                }
+              });
+            }
+
+            // v53: Owner-Streak — wie viele Runden in Folge mit ≥36 SF
+            let ownerStreak = 0;
+            if (ownerName) {
+              const ownerRoundsSorted = rounds
+                .filter(r => (r.players || []).some(p => normName(p.name) === normName(ownerName)))
+                .sort((a, b) => new Date(b.cfg?.date || b.savedAt || 0).getTime() - new Date(a.cfg?.date || a.savedAt || 0).getTime());
+              for (const r of ownerRoundsSorted) {
+                const player = (r.players || []).find(p => normName(p.name) === normName(ownerName));
+                if (!player || !r.holes?.length) break;
+                const par = r.holes.reduce((s, h) => s + h.par, 0);
+                const { ph } = resolvePlayerPH(player, r.cfg, r.selectedClubSnapshot, par);
+                let sf = 0, played = 0;
+                r.holes.forEach((h, i) => {
+                  const g = r.scores?.[player.id]?.[i];
+                  if (!isValid(g) && !isStrich(g)) return;
+                  played++;
+                  const hs = holeHS(ph, h.si, r.holes.length);
+                  sf += sfNetto(g, hs, h.par) || 0;
+                });
+                if (played < r.holes.length * 0.5) break;
+                const norm = r.holes.length === 9 ? sf * 2 : sf;
+                if (norm >= 36) ownerStreak++;
+                else break;
+              }
+            }
+
             // Form-Sieger: Spieler mit niedrigster (also bestester) Sim-HCP-Diff
             const bestForm = crewData.length > 0
               ? [...crewData].sort((a, b) => a.sim.diff - b.sim.diff)[0]
@@ -6065,6 +6309,53 @@ function GolfAppInner() {
 
             return (
               <>
+                {/* v53: Rekord-Banner — wenn jemand seinen persönlichen Rekord brach */}
+                {recordsBroken.length > 0 && (
+                  <div style={{
+                    ...S.card, padding: "14px 16px", marginBottom: "14px",
+                    background: `linear-gradient(135deg, ${T.gold}25 0%, ${T.gold}10 100%)`,
+                    borderColor: `${T.gold}60`,
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                      <span style={{ fontSize: "26px" }}>🏆</span>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: "10px", color: T.gold, letterSpacing: "0.08em", fontWeight: 700, marginBottom: "2px" }}>
+                          NEUER REKORD!
+                        </div>
+                        {recordsBroken.map((r, i) => (
+                          <div key={i} style={{ fontSize: "13px", color: T.text, lineHeight: 1.4 }}>
+                            <b>{r.name}</b> · <span className="mono" style={{ color: T.gold, fontWeight: 700 }}>{r.sf} SF</span> auf {r.club}
+                            <div style={{ fontSize: "10px", color: T.textSoft, marginTop: "1px" }}>
+                              ({r.prevBest} alter Rekord · {fmtDate(r.date)})
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* v53: Streak-Banner — wenn Owner mehrere Runden in Folge ≥36 SF */}
+                {ownerStreak >= 2 && (
+                  <div style={{
+                    ...S.card, padding: "12px 16px", marginBottom: "14px",
+                    background: `linear-gradient(135deg, ${T.double}25 0%, ${T.double}10 100%)`,
+                    borderColor: `${T.double}60`,
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                      <span style={{ fontSize: "24px" }}>🔥</span>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: "10px", color: T.double, letterSpacing: "0.08em", fontWeight: 700, marginBottom: "2px" }}>
+                          HOT STREAK
+                        </div>
+                        <div style={{ fontSize: "13px", color: T.text, fontWeight: 600 }}>
+                          {ownerStreak} {ownerStreak === 1 ? "Runde" : "Runden"} in Folge mit ≥ 36 SF
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* ── Top: Deine Form ── */}
                 {ownerName && (
                   <div style={{ ...S.card, padding: "16px", marginBottom: "14px", borderColor: `${T.gold}30` }}>
@@ -6184,30 +6475,47 @@ function GolfAppInner() {
                         </p>
                         {crewBuilding.map(({ friend, roundCount }) => {
                           const needed = Math.max(0, 3 - roundCount);
+                          // v53: Diagnose — wenn genug Runden gefunden aber Sim-HCP fehlschlug, zeige Grund
+                          const sim = computeSimHcp(friend.playerId || friend.name, rounds, friend.name);
+                          const failReason = sim?.failReason;
+                          const showDiagnose = roundCount >= 3 && failReason;
                           return (
                             <div key={friend.playerId || friend.name}
-                              style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 0", borderTop: `1px solid ${T.line}` }}>
-                              <div style={{ width: "30px", height: "30px", borderRadius: "50%", background: T.surface2, border: `1px solid ${T.line}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", fontWeight: 700, color: T.textDim }}>
-                                {(friend.name || "?").charAt(0).toUpperCase()}
-                              </div>
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontSize: "13px", fontWeight: 600, color: T.text, marginBottom: "2px", display: "flex", alignItems: "center", gap: "6px" }}>
-                                  {friend.name}
-                                  {friend.isOwner && <span style={{ fontSize: "9px", color: T.gold, background: `${T.gold}15`, padding: "1px 5px", borderRadius: "3px", fontWeight: 700, letterSpacing: "0.04em" }}>DU</span>}
+                              style={{ padding: "10px 0", borderTop: `1px solid ${T.line}` }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                                <div style={{ width: "30px", height: "30px", borderRadius: "50%", background: T.surface2, border: `1px solid ${T.line}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", fontWeight: 700, color: T.textDim }}>
+                                  {(friend.name || "?").charAt(0).toUpperCase()}
                                 </div>
-                                <div style={{ fontSize: "10px", color: T.textSoft }}>
-                                  HCP <span className="mono">{friend.hcp}</span> · {roundCount} {roundCount === 1 ? "Runde" : "Runden"}
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ fontSize: "13px", fontWeight: 600, color: T.text, marginBottom: "2px", display: "flex", alignItems: "center", gap: "6px" }}>
+                                    {friend.name}
+                                    {friend.isOwner && <span style={{ fontSize: "9px", color: T.gold, background: `${T.gold}15`, padding: "1px 5px", borderRadius: "3px", fontWeight: 700, letterSpacing: "0.04em" }}>DU</span>}
+                                  </div>
+                                  <div style={{ fontSize: "10px", color: T.textSoft }}>
+                                    HCP <span className="mono">{friend.hcp}</span> · {roundCount} {roundCount === 1 ? "Runde" : "Runden"}
+                                  </div>
                                 </div>
+                                <span style={{
+                                  fontSize: "10px",
+                                  color: showDiagnose ? T.double : T.textDim,
+                                  textAlign: "right",
+                                  fontStyle: "italic",
+                                  minWidth: "80px",
+                                }}>
+                                  {needed === 0 ? (showDiagnose ? "⚠️ Daten unklar" : "fast genug") : needed === 1 ? "noch 1 Runde" : `noch ${needed} Runden`}
+                                </span>
                               </div>
-                              <span style={{
-                                fontSize: "10px",
-                                color: T.textDim,
-                                textAlign: "right",
-                                fontStyle: "italic",
-                                minWidth: "80px",
-                              }}>
-                                {needed === 0 ? "fast genug" : needed === 1 ? "noch 1 Runde" : `noch ${needed} Runden`}
-                              </span>
+                              {/* v53: Diagnose-Detail wenn genug Runden vorhanden aber Sim-HCP fehlschlug */}
+                              {showDiagnose && (
+                                <div style={{ fontSize: "10px", color: T.textDim, marginTop: "6px", marginLeft: "40px", padding: "6px 10px", background: T.surface1, borderRadius: "6px", lineHeight: 1.4 }}>
+                                  💡 {failReason}
+                                  {sim.droppedRounds && sim.droppedRounds.length > 0 && (
+                                    <div style={{ marginTop: "4px" }}>
+                                      Aussortiert: {sim.droppedRounds.map(d => `${d.date || "?"} (${d.reason})`).join(" · ")}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
                             </div>
                           );
                         })}
@@ -10501,6 +10809,121 @@ WICHTIG:
     );
   };
 
+  // ── v53: Clubs-Übersichts-Modal ──
+  const renderClubsModal = () => {
+    if (!showClubsModal) return null;
+    // Aggregiere pro Club: Anzahl Runden, bester SF (Owner), letztes Datum
+    const ownerName = ownerProfile?.name;
+    const clubMap = {};
+    rounds.forEach(r => {
+      const clubName = r.cfg?.clubName;
+      if (!clubName) return;
+      if (!clubMap[clubName]) {
+        clubMap[clubName] = { name: clubName, count: 0, lastDate: null, bestSf: null, bestSfDate: null, region: null };
+      }
+      const c = clubMap[clubName];
+      c.count++;
+      const date = r.cfg?.date || r.savedAt;
+      if (!c.lastDate || new Date(date) > new Date(c.lastDate)) c.lastDate = date;
+      if (!c.region && r.selectedClubSnapshot?.region) c.region = r.selectedClubSnapshot.region;
+
+      // Bester SF des Owners auf diesem Club
+      if (ownerName) {
+        const player = (r.players || []).find(p => normName(p.name) === normName(ownerName));
+        if (player && r.holes?.length) {
+          const par = r.holes.reduce((s, h) => s + h.par, 0);
+          const { ph } = resolvePlayerPH(player, r.cfg, r.selectedClubSnapshot, par);
+          let sf = 0, played = 0;
+          r.holes.forEach((h, i) => {
+            const g = r.scores?.[player.id]?.[i];
+            if (!isValid(g) && !isStrich(g)) return;
+            played++;
+            const hs = holeHS(ph, h.si, r.holes.length);
+            sf += sfNetto(g, hs, h.par) || 0;
+          });
+          if (played >= r.holes.length * 0.5) {
+            const normSf = r.holes.length === 9 ? sf * 2 : sf;
+            if (c.bestSf === null || normSf > c.bestSf) {
+              c.bestSf = normSf;
+              c.bestSfDate = date;
+            }
+          }
+        }
+      }
+    });
+    const clubsList = Object.values(clubMap).sort((a, b) => b.count - a.count);
+
+    return (
+      <div onClick={() => setShowClubsModal(false)}
+        style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+        <div onClick={e => e.stopPropagation()} className="slide-up"
+          style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "85vh", overflowY: "auto" }}>
+          <SwipeHandle onClose={() => setShowClubsModal(false)} />
+          <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>
+            🏌️ Deine Clubs
+          </h3>
+          <p style={{ fontSize: "12px", color: T.textSoft, marginTop: 0, marginBottom: "16px" }}>
+            {clubsList.length} {clubsList.length === 1 ? "Club" : "Clubs"} gespielt · sortiert nach Häufigkeit
+          </p>
+
+          {clubsList.length === 0 ? (
+            <EmptyState icon="🏌️" title="Noch keine Clubs" sub="Spiele deine erste Runde, dann siehst du sie hier." />
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              {clubsList.map(c => (
+                <button key={c.name}
+                  onClick={() => {
+                    setStatsClubName(c.name);
+                    setTab("stats");
+                    setShowClubsModal(false);
+                  }}
+                  style={{
+                    width: "100%", textAlign: "left",
+                    padding: "14px", background: T.surface2,
+                    border: `1px solid ${T.line}`, borderRadius: "12px",
+                    cursor: "pointer", color: T.text, fontFamily: "inherit",
+                  }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: "14px", fontWeight: 700, color: T.text, marginBottom: "2px" }}>
+                        {c.name}
+                      </div>
+                      {c.region && (
+                        <div style={{ fontSize: "10px", color: T.textDim }}>{c.region}</div>
+                      )}
+                    </div>
+                    <span style={{ color: T.textDim, fontSize: "16px" }}>›</span>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px" }}>
+                    <div style={{ textAlign: "center", padding: "6px 4px", background: T.surface1, borderRadius: "6px" }}>
+                      <div className="mono" style={{ fontSize: "16px", fontWeight: 700, color: T.text }}>{c.count}</div>
+                      <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>RUNDEN</div>
+                    </div>
+                    <div style={{ textAlign: "center", padding: "6px 4px", background: T.surface1, borderRadius: "6px" }}>
+                      <div className="mono" style={{ fontSize: "16px", fontWeight: 700, color: c.bestSf ? T.gold : T.textDim }}>
+                        {c.bestSf || "—"}
+                      </div>
+                      <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>BESTER SF</div>
+                    </div>
+                    <div style={{ textAlign: "center", padding: "6px 4px", background: T.surface1, borderRadius: "6px" }}>
+                      <div className="mono" style={{ fontSize: "11px", fontWeight: 600, color: T.textSoft }}>
+                        {c.lastDate ? fmtDate(c.lastDate) : "—"}
+                      </div>
+                      <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>ZULETZT</div>
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+
+          <button onClick={() => setShowClubsModal(false)}
+            style={{ ...S.btnGhost, width: "100%", marginTop: "16px", fontSize: "13px" }}>Schließen</button>
+        </div>
+      </div>
+    );
+  };
+
   // ── v38: Loch-Schnellsprung-Modal ──
   const renderHoleJump = () => {
     if (!showHoleJump) return null;
@@ -10656,7 +11079,7 @@ WICHTIG:
 
               {/* v48: Sim-HCP — aktuelle Form */}
               {(() => {
-                const sim = computeSimHcp(focused.playerId || focused.name, rounds);
+                const sim = computeSimHcp(focused.playerId || focused.name, rounds, focused.name);
                 if (!sim?.hasEnoughData) return null;
                 return (
                   <div style={{ ...S.card, padding: "14px", marginBottom: "12px", borderColor: `${T.gold}30` }}>
@@ -13974,6 +14397,7 @@ Wichtig:
       {renderStatDrilldown()}
       {renderOwnerSetup()}
       {renderOnboardingChoice()}
+      {renderClubsModal()}
       {renderUndoToast()}
 
       {/* v40: Versions-Footer — sichtbar in jeder Crew, hilft beim Bug-Reporting */}
