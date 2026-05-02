@@ -3284,6 +3284,8 @@ function GolfAppInner() {
         teams,
         par3Data,
         ladies,
+        // v50: Best Ball+ Config für Live-Ticker
+        bestBallConfig: gameMode === "bestball-plus" ? bestBallConfig : null,
         clubName: cfg.clubName,
         syncCode: syncCode || null,
         // v40: Scorer-Info — wer ist der aktive Scorer (Schreib-Berechtigung)
@@ -3301,7 +3303,7 @@ function GolfAppInner() {
       await liveUpdate(liveCode, payload);
     }, 2500);
     return () => clearTimeout(livePushTimerRef.current);
-  }, [liveCode, liveStatus, cfg, holes, players, scores, gameMode, teams, par3Data, selectedClub, syncCode, ladies, deviceId, ownerProfile]);
+  }, [liveCode, liveStatus, cfg, holes, players, scores, gameMode, teams, par3Data, selectedClub, syncCode, ladies, deviceId, ownerProfile, bestBallConfig]);
 
   // ── v40: Periodic Scorer-Conflict Check ──
   // Alle 30s prüfen ob ein anderes Gerät den Scorer-Status übernommen hat.
@@ -4395,6 +4397,8 @@ function GolfAppInner() {
   // Called right after a score is set for `latestPlayerId` on `holeIdx`
   const maybePromptUschi = (holeIdx, latestPlayerId) => {
     if (gameMode === "stableford") return;
+    // v50: Bei Best Ball+ nur prompten wenn uschiBonus aktiviert
+    if (gameMode === "bestball-plus" && !bestBallConfig.uschiBonus) return;
     const hole = holes[holeIdx];
     if (!hole || hole.par !== 3) return;
     if (par3Data[holeIdx]) return; // already have data
@@ -4641,6 +4645,14 @@ function GolfAppInner() {
     setTeams(r.teams || null);
     setPar3Data(r.par3Data || r.uschiInputs || {});
     setLadies(r.ladies || {});
+    // v50: Best Ball+ Config wiederherstellen
+    if (r.gameMode === "bestball-plus" && r.bestBallConfig) {
+      setBestBallConfig({
+        birdieBonus: r.bestBallConfig.birdieBonus !== false,
+        uschiBonus: r.bestBallConfig.uschiBonus === true,
+        hcpMode: r.bestBallConfig.hcpMode || "adjusted",
+      });
+    }
     // If incomplete, jump into scoring so user can continue where they left off.
     const progress = getRoundProgress(r);
     if (progress.notStarted) {
@@ -4787,6 +4799,14 @@ function GolfAppInner() {
     setGameMode(last.gameMode || "stableford");
     setTeams(last.teams || null);
     setPar3Data({});        // no par-3 data yet
+    // v50: Best Ball+ Config übernehmen
+    if (last.gameMode === "bestball-plus" && last.bestBallConfig) {
+      setBestBallConfig({
+        birdieBonus: last.bestBallConfig.birdieBonus !== false,
+        uschiBonus: last.bestBallConfig.uschiBonus === true,
+        hcpMode: last.bestBallConfig.hcpMode || "adjusted",
+      });
+    }
     setClubQ("");
     setPickedClub(null);
     setCurrentHole(0);
@@ -7118,7 +7138,9 @@ function GolfAppInner() {
                   borderRadius: "4px", letterSpacing: "0.04em", fontWeight: 700,
                   whiteSpace: "nowrap",
                 }}>
-                  🎯 {r.gameMode === "uschi-team" ? "USCHI 2v2" : "USCHI"}
+                  {r.gameMode === "bestball-plus" ? "☄️ BEST BALL+" :
+                   r.gameMode === "uschi-team" ? "🎯 USCHI 2v2" :
+                   "🎯 USCHI"}
                 </span>
               )}
               {(!r.gameMode || r.gameMode === "stableford") && (
@@ -8223,7 +8245,7 @@ function GolfAppInner() {
 
           {/* Action buttons: Uschi protocol + Share + Live */}
           <div style={{ display: "flex", gap: "8px", marginBottom: "14px", flexWrap: "wrap" }}>
-            {gameMode !== "stableford" && (
+            {((gameMode === "uschi-single" || gameMode === "uschi-team") || (gameMode === "bestball-plus" && bestBallConfig.uschiBonus)) && (
               <button onClick={() => setShowUschiReview(true)}
                 style={{
                   flex: "1 1 140px",
@@ -8236,7 +8258,7 @@ function GolfAppInner() {
                   fontFamily: "Inter, sans-serif",
                   display: "flex", alignItems: "center", justifyContent: "center", gap: "6px",
                 }}>
-                🎯 Uschi-Protokoll
+                {gameMode === "bestball-plus" ? "☄️ Best Ball+ Protokoll" : "🎯 Uschi-Protokoll"}
               </button>
             )}
             <button onClick={shareResults}
@@ -8477,7 +8499,9 @@ function GolfAppInner() {
                           <div className="mono" style={{ fontSize: "22px", fontWeight: 800, color: uschiTotal >= 0 ? T.gold : T.double, lineHeight: 1 }}>
                             {uschiTotal > 0 ? "+" : ""}{uschiTotal}
                           </div>
-                          <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>USCHI</div>
+                          <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>
+                            {gameMode === "bestball-plus" ? "BEST BALL+" : "USCHI"}
+                          </div>
                         </>
                       ) : (
                         <>
@@ -8643,7 +8667,7 @@ function GolfAppInner() {
                 }}>
                   <span className="mono">{i+1}</span>
                   <span style={{ fontSize: "9px", color: T.textDim, marginLeft: "6px", fontWeight: 500 }}>SI{hole.si}</span>
-                  {gameMode !== "stableford" && hole.par === 3 && (
+                  {((gameMode === "uschi-single" || gameMode === "uschi-team") || (gameMode === "bestball-plus" && bestBallConfig.uschiBonus)) && hole.par === 3 && (
                     <button onClick={e => { e.stopPropagation(); setUschiPromptHole(i); }}
                       title="Uschi-Daten"
                       style={{
@@ -8810,14 +8834,18 @@ function GolfAppInner() {
                     <div style={{ fontWeight: 600, fontSize: "15px", color: T.text, display: "flex", alignItems: "center", gap: "6px" }}>
                       {p.name}
                       {p.teeName && <TeeDot name={p.teeName} size={9} />}
-                      {/* Uschi stroke advantage badge inline next to name */}
+                      {/* Uschi/Best-Ball stroke advantage badge inline next to name */}
                       {gameMode !== "stableford" && (() => {
-                        const playerStrokes = uschiStrokes.find(s => s.playerId === p.id);
+                        // v52: Bei Best Ball+ "normal" Mode → bestBallStrokes nutzen, sonst uschiStrokes
+                        const activeStrokes = (gameMode === "bestball-plus" && bestBallConfig.hcpMode === "normal")
+                          ? bestBallStrokes
+                          : uschiStrokes;
+                        const playerStrokes = activeStrokes.find(s => s.playerId === p.id);
                         if (!playerStrokes) return null;
                         const strokesOnThisHole = playerStrokes.perHole[currentHole] || 0;
-                        const maxOnHole = Math.max(0, ...uschiStrokes.map(s => s.perHole[currentHole] || 0));
+                        const maxOnHole = Math.max(0, ...activeStrokes.map(s => s.perHole[currentHole] || 0));
                         const isMaxOnHole = strokesOnThisHole === maxOnHole && strokesOnThisHole > 0;
-                        const isBestOverall = playerStrokes.strokes === Math.min(...uschiStrokes.map(s => s.strokes));
+                        const isBestOverall = playerStrokes.strokes === Math.min(...activeStrokes.map(s => s.strokes));
                         if (isBestOverall && strokesOnThisHole === 0) {
                           return (
                             <span style={{ fontSize: "9px", color: T.sage, background: `${T.sage}15`, padding: "2px 5px", borderRadius: "3px", fontWeight: 700, letterSpacing: "0.04em" }}>🎯 MASSSTAB</span>
@@ -9440,11 +9468,48 @@ function GolfAppInner() {
           </div>
           <div style={{ fontSize: "12px", color: T.textSoft, marginBottom: "20px" }}>
             {cfg.clubName || cfg.name || "Runde"} · {fmtDate(cfg.date)} · Par {par}
+            {gameMode === "bestball-plus" && <span style={{ color: T.gold, marginLeft: "6px" }}>· ☄️ Best Ball+</span>}
             {isUschi && <span style={{ color: T.gold, marginLeft: "6px" }}>· 🎯 Uschi-Modus{gameMode === "uschi-team" ? " (2v2)" : ""}</span>}
           </div>
 
           {/* USCHI RANKING (only in uschi mode) */}
           {isUschi && uschiResult && renderUschiRanking()}
+
+          {/* v50: BEST BALL+ RANKING */}
+          {gameMode === "bestball-plus" && bestBallResult && (
+            <div style={{ ...S.card, background: `linear-gradient(135deg, ${T.surface3}, ${T.surface2})`, border: `2px solid ${T.gold}`, marginBottom: "20px" }}>
+              <div style={{ ...S.eyebrow, color: T.gold, marginBottom: "14px" }}>☄️ Best Ball+ Wertung</div>
+              {bestBallConfig.uschiBonus && bestBallResult.carry > 1 && (
+                <div style={{ fontSize: "11px", color: T.gold, marginBottom: "10px", padding: "6px 10px", background: `${T.gold}10`, borderRadius: "6px", border: `1px solid ${T.gold}40` }}>
+                  🎀 Offener Uschi-Carry: <b>{bestBallResult.carry}×</b>
+                </div>
+              )}
+              {[...players].sort((a, b) => (bestBallResult.totals[b.id]?.total || 0) - (bestBallResult.totals[a.id]?.total || 0)).map((p, idx) => {
+                const t = bestBallResult.totals[p.id] || {};
+                return (
+                  <div key={p.id} style={{ display: "flex", alignItems: "center", gap: "12px", padding: "12px 0", borderBottom: idx < players.length - 1 ? `1px solid ${T.line}` : "none" }}>
+                    <div style={{ fontSize: "24px", width: "30px", textAlign: "center" }}>
+                      {medals[idx] || <span className="mono" style={{ fontSize: "15px", color: T.textSoft, fontWeight: 700 }}>{idx+1}.</span>}
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 700, fontSize: "15px", color: T.text, marginBottom: "3px" }}>
+                        {p.name}
+                      </div>
+                      <div style={{ fontSize: "10px", color: T.textDim }}>
+                        {t.best || 0}🏆 Best
+                        {t.birdies > 0 && ` · ${t.birdies}🎯 Birdies`}
+                        {t.uschi > 0 && ` · ${t.uschi}🎀 Uschi`}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div className="mono" style={{ fontSize: "26px", fontWeight: 800, color: T.gold, lineHeight: 1 }}>{t.total || 0}</div>
+                      <div style={{ fontSize: "9px", color: T.textDim, marginTop: "2px" }}>PUNKTE</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {/* Standard Stableford Netto Ranking */}
           <div style={{ ...S.card, background: `linear-gradient(135deg, ${T.surface2}, ${T.surface1})`, border: `1px solid ${T.gold}40`, marginBottom: "20px" }}>
