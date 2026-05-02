@@ -943,7 +943,7 @@ const BUILT_IN_CLUBS = [
 const STRICH = null;
 
 // ─── v40: Versions-Marker — sichtbar im App-Footer ──────────────────────────
-const APP_VERSION = "v54";
+const APP_VERSION = "v56";
 const APP_BUILD_DATE = "2026-05-02";
 
 function makeHoles(totalPar, numHoles) {
@@ -1190,6 +1190,270 @@ function SwipeHandle({ onClose }) {
         width: "40px", height: "4px",
         background: "#3a4a40", borderRadius: "2px", margin: "0 auto",
       }}/>
+    </div>
+  );
+}
+
+// ─── v56: Pro-Runde-Ziel-Setup-Komponente (mit useState innen) ──────────────
+function RoundGoalSetupContent({ player, par, rounds, existingGoal, computeSimHcp, resolvePlayerPH, holeHS, sfNetto, isValid, isStrich, normName, T, S, onClose, onSave, showUndoToast }) {
+  const [localType, setLocalType] = useState(existingGoal?.type || "round-score");
+  const [overParTarget, setOverParTarget] = useState(existingGoal?.type === "round-score" ? existingGoal.target : 8);
+  const [sfTarget, setSfTarget] = useState(existingGoal?.type === "round-sf" ? existingGoal.target : 36);
+  const [customLabel, setCustomLabel] = useState(existingGoal?.type === "round-custom" ? existingGoal.label : "");
+
+  // Personal Best
+  const playerNorm = normName(player.name);
+  let personalBest = 0;
+  rounds.forEach(r => {
+    const rp = (r.players || []).find(rp =>
+      (player.playerId && rp.playerId === player.playerId) ||
+      normName(rp.name) === playerNorm
+    );
+    if (!rp || !r.holes?.length) return;
+    const par2 = r.holes.reduce((s, h) => s + h.par, 0);
+    const { ph } = resolvePlayerPH(rp, r.cfg, r.selectedClubSnapshot, par2);
+    let sf = 0, played = 0;
+    r.holes.forEach((h, i) => {
+      const g = r.scores?.[rp.id]?.[i];
+      if (!isValid(g) && !isStrich(g)) return;
+      played++;
+      const hs = holeHS(ph, h.si, r.holes.length);
+      sf += sfNetto(g, hs, h.par) || 0;
+    });
+    if (played < r.holes.length * 0.5) return;
+    const norm = r.holes.length === 9 ? sf * 2 : sf;
+    if (norm > personalBest) personalBest = norm;
+  });
+
+  const playerSim = computeSimHcp(player.playerId || player.name, rounds, player.name);
+  const simAvgSf = playerSim?.avgSf || null;
+
+  const goalOptions = [
+    { type: "round-score", label: `${overParTarget} über Par`, hasInput: true, icon: "⛳" },
+    { type: "round-sf", label: `${sfTarget} SF Netto holen`, hasInput: true, icon: "🎯" },
+    { type: "round-no-strich", label: "Keine Striche", icon: "🛡️" },
+    { type: "round-birdie", label: "Mindestens 1 Birdie", icon: "🎯" },
+    ...(personalBest > 0 ? [{ type: "round-personal-best", label: `Personal Best (${personalBest} SF) brechen`, icon: "🏆" }] : []),
+    ...(simAvgSf ? [{ type: "round-beat-sim-hcp", label: `Sim-HCP übertreffen (>${simAvgSf} SF)`, icon: "📈" }] : []),
+    { type: "round-custom", label: "Eigenes Ziel (frei)", hasInput: true, icon: "✨" },
+  ];
+
+  const save = () => {
+    let goal = null;
+    if (localType === "round-score") goal = { type: "round-score", target: overParTarget, label: `${overParTarget} über Par` };
+    else if (localType === "round-sf") goal = { type: "round-sf", target: sfTarget, label: `${sfTarget} SF Netto` };
+    else if (localType === "round-no-strich") goal = { type: "round-no-strich", label: "Keine Striche" };
+    else if (localType === "round-birdie") goal = { type: "round-birdie", label: "Mind. 1 Birdie" };
+    else if (localType === "round-personal-best") goal = { type: "round-personal-best", target: personalBest, label: `Personal Best (${personalBest} SF) brechen` };
+    else if (localType === "round-beat-sim-hcp") goal = { type: "round-beat-sim-hcp", target: simAvgSf, label: `Sim-HCP übertreffen (>${simAvgSf} SF)` };
+    else if (localType === "round-custom") {
+      if (!customLabel.trim()) { showUndoToast("⚠️ Bitte gib eine Beschreibung ein", null); return; }
+      goal = { type: "round-custom", label: customLabel.trim() };
+    }
+    if (goal) onSave(goal);
+  };
+
+  return (
+    <div onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={e => e.stopPropagation()} className="slide-up"
+        style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
+        <SwipeHandle onClose={onClose} />
+        <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>
+          🎯 Ziel für {player.name}
+        </h3>
+        <p style={{ fontSize: "12px", color: T.textSoft, marginTop: 0, marginBottom: "16px" }}>
+          Was möchtest du heute erreichen?
+        </p>
+        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+          {goalOptions.map(opt => {
+            const active = localType === opt.type;
+            return (
+              <button key={opt.type} onClick={() => setLocalType(opt.type)}
+                style={{
+                  width: "100%", textAlign: "left", padding: "12px 14px",
+                  background: active ? `${T.gold}15` : T.surface2,
+                  border: `1px solid ${active ? T.gold : T.line}`,
+                  borderRadius: "10px", cursor: "pointer", color: T.text,
+                  fontFamily: "inherit", display: "flex", alignItems: "center", gap: "10px",
+                }}>
+                <span style={{ fontSize: "18px" }}>{opt.icon}</span>
+                <span style={{ flex: 1, fontSize: "13px", fontWeight: active ? 700 : 500 }}>{opt.label}</span>
+                {active && <span style={{ color: T.gold, fontSize: "16px" }}>✓</span>}
+              </button>
+            );
+          })}
+        </div>
+        {localType === "round-score" && (
+          <div style={{ marginTop: "14px", padding: "14px", background: T.surface2, borderRadius: "10px", border: `1px solid ${T.gold}40` }}>
+            <div style={{ ...S.eyebrow, marginBottom: "10px" }}>X über Par einstellen</div>
+            <div style={{ display: "flex", alignItems: "center", gap: "10px", justifyContent: "center" }}>
+              <button onClick={() => setOverParTarget(t => Math.max(0, t - 1))}
+                style={{ width: "40px", height: "40px", background: T.surface1, color: T.text, border: `1px solid ${T.line}`, borderRadius: "8px", fontSize: "18px", fontWeight: 700, cursor: "pointer" }}>−</button>
+              <div className="mono" style={{ fontSize: "32px", fontWeight: 700, color: T.gold, minWidth: "60px", textAlign: "center" }}>+{overParTarget}</div>
+              <button onClick={() => setOverParTarget(t => Math.min(50, t + 1))}
+                style={{ width: "40px", height: "40px", background: T.surface1, color: T.text, border: `1px solid ${T.line}`, borderRadius: "8px", fontSize: "18px", fontWeight: 700, cursor: "pointer" }}>+</button>
+            </div>
+            <div style={{ fontSize: "10px", color: T.textDim, textAlign: "center", marginTop: "8px" }}>
+              Brutto-Ziel: max. <span className="mono">{par + overParTarget}</span> Schläge (Par {par})
+            </div>
+          </div>
+        )}
+        {localType === "round-sf" && (
+          <div style={{ marginTop: "14px", padding: "14px", background: T.surface2, borderRadius: "10px", border: `1px solid ${T.gold}40` }}>
+            <div style={{ ...S.eyebrow, marginBottom: "10px" }}>SF-Ziel einstellen</div>
+            <div style={{ display: "flex", alignItems: "center", gap: "10px", justifyContent: "center" }}>
+              <button onClick={() => setSfTarget(t => Math.max(0, t - 1))}
+                style={{ width: "40px", height: "40px", background: T.surface1, color: T.text, border: `1px solid ${T.line}`, borderRadius: "8px", fontSize: "18px", fontWeight: 700, cursor: "pointer" }}>−</button>
+              <div className="mono" style={{ fontSize: "32px", fontWeight: 700, color: T.gold, minWidth: "60px", textAlign: "center" }}>{sfTarget}</div>
+              <button onClick={() => setSfTarget(t => Math.min(60, t + 1))}
+                style={{ width: "40px", height: "40px", background: T.surface1, color: T.text, border: `1px solid ${T.line}`, borderRadius: "8px", fontSize: "18px", fontWeight: 700, cursor: "pointer" }}>+</button>
+            </div>
+            <div style={{ fontSize: "10px", color: T.textDim, textAlign: "center", marginTop: "8px" }}>
+              Stableford-Punkte Netto · 36 = HCP-Niveau
+            </div>
+          </div>
+        )}
+        {localType === "round-custom" && (
+          <div style={{ marginTop: "14px", padding: "14px", background: T.surface2, borderRadius: "10px", border: `1px solid ${T.gold}40` }}>
+            <div style={{ ...S.eyebrow, marginBottom: "8px" }}>Eigenes Ziel (Text)</div>
+            <input type="text" value={customLabel} onChange={e => setCustomLabel(e.target.value)}
+              placeholder="z.B. Spaß haben & viel lachen" maxLength={80}
+              style={{ ...S.input, width: "100%", fontSize: "13px" }}/>
+            <div style={{ fontSize: "10px", color: T.textDim, marginTop: "6px" }}>
+              Wird im Spiel als Erinnerung angezeigt — keine automatische Auswertung.
+            </div>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: "8px", marginTop: "18px" }}>
+          <button onClick={onClose} style={{ ...S.btnGhost, flex: 1, fontSize: "13px" }}>Abbrechen</button>
+          <button onClick={save} style={{ ...S.btnPrimary, flex: 2, fontSize: "13px" }}>🎯 Ziel speichern</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── v56: Saison-Ziel-Modal-Komponente ──────────────────────────────────────
+function GoalModalContent({ editingGoal, ownerName, playerOptions, rounds, computeSimHcp, uid, normName, T, S, onClose, onSave, onRemove }) {
+  const isEdit = !!editingGoal?.id;
+  const [type, setType] = useState(editingGoal?.type || "season-rounds");
+  const [target, setTarget] = useState(editingGoal?.target || 30);
+  const [pickedPlayer, setPickedPlayer] = useState(editingGoal?.playerKey || ownerName || "");
+
+  const seasonGoalTypes = [
+    { type: "season-rounds", label: "Anzahl Runden in der Saison", icon: "🔢", default: 30 },
+    { type: "season-birdies", label: "Anzahl Birdies in der Saison", icon: "🎯", default: 10 },
+    { type: "season-best-sf", label: "Bester SF-Wert (einmal erreichen)", icon: "⭐", default: 40 },
+    { type: "sim-hcp", label: "Sim-HCP-Ziel (auf X kommen)", icon: "📉", default: 27, isFloat: true },
+    { type: "streak-sf36", label: "Streak: N Runden in Folge ≥36 SF", icon: "🔥", default: 3 },
+  ];
+
+  const save = () => {
+    const opt = seasonGoalTypes.find(t => t.type === type);
+    if (!opt) { onClose(); return; }
+    const playerInfo = playerOptions.find(p => p.key === pickedPlayer);
+    const playerName = playerInfo?.name || pickedPlayer;
+    const newGoal = {
+      id: isEdit ? editingGoal.id : uid(),
+      type, playerKey: pickedPlayer, playerName,
+      target: parseFloat(target) || opt.default,
+      scope: type.startsWith("season-") ? "season" : "open",
+      createdAt: isEdit ? editingGoal.createdAt : new Date().toISOString(),
+    };
+    if (type === "sim-hcp") {
+      const sim = computeSimHcp(pickedPlayer, rounds, playerName);
+      newGoal.startHcp = sim?.simHcp || sim?.baseHcp || 30;
+    }
+    onSave(newGoal);
+  };
+
+  const remove = () => {
+    if (!isEdit) return;
+    if (!confirm(`Ziel wirklich löschen?`)) return;
+    onRemove(editingGoal.id);
+  };
+
+  return (
+    <div onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={e => e.stopPropagation()} className="slide-up"
+        style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
+        <SwipeHandle onClose={onClose} />
+        <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>
+          {isEdit ? "🎯 Ziel bearbeiten" : "🎯 Neues Ziel"}
+        </h3>
+        <p style={{ fontSize: "12px", color: T.textSoft, marginTop: 0, marginBottom: "16px" }}>
+          Setze ein langfristiges Ziel für die Saison oder einen offenen Meilenstein
+        </p>
+        <div style={{ marginBottom: "14px" }}>
+          <div style={{ ...S.eyebrow, marginBottom: "8px" }}>Für wen?</div>
+          <select value={pickedPlayer} onChange={e => setPickedPlayer(e.target.value)}
+            style={{ ...S.input, width: "100%", fontSize: "13px", padding: "10px 12px" }}>
+            {playerOptions.map(p => (
+              <option key={p.key} value={p.key}>
+                {p.name}{ownerName && normName(p.name) === normName(ownerName) ? " (du)" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "14px" }}>
+          <div style={{ ...S.eyebrow }}>Was willst du erreichen?</div>
+          {seasonGoalTypes.map(opt => {
+            const active = type === opt.type;
+            return (
+              <button key={opt.type} onClick={() => { setType(opt.type); setTarget(opt.default); }}
+                style={{
+                  width: "100%", textAlign: "left", padding: "12px 14px",
+                  background: active ? `${T.gold}15` : T.surface2,
+                  border: `1px solid ${active ? T.gold : T.line}`,
+                  borderRadius: "10px", cursor: "pointer", color: T.text,
+                  fontFamily: "inherit", display: "flex", alignItems: "center", gap: "10px",
+                }}>
+                <span style={{ fontSize: "18px" }}>{opt.icon}</span>
+                <span style={{ flex: 1, fontSize: "13px", fontWeight: active ? 700 : 500 }}>{opt.label}</span>
+                {active && <span style={{ color: T.gold, fontSize: "16px" }}>✓</span>}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ padding: "14px", background: T.surface2, borderRadius: "10px", border: `1px solid ${T.gold}40` }}>
+          <div style={{ ...S.eyebrow, marginBottom: "10px" }}>Ziel-Wert</div>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", justifyContent: "center" }}>
+            <button onClick={() => {
+              const opt = seasonGoalTypes.find(t => t.type === type);
+              const step = opt?.isFloat ? 0.1 : 1;
+              setTarget(t => Math.max(0, +(parseFloat(t) - step).toFixed(1)));
+            }} style={{ width: "40px", height: "40px", background: T.surface1, color: T.text, border: `1px solid ${T.line}`, borderRadius: "8px", fontSize: "18px", fontWeight: 700, cursor: "pointer" }}>−</button>
+            <input type="number" value={target}
+              step={seasonGoalTypes.find(t => t.type === type)?.isFloat ? 0.1 : 1}
+              onChange={e => setTarget(e.target.value)}
+              style={{ ...S.input, width: "80px", textAlign: "center", fontSize: "20px", fontWeight: 700, color: T.gold, padding: "8px" }}/>
+            <button onClick={() => {
+              const opt = seasonGoalTypes.find(t => t.type === type);
+              const step = opt?.isFloat ? 0.1 : 1;
+              setTarget(t => +(parseFloat(t) + step).toFixed(1));
+            }} style={{ width: "40px", height: "40px", background: T.surface1, color: T.text, border: `1px solid ${T.line}`, borderRadius: "8px", fontSize: "18px", fontWeight: 700, cursor: "pointer" }}>+</button>
+          </div>
+          <div style={{ fontSize: "10px", color: T.textDim, textAlign: "center", marginTop: "8px" }}>
+            {type === "season-rounds" && "Anzahl gespielter Runden im Jahr"}
+            {type === "season-birdies" && "Birdies bis Jahresende"}
+            {type === "season-best-sf" && "Einmal mind. X SF erreichen"}
+            {type === "sim-hcp" && "Sim-HCP soll auf diesen Wert"}
+            {type === "streak-sf36" && "Runden in Folge mit ≥36 SF"}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: "8px", marginTop: "18px" }}>
+          {isEdit && (
+            <button onClick={remove}
+              style={{ ...S.btnGhost, flex: 1, fontSize: "13px", color: T.double, borderColor: `${T.double}40` }}>🗑️ Löschen</button>
+          )}
+          <button onClick={onClose} style={{ ...S.btnGhost, flex: 1, fontSize: "13px" }}>Abbrechen</button>
+          <button onClick={save} style={{ ...S.btnPrimary, flex: 2, fontSize: "13px" }}>
+            {isEdit ? "💾 Speichern" : "🎯 Ziel hinzufügen"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1689,6 +1953,346 @@ function aggregateAllClubsStats(allRounds) {
     playerStats,
     holeStats: [], // nicht sinnvoll cross-club
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v56: GOAL HELPERS — Berechnungen für persönliche Ziele
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Goal-Type-Labels für Anzeige.
+ */
+const GOAL_TYPE_LABELS = {
+  "round-score": { label: "Brutto unter Par", icon: "⛳", scope: "round" },
+  "round-sf": { label: "Stableford-Punkte", icon: "🎯", scope: "round" },
+  "round-no-strich": { label: "Keine Striche", icon: "🛡️", scope: "round" },
+  "round-birdie": { label: "Mind. 1 Birdie", icon: "🎯", scope: "round" },
+  "round-personal-best": { label: "Personal Best brechen", icon: "🏆", scope: "round" },
+  "round-beat-sim-hcp": { label: "Sim-HCP übertreffen", icon: "📈", scope: "round" },
+  "round-custom": { label: "Eigenes Runden-Ziel", icon: "✨", scope: "round" },
+  "season-rounds": { label: "Anzahl Runden", icon: "🔢", scope: "season" },
+  "season-birdies": { label: "Anzahl Birdies", icon: "🎯", scope: "season" },
+  "season-best-sf": { label: "Bester SF", icon: "⭐", scope: "season" },
+  "sim-hcp": { label: "Sim-HCP-Ziel", icon: "📉", scope: "open" },
+  "streak-sf36": { label: "Streak ≥36 SF", icon: "🔥", scope: "open" },
+};
+
+/**
+ * Berechnet aktuellen Status eines Ziels.
+ * Returns { progress, currentValue, targetValue, achieved, achievedAt? }
+ */
+function evaluateGoal(goal, allRounds, evalDate = new Date()) {
+  if (!goal) return null;
+  const type = goal.type;
+  const playerKey = goal.playerKey;
+  const target = goal.target || 0;
+
+  // Spieler-Match-Helper
+  const matches = (p) => {
+    if (!p) return false;
+    if (playerKey && p.playerId === playerKey) return true;
+    if (p.name && playerKey && normName(p.name) === normName(playerKey)) return true;
+    return false;
+  };
+
+  // Saison-Filter (1. April - 31. Oktober des Erstellungs-Jahres oder aktuell)
+  const yearStart = new Date(evalDate.getFullYear(), 0, 1).getTime();
+  const seasonStart = new Date(evalDate.getFullYear(), 3, 1).getTime();
+
+  if (type === "season-rounds") {
+    const filtered = allRounds.filter(r => {
+      const rDate = new Date(r.cfg?.date || r.savedAt || 0).getTime();
+      return rDate >= yearStart && (r.players || []).some(matches);
+    });
+    return {
+      currentValue: filtered.length,
+      targetValue: target,
+      progress: Math.min(1, filtered.length / target),
+      achieved: filtered.length >= target,
+    };
+  }
+
+  if (type === "season-birdies") {
+    let count = 0;
+    allRounds.forEach(r => {
+      const rDate = new Date(r.cfg?.date || r.savedAt || 0).getTime();
+      if (rDate < yearStart) return;
+      const player = (r.players || []).find(matches);
+      if (!player || !r.holes?.length) return;
+      r.holes.forEach((h, i) => {
+        const g = r.scores?.[player.id]?.[i];
+        if (typeof g === "number" && g === h.par - 1) count++;
+      });
+    });
+    return {
+      currentValue: count,
+      targetValue: target,
+      progress: Math.min(1, count / target),
+      achieved: count >= target,
+    };
+  }
+
+  if (type === "season-best-sf") {
+    let bestSf = 0;
+    allRounds.forEach(r => {
+      const rDate = new Date(r.cfg?.date || r.savedAt || 0).getTime();
+      if (rDate < yearStart) return;
+      const player = (r.players || []).find(matches);
+      if (!player || !r.holes?.length) return;
+      const par = r.holes.reduce((s, h) => s + h.par, 0);
+      const { ph } = resolvePlayerPH(player, r.cfg, r.selectedClubSnapshot, par);
+      let sf = 0, played = 0;
+      r.holes.forEach((h, i) => {
+        const g = r.scores?.[player.id]?.[i];
+        if (!isValid(g) && !isStrich(g)) return;
+        played++;
+        const hs = holeHS(ph, h.si, r.holes.length);
+        sf += sfNetto(g, hs, h.par) || 0;
+      });
+      if (played < r.holes.length * 0.5) return;
+      const norm = r.holes.length === 9 ? sf * 2 : sf;
+      if (norm > bestSf) bestSf = norm;
+    });
+    return {
+      currentValue: bestSf,
+      targetValue: target,
+      progress: Math.min(1, bestSf / target),
+      achieved: bestSf >= target,
+    };
+  }
+
+  if (type === "sim-hcp") {
+    const sim = computeSimHcp(playerKey, allRounds, goal.playerName);
+    if (!sim?.hasEnoughData) {
+      return {
+        currentValue: null,
+        targetValue: target,
+        progress: 0,
+        achieved: false,
+        notEnoughData: true,
+      };
+    }
+    // Niedriger ist besser — currentValue = simHcp, target = z.B. 27
+    // achieved wenn simHcp <= target
+    const achieved = sim.simHcp <= target;
+    // Progress: wie weit von Start (baseHcp) zu target sind wir
+    const start = goal.startHcp || sim.baseHcp;
+    const totalDelta = Math.max(0.1, start - target);
+    const currentDelta = Math.max(0, start - sim.simHcp);
+    const progress = Math.min(1, Math.max(0, currentDelta / totalDelta));
+    return {
+      currentValue: sim.simHcp,
+      targetValue: target,
+      startValue: start,
+      progress,
+      achieved,
+    };
+  }
+
+  if (type === "streak-sf36") {
+    // Wie viele Runden in Folge ≥36 SF (chronologisch von neueste zu älteste)
+    const playerRounds = allRounds
+      .filter(r => (r.players || []).some(matches))
+      .sort((a, b) => {
+        const da = new Date(a.cfg?.date || a.savedAt || 0).getTime();
+        const db = new Date(b.cfg?.date || b.savedAt || 0).getTime();
+        return db - da;
+      });
+    let streak = 0;
+    for (const r of playerRounds) {
+      const player = (r.players || []).find(matches);
+      if (!player || !r.holes?.length) break;
+      const par = r.holes.reduce((s, h) => s + h.par, 0);
+      const { ph } = resolvePlayerPH(player, r.cfg, r.selectedClubSnapshot, par);
+      let sf = 0, played = 0;
+      r.holes.forEach((h, i) => {
+        const g = r.scores?.[player.id]?.[i];
+        if (!isValid(g) && !isStrich(g)) return;
+        played++;
+        const hs = holeHS(ph, h.si, r.holes.length);
+        sf += sfNetto(g, hs, h.par) || 0;
+      });
+      if (played < r.holes.length * 0.5) break;
+      const norm = r.holes.length === 9 ? sf * 2 : sf;
+      if (norm >= 36) streak++;
+      else break;
+    }
+    return {
+      currentValue: streak,
+      targetValue: target,
+      progress: Math.min(1, streak / target),
+      achieved: streak >= target,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Berechnet Live-Status eines Pro-Runde-Ziels während des Spiels.
+ * Returns { reached, almost, behind, message }
+ */
+function evaluateRoundGoal(goal, player, holes, scores, ph) {
+  if (!goal || !player || !holes?.length) return null;
+  const playerScores = scores?.[player.id] || {};
+  const par = holes.reduce((s, h) => s + h.par, 0);
+
+  // Played stats
+  let bruttoTotal = 0;
+  let nettoTotal = 0;
+  let sfTotal = 0;
+  let playedCount = 0;
+  let strichCount = 0;
+  let birdieCount = 0;
+  holes.forEach((h, i) => {
+    const g = playerScores[i];
+    if (g === "X") { strichCount++; playedCount++; return; }
+    if (typeof g === "number" && g >= 1) {
+      playedCount++;
+      bruttoTotal += g;
+      const hs = holeHS(ph, h.si, holes.length);
+      sfTotal += sfNetto(g, hs, h.par) || 0;
+      if (g === h.par - 1) birdieCount++;
+    }
+  });
+
+  // Brutto-Pace
+  const expectedBrutto = playedCount > 0 ? Math.round(bruttoTotal / playedCount * holes.length) : null;
+  const expectedSf = playedCount > 0 ? Math.round(sfTotal / playedCount * holes.length) : null;
+
+  // Type-spezifische Auswertung
+  if (goal.type === "round-score") {
+    // Target: brutto-überpar (z.B. "8 über Par")
+    const target = goal.target;
+    const targetBrutto = par + target;
+    const projectedOver = expectedBrutto !== null ? expectedBrutto - par : null;
+    const reached = playedCount === holes.length && bruttoTotal <= targetBrutto;
+    const onPace = expectedBrutto !== null && expectedBrutto <= targetBrutto;
+    return {
+      type: "score",
+      target,
+      currentBrutto: bruttoTotal,
+      currentOver: bruttoTotal - holes.slice(0, playedCount).reduce((s, h) => s + h.par, 0),
+      projectedOver,
+      reached,
+      onPace,
+      playedCount,
+      message: reached
+        ? `🎉 Ziel erreicht: ${bruttoTotal} brutto (Ziel ≤ ${targetBrutto})`
+        : onPace
+          ? `📈 On Pace · projiziert ${expectedBrutto} brutto`
+          : `📉 Hinter Pace · projiziert ${expectedBrutto} brutto`,
+    };
+  }
+
+  if (goal.type === "round-sf") {
+    const target = goal.target;
+    const projected = playedCount > 0 ? Math.round(sfTotal / playedCount * holes.length) : 0;
+    const reached = sfTotal >= target;
+    const onPace = projected >= target;
+    return {
+      type: "sf",
+      target,
+      currentSf: sfTotal,
+      projectedSf: projected,
+      reached,
+      onPace,
+      playedCount,
+      message: reached
+        ? `🎉 Ziel erreicht: ${sfTotal} SF (Ziel ${target})`
+        : onPace
+          ? `📈 On Pace · projiziert ${projected} SF`
+          : `📉 Hinter Pace · projiziert ${projected} SF (Ziel ${target})`,
+    };
+  }
+
+  if (goal.type === "round-no-strich") {
+    const reached = playedCount === holes.length && strichCount === 0;
+    const failed = strichCount > 0;
+    return {
+      type: "no-strich",
+      strichCount,
+      reached,
+      failed,
+      onPace: !failed,
+      playedCount,
+      message: failed
+        ? `💀 Ziel verfehlt: ${strichCount} Strich${strichCount > 1 ? "e" : ""}`
+        : reached
+          ? `🎉 Ziel erreicht: keine Striche!`
+          : `🛡️ Noch sauber — keine Striche bisher`,
+    };
+  }
+
+  if (goal.type === "round-birdie") {
+    const reached = birdieCount >= 1;
+    return {
+      type: "birdie",
+      birdieCount,
+      reached,
+      onPace: true, // immer erreichbar
+      playedCount,
+      message: reached
+        ? `🎉 Ziel erreicht: ${birdieCount} Birdie${birdieCount > 1 ? "s" : ""}!`
+        : `🎯 Noch kein Birdie — los geht's`,
+    };
+  }
+
+  if (goal.type === "round-personal-best") {
+    // target wird beim Setup als bisheriges PB gesetzt — wenn currentSf > target = besser
+    const target = goal.target || 0;
+    const projected = playedCount > 0 ? Math.round(sfTotal / playedCount * holes.length) : 0;
+    const reached = playedCount === holes.length && sfTotal > target;
+    const onPace = projected > target;
+    return {
+      type: "personal-best",
+      target,
+      currentSf: sfTotal,
+      projectedSf: projected,
+      reached,
+      onPace,
+      playedCount,
+      message: reached
+        ? `🏆 Personal Best gebrochen! ${sfTotal} SF (alter Rekord ${target})`
+        : onPace
+          ? `📈 Auf Rekord-Kurs · ${projected} SF projiziert`
+          : `📉 Pace ${projected} — alter Rekord ${target}`,
+    };
+  }
+
+  if (goal.type === "round-beat-sim-hcp") {
+    // Target ist die Sim-HCP-SF (z.B. 28)
+    const target = goal.target || 36;
+    const projected = playedCount > 0 ? Math.round(sfTotal / playedCount * holes.length) : 0;
+    const reached = playedCount === holes.length && sfTotal > target;
+    const onPace = projected > target;
+    return {
+      type: "beat-sim",
+      target,
+      currentSf: sfTotal,
+      projectedSf: projected,
+      reached,
+      onPace,
+      playedCount,
+      message: reached
+        ? `🎉 Sim-HCP übertroffen: ${sfTotal} SF (Sim ⌀ ${target})`
+        : onPace
+          ? `📈 Über Sim-HCP-Pace (${projected} SF projiziert)`
+          : `📉 Sim ⌀ ${target} — aktuell projiziert ${projected}`,
+    };
+  }
+
+  if (goal.type === "round-custom") {
+    // Custom = nur Anzeige, keine automatische Auswertung
+    return {
+      type: "custom",
+      label: goal.label || "Eigenes Ziel",
+      reached: null,
+      message: goal.label || "Ziel: " + (goal.label || ""),
+    };
+  }
+
+  return null;
 }
 
 
@@ -2826,6 +3430,18 @@ function GolfAppInner() {
   const [cleanupSelection, setCleanupSelection] = useState({ testRounds: true, badNameRounds: false, emptyTrips: true, unfinishedRounds: false });
   // v54: Saison-Range im Form-Tab
   const [seasonRangeState, setSeasonRangeState] = useState("30d"); // "30d" | "90d" | "season"
+  // v55: Form-Tab — gewählter Spieler ("Brille")
+  // null = Owner (default), sonst playerKey (playerId oder normalized name)
+  const [formViewPlayer, setFormViewPlayer] = useState(() => {
+    try { return localStorage.getItem("fairway-form-view-player") || null; } catch { return null; }
+  });
+  // Persistiere bei Änderung
+  useEffect(() => {
+    try {
+      if (formViewPlayer) localStorage.setItem("fairway-form-view-player", formViewPlayer);
+      else localStorage.removeItem("fairway-form-view-player");
+    } catch {}
+  }, [formViewPlayer]);
   const [statsImportInput, setStatsImportInput] = useState("");
   const [statsImportLoading, setStatsImportLoading] = useState(false);
   // Round analysis modal — holds the round ID being analyzed (null = closed)
@@ -2875,6 +3491,29 @@ function GolfAppInner() {
   // v44: Tab-View im Trip-Detail
   const [tripDetailView, setTripDetailView] = useState("overview"); // overview | stats | money
   const [aliasInput, setAliasInput] = useState("");
+
+  // ─── v56: Persönliche Ziele ──────────────────────────────────────────────
+  // goals: Array<{ id, type, playerKey, scope, target, ..., createdAt, achievedAt? }>
+  //   type: "round-score" | "round-sf" | "round-no-strich" | "round-birdie" | "round-personal-best"
+  //         | "round-custom"
+  //         | "season-rounds" | "season-birdies" | "season-best-sf"
+  //         | "sim-hcp" | "streak-sf36"
+  //   scope: "round" | "season" | "open"  (open = bis erreicht)
+  //   playerKey: playerId oder normalized name (wer ist betroffen)
+  const [goals, setGoals] = useState([]);
+  const [showGoalModal, setShowGoalModal] = useState(false);
+  const [editingGoal, setEditingGoal] = useState(null); // {} = neues Goal, sonst existing
+  // Pro-Runde-Ziele die im Setup gesetzt wurden — Map<playerId, goal>
+  const [roundGoals, setRoundGoals] = useState({}); // { [playerId]: { type, target, label } }
+  const [showRoundGoalSetup, setShowRoundGoalSetup] = useState(false);
+  const [roundGoalSetupForPlayer, setRoundGoalSetupForPlayer] = useState(null); // playerId
+  // Persistiere goals
+  useEffect(() => {
+    (async () => {
+      try { await window.storage.set("golf-goals", JSON.stringify(goals)); } catch {}
+    })();
+  }, [goals]);
+
   // UI state
   const [clubQ, setClubQ] = useState("");
   const [showDD, setShowDD] = useState(false);
@@ -3091,6 +3730,11 @@ function GolfAppInner() {
         const t = await window.storage.get("golf-trips");
         if (t) setTrips(JSON.parse(t.value));
       } catch {}
+      // v56: Persönliche Ziele laden
+      try {
+        const g = await window.storage.get("golf-goals");
+        if (g) setGoals(JSON.parse(g.value));
+      } catch {}
       try {
         const o = await window.storage.get("golf-owner-profile");
         if (o) setOwnerProfile(JSON.parse(o.value));
@@ -3286,6 +3930,8 @@ function GolfAppInner() {
         ladies,
         // v50: Best Ball+ Config für Live-Ticker
         bestBallConfig: gameMode === "bestball-plus" ? bestBallConfig : null,
+        // v56: Pro-Runde-Ziele mitsenden
+        roundGoals: Object.keys(roundGoals).length > 0 ? roundGoals : null,
         clubName: cfg.clubName,
         syncCode: syncCode || null,
         // v40: Scorer-Info — wer ist der aktive Scorer (Schreib-Berechtigung)
@@ -3303,7 +3949,7 @@ function GolfAppInner() {
       await liveUpdate(liveCode, payload);
     }, 2500);
     return () => clearTimeout(livePushTimerRef.current);
-  }, [liveCode, liveStatus, cfg, holes, players, scores, gameMode, teams, par3Data, selectedClub, syncCode, ladies, deviceId, ownerProfile, bestBallConfig]);
+  }, [liveCode, liveStatus, cfg, holes, players, scores, gameMode, teams, par3Data, selectedClub, syncCode, ladies, deviceId, ownerProfile, bestBallConfig, roundGoals]);
 
   // ── v40: Periodic Scorer-Conflict Check ──
   // Alle 30s prüfen ob ein anderes Gerät den Scorer-Status übernommen hat.
@@ -4513,7 +5159,7 @@ function GolfAppInner() {
       tees: selectedClub.tees,
       holes: selectedClub.holes,
     } : null;
-    const extra = { gameMode, teams, par3Data, ladies, selectedClubSnapshot: clubSnapshot, bestBallConfig: gameMode === "bestball-plus" ? bestBallConfig : null };
+    const extra = { gameMode, teams, par3Data, ladies, selectedClubSnapshot: clubSnapshot, bestBallConfig: gameMode === "bestball-plus" ? bestBallConfig : null, roundGoals: Object.keys(roundGoals).length > 0 ? roundGoals : null };
     if (loadedRoundId) {
       savedRound = null;
       u = rounds.map(r => {
@@ -4653,6 +5299,8 @@ function GolfAppInner() {
         hcpMode: r.bestBallConfig.hcpMode || "adjusted",
       });
     }
+    // v56: Pro-Runde-Ziele wiederherstellen
+    setRoundGoals(r.roundGoals || {});
     // If incomplete, jump into scoring so user can continue where they left off.
     const progress = getRoundProgress(r);
     if (progress.notStarted) {
@@ -4744,6 +5392,7 @@ function GolfAppInner() {
         setScores({});
         setGameMode("stableford"); setTeams(null); setPar3Data({});
         setLadies({});
+        setRoundGoals({});
         setClubQ(""); setPickedClub(null);
         setCurrentHole(0); setScoringMode("batch");
         setView("setup");
@@ -4765,6 +5414,7 @@ function GolfAppInner() {
     setScores({});
     setGameMode("stableford"); setTeams(null); setPar3Data({});
     setLadies({});
+    setRoundGoals({});
     setClubQ(""); setPickedClub(null);
     setCurrentHole(0); setScoringMode("batch");
     setView("setup");
@@ -6321,9 +6971,53 @@ function GolfAppInner() {
               return <EmptyState icon="📈" title="Noch keine Form-Daten" sub="Sobald du Runden gespielt hast, siehst du hier deine Entwicklung und HCP-Trends." />;
             }
 
-            // Owner-Block: Deine Form
-            const ownerName = ownerProfile?.name;
-            const ownerSim = ownerName ? computeSimHcp(ownerName, rounds) : null;
+            // ─── v55: Spieler-Brille — alle Form-Daten beziehen sich auf den ausgewählten Spieler ───
+            const realOwnerName = ownerProfile?.name;
+            // Sammle alle Spieler die in Runden vorkamen (für Selector)
+            const allPlayersMap = new Map();
+            rounds.forEach(r => (r.players || []).forEach(p => {
+              const key = p.playerId || `n:${normName(p.name)}`;
+              if (!allPlayersMap.has(key)) {
+                let count = 0;
+                rounds.forEach(rr => {
+                  if ((rr.players || []).some(pp =>
+                    (p.playerId && pp.playerId === p.playerId) || normName(pp.name) === normName(p.name)
+                  )) count++;
+                });
+                allPlayersMap.set(key, { name: p.name, key, playerId: p.playerId || null, count, hcp: p.hcp });
+              }
+            }));
+            const allPlayersList = Array.from(allPlayersMap.values()).sort((a, b) => b.count - a.count);
+
+            // Aktiv ausgewählter Spieler — fallback: Owner; weiterer fallback: erster Spieler
+            let viewPlayerName = realOwnerName;
+            let viewPlayerKey = null; // Lookup-Key für Sim-HCP (playerId oder Name)
+            let viewPlayerHcp = null;
+            let isViewingOwner = true;
+
+            if (formViewPlayer) {
+              const p = allPlayersList.find(x => x.key === formViewPlayer);
+              if (p) {
+                viewPlayerName = p.name;
+                viewPlayerKey = p.playerId || p.name;
+                viewPlayerHcp = p.hcp;
+                isViewingOwner = realOwnerName && normName(p.name) === normName(realOwnerName);
+              }
+            }
+            // Wenn kein expliziter Wert oder ungültiger Key — verwende Owner
+            if (!viewPlayerKey) {
+              const ownerInList = realOwnerName ? allPlayersList.find(x => normName(x.name) === normName(realOwnerName)) : null;
+              if (ownerInList) {
+                viewPlayerKey = ownerInList.playerId || ownerInList.name;
+                viewPlayerHcp = ownerInList.hcp;
+              } else if (realOwnerName) {
+                viewPlayerKey = realOwnerName;
+              }
+            }
+
+            // Aliase damit der Rest des Codes klappt
+            const ownerName = viewPlayerName;
+            const ownerSim = ownerName ? computeSimHcp(viewPlayerKey, rounds, ownerName) : null;
             const ownerLastFiveSf = ownerName ? rounds
               .filter(r => (r.players || []).some(p => normName(p.name) === normName(ownerName)))
               .slice(0, 5)
@@ -6346,6 +7040,24 @@ function GolfAppInner() {
                 return { sf: normalized, date: r.cfg?.date || r.savedAt, club: r.cfg?.clubName };
               })
               .filter(Boolean) : [];
+
+            // ─── v55: Vergleich zu Owner (wenn nicht Owner-View) ────────────────
+            let comparisonToOwner = null;
+            if (!isViewingOwner && realOwnerName && ownerSim?.hasEnoughData) {
+              const ownerSimSelf = computeSimHcp(realOwnerName, rounds, realOwnerName);
+              if (ownerSimSelf?.hasEnoughData) {
+                const sfDiff = (ownerSim.avgSf || 0) - (ownerSimSelf.avgSf || 0);
+                const hcpDiff = (ownerSim.diff || 0) - (ownerSimSelf.diff || 0);
+                comparisonToOwner = {
+                  ownerAvgSf: ownerSimSelf.avgSf,
+                  viewAvgSf: ownerSim.avgSf,
+                  sfDiff,
+                  hcpDiff,
+                  betterByForm: ownerSim.diff < ownerSimSelf.diff, // niedrigere Diff = bessere Form
+                };
+              }
+            }
+
 
             // Crew-Block: Alle Friends — v51: Hybrid mit zwei Sektionen
             // Sektion 1: mit Sim-HCP (hasEnoughData)
@@ -6559,6 +7271,77 @@ function GolfAppInner() {
 
             return (
               <>
+                {/* v55: Spieler-Brille — Selector ganz oben */}
+                {allPlayersList.length >= 1 && (
+                  <div style={{ marginBottom: "14px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 14px", background: isViewingOwner ? T.surface1 : `${T.gold}10`, border: `1px solid ${isViewingOwner ? T.line : T.gold + "60"}`, borderRadius: "12px" }}>
+                      <span style={{ fontSize: "18px" }}>📊</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: "10px", color: T.textDim, fontWeight: 700, letterSpacing: "0.06em", marginBottom: "2px" }}>
+                          {isViewingOwner ? "FORM VON" : "📊 BRILLE — DU SIEHST"}
+                        </div>
+                        <select
+                          value={formViewPlayer || (allPlayersList.find(p => realOwnerName && normName(p.name) === normName(realOwnerName))?.key || "")}
+                          onChange={e => setFormViewPlayer(e.target.value || null)}
+                          style={{
+                            background: "transparent", color: T.text,
+                            border: "none", padding: "0",
+                            fontSize: "15px", fontWeight: 700,
+                            fontFamily: "inherit",
+                            width: "100%",
+                            cursor: "pointer",
+                            outline: "none",
+                          }}>
+                          {allPlayersList.map(p => {
+                            const isOwn = realOwnerName && normName(p.name) === normName(realOwnerName);
+                            return (
+                              <option key={p.key} value={p.key}>
+                                {p.name}{isOwn ? " (du)" : ""} · {p.count} {p.count === 1 ? "Runde" : "Runden"}
+                              </option>
+                            );
+                          })}
+                        </select>
+                      </div>
+                      {!isViewingOwner && realOwnerName && (
+                        <button
+                          onClick={() => setFormViewPlayer(null)}
+                          style={{
+                            background: T.surface2, color: T.textSoft,
+                            border: `1px solid ${T.line}`, borderRadius: "6px",
+                            padding: "6px 10px", fontSize: "10px", fontWeight: 600,
+                            cursor: "pointer", whiteSpace: "nowrap",
+                          }}>
+                          ↺ Zurück zu mir
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Vergleichs-Bonus: Wagner ist X SF besser als du */}
+                    {comparisonToOwner && (
+                      <div style={{
+                        marginTop: "8px",
+                        padding: "10px 14px",
+                        background: T.surface2,
+                        border: `1px solid ${T.line}`,
+                        borderRadius: "10px",
+                        fontSize: "12px",
+                        color: T.text,
+                        lineHeight: 1.5,
+                      }}>
+                        🔁 <b>{viewPlayerName}</b> {comparisonToOwner.sfDiff > 0 ? "ist" : "war"}
+                        <span className="mono" style={{ color: comparisonToOwner.betterByForm ? T.sage : T.double, fontWeight: 700, margin: "0 4px" }}>
+                          {Math.abs(Math.round(comparisonToOwner.sfDiff))} SF
+                        </span>
+                        {comparisonToOwner.sfDiff > 0 ? "besser" : comparisonToOwner.sfDiff < 0 ? "schlechter" : "gleich"}
+                        {" als du im Schnitt"}
+                        <span style={{ color: T.textDim, marginLeft: "6px" }}>
+                          (⌀ {comparisonToOwner.viewAvgSf} SF · du ⌀ {comparisonToOwner.ownerAvgSf} SF)
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* v53: Rekord-Banner — wenn jemand seinen persönlichen Rekord brach */}
                 {recordsBroken.length > 0 && (
                   <div style={{
@@ -6609,7 +7392,9 @@ function GolfAppInner() {
                 {/* ── Top: Deine Form ── */}
                 {ownerName && (
                   <div style={{ ...S.card, padding: "16px", marginBottom: "14px", borderColor: `${T.gold}30` }}>
-                    <div style={{ ...S.eyebrow, marginBottom: "12px", color: T.gold }}>📊 Deine Form</div>
+                    <div style={{ ...S.eyebrow, marginBottom: "12px", color: T.gold }}>
+                      📊 {isViewingOwner ? "Deine Form" : `Form von ${ownerName}`}
+                    </div>
 
                     {ownerSim?.hasEnoughData ? (
                       <>
@@ -6661,7 +7446,7 @@ function GolfAppInner() {
                               ))}
                             </div>
                             <div style={{ fontSize: "10px", color: T.textDim, marginTop: "8px", lineHeight: 1.4, fontStyle: "italic" }}>
-                              ⌀ {ownerSim.avgSf} SF · {ownerSim.diff > 0 ? "Form unter HCP" : ownerSim.diff < 0 ? "Form über HCP — du bist heiß!" : "Genau auf HCP-Niveau"}
+                              ⌀ {ownerSim.avgSf} SF · {ownerSim.diff > 0 ? "Form unter HCP" : ownerSim.diff < 0 ? (isViewingOwner ? "Form über HCP — du bist heiß!" : `Form über HCP — ${ownerName} ist heiß!`) : "Genau auf HCP-Niveau"}
                             </div>
                           </div>
                         )}
@@ -6760,6 +7545,100 @@ function GolfAppInner() {
                     )}
                   </div>
                 )}
+
+                {/* ── v56: Meine Ziele ── */}
+                {(() => {
+                  const playerGoals = goals.filter(g =>
+                    !viewPlayerKey || g.playerKey === viewPlayerKey ||
+                    (g.playerName && normName(g.playerName) === normName(ownerName || ""))
+                  );
+                  return (
+                    <div style={{ ...S.card, padding: "16px", marginBottom: "14px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+                        <div style={{ ...S.eyebrow }}>🎯 {isViewingOwner ? "Deine Ziele" : `Ziele von ${ownerName}`}</div>
+                        {isViewingOwner && (
+                          <button onClick={() => { setEditingGoal(null); setShowGoalModal(true); }}
+                            style={{ background: `${T.gold}15`, color: T.gold, border: `1px solid ${T.gold}40`, borderRadius: "6px", padding: "4px 10px", fontSize: "11px", fontWeight: 600, cursor: "pointer" }}>
+                            + Neues Ziel
+                          </button>
+                        )}
+                      </div>
+
+                      {playerGoals.length === 0 ? (
+                        <div style={{ fontSize: "12px", color: T.textDim, fontStyle: "italic", textAlign: "center", padding: "8px 0" }}>
+                          {isViewingOwner ? "Noch keine Saison-Ziele gesetzt — leg eins fest!" : "Keine Ziele für diesen Spieler gesetzt"}
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                          {playerGoals.map(goal => {
+                            const evalResult = evaluateGoal(goal, rounds);
+                            const typeInfo = GOAL_TYPE_LABELS[goal.type] || { icon: "🎯", label: goal.type };
+                            const progress = evalResult?.progress || 0;
+                            const achieved = evalResult?.achieved;
+                            const progressPct = Math.round(progress * 100);
+                            const isSimHcp = goal.type === "sim-hcp";
+
+                            return (
+                              <div key={goal.id} style={{
+                                padding: "12px",
+                                background: achieved ? `${T.gold}15` : T.surface2,
+                                border: `1px solid ${achieved ? T.gold : T.line}`,
+                                borderRadius: "10px",
+                              }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
+                                  <span style={{ fontSize: "18px" }}>{typeInfo.icon}</span>
+                                  <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ fontSize: "12px", fontWeight: 700, color: T.text }}>
+                                      {typeInfo.label}
+                                    </div>
+                                    <div style={{ fontSize: "10px", color: T.textDim, marginTop: "1px" }}>
+                                      Ziel: <b className="mono">{goal.target}</b>
+                                      {evalResult && evalResult.currentValue !== null && evalResult.currentValue !== undefined && (
+                                        <> · Aktuell: <span className="mono" style={{ color: achieved ? T.sage : T.text, fontWeight: 700 }}>{evalResult.currentValue}</span></>
+                                      )}
+                                      {achieved && <span style={{ color: T.gold, marginLeft: "6px", fontWeight: 700 }}>🎉 Erreicht!</span>}
+                                    </div>
+                                  </div>
+                                  {isViewingOwner && (
+                                    <button onClick={() => { setEditingGoal(goal); setShowGoalModal(true); }}
+                                      style={{ background: "transparent", border: "none", color: T.textDim, cursor: "pointer", fontSize: "14px", padding: "4px" }}>
+                                      ✏️
+                                    </button>
+                                  )}
+                                </div>
+
+                                {/* Progress-Bar */}
+                                {evalResult && !evalResult.notEnoughData && (
+                                  <div style={{ height: "8px", background: T.surface1, borderRadius: "4px", overflow: "hidden" }}>
+                                    <div style={{
+                                      width: `${progressPct}%`,
+                                      height: "100%",
+                                      background: achieved ? T.gold : `linear-gradient(90deg, ${T.sage}80, ${T.gold})`,
+                                      transition: "width 0.4s ease",
+                                    }} />
+                                  </div>
+                                )}
+                                {evalResult && !evalResult.notEnoughData && (
+                                  <div style={{ fontSize: "9px", color: T.textDim, marginTop: "4px", textAlign: "right" }}>
+                                    {progressPct}%
+                                    {isSimHcp && evalResult.startValue && (
+                                      <> · Start ⌀ <span className="mono">{evalResult.startValue}</span></>
+                                    )}
+                                  </div>
+                                )}
+                                {evalResult?.notEnoughData && (
+                                  <div style={{ fontSize: "10px", color: T.textDim, fontStyle: "italic", marginTop: "4px" }}>
+                                    Brauche mehr Runden für Berechnung
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {/* ── Crew-Block ── v51: Hybrid */}
                 {(crewWithData.length > 0 || crewBuilding.length > 0) && (
@@ -8092,6 +8971,79 @@ function GolfAppInner() {
         {/* SPIELMODUS */}
         {players.length > 0 && cfg.clubName && renderGameModeCard()}
 
+        {/* v56: PERSÖNLICHE ZIELE FÜR DIE RUNDE */}
+        {players.length > 0 && cfg.clubName && (
+          <div style={{ ...S.card, marginTop: "12px" }}>
+            <div style={{ ...S.eyebrow, marginBottom: "12px" }}>05 · Heutige Ziele <span style={{ color: T.textDim, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(optional)</span></div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              {players.map(p => {
+                const goal = roundGoals[p.id];
+                return (
+                  <div key={p.id} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px", background: T.surface2, border: `1px solid ${goal ? T.gold + "40" : T.line}`, borderRadius: "10px" }}>
+                    <div style={{ width: "30px", height: "30px", borderRadius: "50%", background: T.surface1, border: `1px solid ${T.line}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", fontWeight: 700, color: T.textSoft }}>
+                      {(p.name || "?").charAt(0).toUpperCase()}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: "13px", fontWeight: 600, color: T.text }}>
+                        {p.name}
+                      </div>
+                      {goal ? (
+                        <div style={{ fontSize: "11px", color: T.gold, marginTop: "2px", display: "flex", alignItems: "center", gap: "6px" }}>
+                          🎯 {goal.label || GOAL_TYPE_LABELS[goal.type]?.label || "Ziel gesetzt"}
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: "10px", color: T.textDim, marginTop: "2px", fontStyle: "italic" }}>
+                          Kein Ziel gesetzt
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => {
+                        setRoundGoalSetupForPlayer(p.id);
+                        setShowRoundGoalSetup(true);
+                      }}
+                      style={{
+                        background: goal ? `${T.gold}20` : T.surface1,
+                        color: goal ? T.gold : T.textDim,
+                        border: `1px solid ${goal ? T.gold + "60" : T.line}`,
+                        borderRadius: "6px",
+                        padding: "6px 12px",
+                        fontSize: "11px",
+                        fontWeight: 600,
+                        cursor: "pointer",
+                        whiteSpace: "nowrap",
+                      }}>
+                      {goal ? "✏️ Bearbeiten" : "+ Ziel setzen"}
+                    </button>
+                    {goal && (
+                      <button
+                        onClick={() => {
+                          setRoundGoals(g => {
+                            const ng = { ...g };
+                            delete ng[p.id];
+                            return ng;
+                          });
+                        }}
+                        style={{
+                          background: "transparent",
+                          color: T.textDim,
+                          border: "none",
+                          fontSize: "16px",
+                          cursor: "pointer",
+                          padding: "0 4px",
+                        }}
+                        title="Ziel entfernen">×</button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ marginTop: "10px", fontSize: "10px", color: T.textDim, fontStyle: "italic", textAlign: "center" }}>
+              Ziele sind optional. Du kannst sie auch im Spiel jederzeit hinzufügen.
+            </div>
+          </div>
+        )}
+
         <div style={{ display: "flex", gap: "10px", marginTop: "18px" }}>
           <button style={{ ...S.btnSecondary, flex: 1 }} onClick={() => setView("home")}>← Zurück</button>
           <button style={{ ...S.btnPrimary, flex: 2 }}
@@ -8489,6 +9441,42 @@ function GolfAppInner() {
                             {sim?.hasEnoughData && (
                               <> · ⌀ <span className="mono">{Math.round(sim.avgSf)}</span></>
                             )}
+                          </div>
+                        );
+                      })()}
+                      {/* v56: Pro-Runde-Ziel-Live-Status */}
+                      {(() => {
+                        const goal = roundGoals[p.id];
+                        if (!goal) return null;
+                        const playedHoles = s.hr.filter(h => isValid(h.g) || isStrich(h.g)).length;
+                        const evalResult = evaluateRoundGoal(goal, p, holes, scores, s.ph);
+                        if (!evalResult) return null;
+                        const color = evalResult.reached ? T.sage
+                          : evalResult.failed ? T.double
+                          : evalResult.onPace ? T.gold
+                          : T.textSoft;
+                        const bg = evalResult.reached ? `${T.sage}15`
+                          : evalResult.failed ? `${T.double}15`
+                          : evalResult.onPace ? `${T.gold}10`
+                          : T.surface2;
+                        const icon = evalResult.reached ? "🎉"
+                          : evalResult.failed ? "💀"
+                          : evalResult.onPace ? "📈"
+                          : evalResult.type === "custom" ? "✨"
+                          : "📉";
+                        return (
+                          <div style={{
+                            fontSize: "10px",
+                            marginTop: "4px",
+                            padding: "4px 8px",
+                            background: bg,
+                            border: `1px solid ${color}30`,
+                            borderRadius: "5px",
+                            color, fontWeight: 600,
+                            display: "flex", alignItems: "center", gap: "4px",
+                          }}>
+                            <span>{icon}</span>
+                            <span style={{ flex: 1 }}>🎯 {evalResult.message || goal.label}</span>
                           </div>
                         );
                       })()}
@@ -9471,6 +10459,56 @@ function GolfAppInner() {
             {gameMode === "bestball-plus" && <span style={{ color: T.gold, marginLeft: "6px" }}>· ☄️ Best Ball+</span>}
             {isUschi && <span style={{ color: T.gold, marginLeft: "6px" }}>· 🎯 Uschi-Modus{gameMode === "uschi-team" ? " (2v2)" : ""}</span>}
           </div>
+
+          {/* v56: Pro-Runde-Ziel-Resultate */}
+          {Object.keys(roundGoals).length > 0 && (() => {
+            const goalResults = players
+              .map(p => {
+                const goal = roundGoals[p.id];
+                if (!goal) return null;
+                const stats = getStats(p);
+                const evalResult = evaluateRoundGoal(goal, p, holes, scores, stats.ph);
+                return { player: p, goal, evalResult };
+              })
+              .filter(Boolean);
+
+            if (goalResults.length === 0) return null;
+
+            return (
+              <div style={{ ...S.card, marginBottom: "20px", padding: "14px" }}>
+                <div style={{ ...S.eyebrow, marginBottom: "12px" }}>🎯 Heutige Ziele</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                  {goalResults.map(({ player, goal, evalResult }, i) => {
+                    const reached = evalResult?.reached;
+                    const failed = evalResult?.failed;
+                    const isCustom = evalResult?.type === "custom";
+                    const color = reached ? T.gold : failed ? T.double : isCustom ? T.gold : T.textSoft;
+                    const bg = reached ? `${T.gold}15` : failed ? `${T.double}15` : isCustom ? `${T.gold}10` : T.surface2;
+                    const icon = reached ? "🎉" : failed ? "💀" : isCustom ? "✨" : "⏳";
+                    return (
+                      <div key={player.id} style={{
+                        padding: "12px",
+                        background: bg,
+                        border: `1px solid ${color}40`,
+                        borderRadius: "10px",
+                        display: "flex", alignItems: "center", gap: "10px",
+                      }}>
+                        <span style={{ fontSize: "22px" }}>{icon}</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: "13px", fontWeight: 700, color: T.text, marginBottom: "2px" }}>
+                            {player.name} — {goal.label}
+                          </div>
+                          <div style={{ fontSize: "11px", color, fontWeight: 600 }}>
+                            {evalResult?.message || (reached ? "Erreicht!" : "Nicht erreicht")}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* USCHI RANKING (only in uschi mode) */}
           {isUschi && uschiResult && renderUschiRanking()}
@@ -11189,6 +12227,74 @@ WICHTIG:
         </div>
       </div>
     );
+  };
+
+  // ─── v56: Pro-Runde-Ziel-Setup-Modal ──────────────────────────────────────
+  const renderRoundGoalSetup = () => {
+    if (!showRoundGoalSetup || !roundGoalSetupForPlayer) return null;
+    const player = players.find(p => p.id === roundGoalSetupForPlayer);
+    if (!player) return null;
+
+    return <RoundGoalSetupContent
+      player={player}
+      par={par}
+      rounds={rounds}
+      existingGoal={roundGoals[player.id] || null}
+      computeSimHcp={computeSimHcp}
+      resolvePlayerPH={resolvePlayerPH}
+      holeHS={holeHS}
+      sfNetto={sfNetto}
+      isValid={isValid}
+      isStrich={isStrich}
+      normName={normName}
+      T={T} S={S}
+      onClose={() => {
+        setShowRoundGoalSetup(false);
+        setRoundGoalSetupForPlayer(null);
+      }}
+      onSave={(goal) => {
+        setRoundGoals(g => ({ ...g, [player.id]: goal }));
+        setShowRoundGoalSetup(false);
+        setRoundGoalSetupForPlayer(null);
+      }}
+      showUndoToast={showUndoToast}
+    />;
+  };
+
+  // ─── v56: Saison-Ziel-Modal ───────────────────────────────────────────────
+  const renderGoalModal = () => {
+    if (!showGoalModal) return null;
+    const ownerName = ownerProfile?.name;
+
+    // Spieler-Liste aus Runden + Owner
+    const playerSet = new Map();
+    if (ownerName) playerSet.set(ownerName, ownerName);
+    rounds.forEach(r => (r.players || []).forEach(p => {
+      const key = p.playerId || p.name;
+      if (!playerSet.has(key)) playerSet.set(key, p.name);
+    }));
+    const playerOptions = Array.from(playerSet.entries()).map(([key, name]) => ({ key, name }));
+
+    return <GoalModalContent
+      editingGoal={editingGoal}
+      ownerName={ownerName}
+      playerOptions={playerOptions}
+      rounds={rounds}
+      computeSimHcp={computeSimHcp}
+      uid={uid}
+      normName={normName}
+      T={T} S={S}
+      onClose={() => { setShowGoalModal(false); setEditingGoal(null); }}
+      onSave={(newGoal) => {
+        const isEdit = !!editingGoal?.id;
+        setGoals(gs => isEdit ? gs.map(g => g.id === newGoal.id ? newGoal : g) : [...gs, newGoal]);
+        setShowGoalModal(false); setEditingGoal(null);
+      }}
+      onRemove={(id) => {
+        setGoals(gs => gs.filter(g => g.id !== id));
+        setShowGoalModal(false); setEditingGoal(null);
+      }}
+    />;
   };
 
   // ── v53: Clubs-Übersichts-Modal ──
@@ -15013,6 +16119,8 @@ Wichtig:
       {renderOnboardingChoice()}
       {renderClubsModal()}
       {renderCleanupModal()}
+      {renderRoundGoalSetup()}
+      {renderGoalModal()}
       {renderUndoToast()}
 
       {/* v40: Versions-Footer — sichtbar in jeder Crew, hilft beim Bug-Reporting */}
