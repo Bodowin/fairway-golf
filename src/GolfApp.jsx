@@ -3969,6 +3969,19 @@ function GolfAppInner() {
                 try { await window.storage.set("golf-owner-profile", JSON.stringify(cloud.data.ownerProfile)); } catch {}
               }
 
+              // v56: Saison-Ziele aus Cloud mergen
+              if (Array.isArray(cloud.data.goals)) {
+                const localGoalsRaw = await window.storage.get("golf-goals");
+                const localGoals = localGoalsRaw?.value ? JSON.parse(localGoalsRaw.value) : [];
+                // Merge: Cloud + Local nach id deduplizieren (cloud gewinnt bei Konflikt)
+                const goalsById = new Map();
+                localGoals.forEach(g => goalsById.set(g.id, g));
+                cloud.data.goals.forEach(g => goalsById.set(g.id, g));
+                const mergedGoals = Array.from(goalsById.values());
+                setGoals(mergedGoals);
+                try { await window.storage.set("golf-goals", JSON.stringify(mergedGoals)); } catch {}
+              }
+
               try { await window.storage.set("golf-last-sync", String(cloudTs)); } catch {}
 
               if (localOnlyRounds.length > 0) {
@@ -4022,14 +4035,15 @@ function GolfAppInner() {
     syncTimerRef.current = setTimeout(async () => {
       setSyncStatus("syncing");
       // v47.1: trips + ownerProfile mit synchronisieren
-      const ok = await cloudPush(syncCode, { rounds, friends, customClubs, trips, ownerProfile });
+      // v56: goals (Saison-Ziele) auch synchronisieren
+      const ok = await cloudPush(syncCode, { rounds, friends, customClubs, trips, ownerProfile, goals });
       setSyncStatus(ok ? "idle" : "error");
       if (ok) {
         try { await window.storage.set("golf-last-sync", String(Date.now())); } catch {}
       }
     }, 2000);
     return () => clearTimeout(syncTimerRef.current);
-  }, [rounds, friends, customClubs, trips, ownerProfile, syncCode, loaded, syncConflict]);
+  }, [rounds, friends, customClubs, trips, ownerProfile, goals, syncCode, loaded, syncConflict]);
 
   // ── Live ticker auto-push (debounced) ─────────────────────────────────────
   // When a live ticker is active, push current round state to Supabase on any change.
@@ -5479,6 +5493,13 @@ function GolfAppInner() {
 
   const newRound = (tripContext = null) => {
     setLoadedRoundId(null);
+    // v56-fix: Live-Ticker-State zurücksetzen damit eine neue Runde nicht versehentlich
+    // den alten Live-Eintrag überschreibt (das hat bei Adamstal+Wallerbach Daten gekostet!)
+    if (liveCode || liveStatus !== "idle") {
+      // Nur State zurücksetzen — den Eintrag in Supabase NICHT löschen (User könnte ihn noch wollen)
+      setLiveCode(null);
+      setLiveStatus("idle");
+    }
     setCfg({
       name: "", date: toDay(), numHoles: 18, clubName: "", defaultTeeName: "",
       // v47: Trip-Kontext — wenn gesetzt, werden Spieler-HCPs bei Save mit Trip-Adjustment berechnet
@@ -5546,6 +5567,11 @@ function GolfAppInner() {
       alert("Keine vorherige Runde zum Kopieren vorhanden.");
       return;
     }
+    // v56-fix: Live-Ticker-State zurücksetzen damit "Wie letztes Mal" nicht den alten Live-Eintrag überschreibt
+    if (liveCode || liveStatus !== "idle") {
+      setLiveCode(null);
+      setLiveStatus("idle");
+    }
     // Refresh player HCPs from friends list (HCPs might have changed)
     const refreshedPlayers = (last.players || []).map(p => {
       const friend = friends.find(f => f.name === p.name);
@@ -5567,6 +5593,8 @@ function GolfAppInner() {
     setGameMode(last.gameMode || "stableford");
     setTeams(last.teams || null);
     setPar3Data({});        // no par-3 data yet
+    setLadies({});          // v56-fix: Ladies-Daten zurücksetzen
+    setRoundGoals({});      // v56: keine alten Ziele übernehmen — User soll neu setzen
     // v50: Best Ball+ Config übernehmen
     if (last.gameMode === "bestball-plus" && last.bestBallConfig) {
       setBestBallConfig({
@@ -15811,6 +15839,158 @@ WICHTIG:
             <p style={{ fontSize: "10px", color: T.textDim, marginTop: "6px", lineHeight: 1.4, fontStyle: "italic" }}>
               Auto-Backups werden täglich automatisch erstellt (letzte 7 Tage).
             </p>
+
+            {/* v56-fix: Live-Ticker-Recovery — Runde aus Supabase ziehen falls verloren */}
+            {SYNC_ENABLED && (
+              <div style={{ marginTop: "14px", paddingTop: "14px", borderTop: `1px solid ${T.line}` }}>
+                <div style={{ ...S.eyebrow, marginBottom: "8px" }}>🚨 Notfall: Runde aus Live-Ticker wiederherstellen</div>
+                <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, marginBottom: "10px" }}>
+                  Wenn eine Runde verloren gegangen ist, kann sie aus dem Live-Ticker-Code geholt werden (48 Std verfügbar).
+                </p>
+
+                {/* v56-fix: Liste aller aktiven Live-Runden zeigen — direkt importierbar */}
+                {activeLiveRounds.length > 0 && (
+                  <div style={{ marginBottom: "10px", padding: "10px", background: T.surface2, border: `1px solid ${T.gold}40`, borderRadius: "8px" }}>
+                    <div style={{ fontSize: "11px", color: T.gold, fontWeight: 700, marginBottom: "6px" }}>
+                      🎯 {activeLiveRounds.length} aktive Live-Runde{activeLiveRounds.length === 1 ? "" : "n"} gefunden:
+                    </div>
+                    {activeLiveRounds.map(live => {
+                      const d = live.data || {};
+                      const club = d.cfg?.clubName || "Unbekannt";
+                      const dat = d.cfg?.date || "?";
+                      const numH = (d.holes || []).length;
+                      const numP = (d.players || []).length;
+                      // Count scores
+                      let scoreCount = 0;
+                      if (d.scores) {
+                        Object.values(d.scores).forEach(ps => {
+                          Object.values(ps || {}).forEach(v => {
+                            if ((typeof v === "number" && v > 0) || v === "X") scoreCount++;
+                          });
+                        });
+                      }
+                      return (
+                        <div key={live.code} style={{ marginBottom: "8px", paddingBottom: "8px", borderBottom: `1px solid ${T.line}` }}>
+                          <div style={{ fontSize: "12px", color: T.text, fontWeight: 600 }}>
+                            📍 {club}
+                          </div>
+                          <div style={{ fontSize: "10px", color: T.textDim, marginBottom: "4px" }}>
+                            <span className="mono">#{live.code}</span> · {dat} · {numH} Loch · {numP} Spieler · <b style={{ color: scoreCount > 0 ? T.sage : T.double }}>{scoreCount} Scores</b>
+                          </div>
+                          <button
+                            onClick={async () => {
+                              if (!confirm(`Folgende Runde wiederherstellen?\n\n📍 ${club}\n📅 ${dat} · ${numH} Loch\n👥 ${(d.players || []).map(p => p.name).join(", ")}\n\n⚠️ ${scoreCount} Scores werden importiert.`)) return;
+
+                              const recoveredRound = {
+                                id: uid(),
+                                cfg: d.cfg,
+                                holes: d.holes || [],
+                                players: d.players || [],
+                                scores: d.scores || {},
+                                gameMode: d.gameMode || "stableford",
+                                teams: d.teams || null,
+                                par3Data: d.par3Data || {},
+                                ladies: d.ladies || {},
+                                bestBallConfig: d.bestBallConfig || null,
+                                roundGoals: d.roundGoals || null,
+                                selectedClubSnapshot: d.selectedClubSnapshot || null,
+                                savedAt: live.updated_at || new Date().toISOString(),
+                                recoveredFromLive: true,
+                                recoveredCode: live.code,
+                              };
+
+                              const newRounds = [recoveredRound, ...rounds];
+                              setRounds(newRounds);
+                              try { await window.storage.set("golf-rounds", JSON.stringify(newRounds)); } catch {}
+                              alert(`✅ Runde wiederhergestellt!\n\n${club} · ${dat}\n${numH} Loch · ${numP} Spieler\n${scoreCount} Scores`);
+                            }}
+                            style={{ ...S.btnSecondary, fontSize: "10px", padding: "5px 10px", color: T.gold, borderColor: `${T.gold}60` }}>
+                            ⬇️ In meine Runden importieren
+                          </button>
+                        </div>
+                      );
+                    })}
+                    <div style={{ fontSize: "9px", color: T.textDim, fontStyle: "italic", marginTop: "4px" }}>
+                      Tipp: Wenn Scores = 0, sind die Daten leer (z.B. überschrieben).
+                    </div>
+                  </div>
+                )}
+
+                <button
+                  onClick={async () => {
+                    const code = prompt("Live-Ticker-Code eingeben (z.B. E536DXLY):", "");
+                    if (!code) return;
+                    const cleanCode = code.replace(/[^A-Z0-9]/gi, "").toUpperCase();
+                    if (cleanCode.length !== 8) {
+                      alert("Ungültiger Code. Format: 8 Buchstaben/Ziffern (z.B. E536DXLY)");
+                      return;
+                    }
+                    try {
+                      const result = await liveRead(cleanCode);
+                      if (!result || !result.data) {
+                        alert(`❌ Code ${cleanCode} nicht gefunden.\n\nMögliche Gründe:\n• Code abgelaufen (>48 Std)\n• Tippfehler\n• Live-Ticker wurde manuell gelöscht`);
+                        return;
+                      }
+                      const d = result.data;
+                      const playerNames = (d.players || []).map(p => p.name).join(", ");
+                      const club = d.cfg?.clubName || "Unbekannter Club";
+                      const numHoles = (d.holes || []).length;
+                      const date = d.cfg?.date || "Unbekannt";
+
+                      // Count scores
+                      let scoreCount = 0;
+                      if (d.scores) {
+                        Object.values(d.scores).forEach(ps => {
+                          Object.values(ps || {}).forEach(v => {
+                            if ((typeof v === "number" && v > 0) || v === "X") scoreCount++;
+                          });
+                        });
+                      }
+
+                      if (!confirm(`Folgende Runde wiederherstellen?\n\n📍 ${club}\n📅 ${date} · ${numHoles} Loch\n👥 ${playerNames}\n${scoreCount} Scores\n\nWird als reguläre Runde gespeichert.`)) {
+                        return;
+                      }
+
+                      const recoveredRound = {
+                        id: uid(),
+                        cfg: d.cfg,
+                        holes: d.holes || [],
+                        players: d.players || [],
+                        scores: d.scores || {},
+                        gameMode: d.gameMode || "stableford",
+                        teams: d.teams || null,
+                        par3Data: d.par3Data || {},
+                        ladies: d.ladies || {},
+                        bestBallConfig: d.bestBallConfig || null,
+                        roundGoals: d.roundGoals || null,
+                        selectedClubSnapshot: d.selectedClubSnapshot || null,
+                        savedAt: result.updated_at || new Date().toISOString(),
+                        recoveredFromLive: true,
+                        recoveredCode: cleanCode,
+                      };
+
+                      const fp = (r) => `${r.cfg?.clubName || ""}::${r.cfg?.date || ""}::${(r.players || []).map(p => p.name).sort().join("|")}::${(r.holes || []).length}`;
+                      const newFp = fp(recoveredRound);
+                      const existingDup = rounds.find(r => fp(r) === newFp);
+                      if (existingDup) {
+                        if (!confirm(`⚠️ Eine ähnliche Runde existiert bereits in deinem Stand:\n${existingDup.cfg?.clubName || "?"} · ${existingDup.cfg?.date}\n\nTrotzdem als zusätzliche Runde anlegen?`)) {
+                          return;
+                        }
+                      }
+
+                      const newRounds = [recoveredRound, ...rounds];
+                      setRounds(newRounds);
+                      try { await window.storage.set("golf-rounds", JSON.stringify(newRounds)); } catch {}
+                      alert(`✅ Runde wiederhergestellt!\n\n${club} · ${date}\n${numHoles} Loch · ${(d.players || []).length} Spieler\n${scoreCount} Scores`);
+                    } catch (e) {
+                      alert("Fehler beim Wiederherstellen: " + (e.message || "?"));
+                    }
+                  }}
+                  style={{ ...S.btnSecondary, width: "100%", fontSize: "11px", padding: "8px", color: T.double, borderColor: `${T.double}40` }}>
+                  🚨 Aus Live-Ticker-Code wiederherstellen
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Sync diagnose: shows cloud vs local state, with force-pull option */}
@@ -15862,11 +16042,11 @@ WICHTIG:
                   onClick={async () => {
                     if (!confirm("Lokalen Stand zur Cloud hochladen? Falls Cloud schon Daten hat, werden sie dadurch ersetzt.")) return;
                     setSyncStatus("syncing");
-                    const ok = await cloudPush(syncCode, { rounds, friends, customClubs, trips, ownerProfile });
+                    const ok = await cloudPush(syncCode, { rounds, friends, customClubs, trips, ownerProfile, goals });
                     setSyncStatus(ok ? "idle" : "error");
                     if (ok) {
                       try { await window.storage.set("golf-last-sync", String(Date.now())); } catch {}
-                      alert(`✓ ${rounds.length} Runden, ${friends.length} Freunde, ${customClubs.length} Clubs, ${trips.length} Trips zur Cloud hochgeladen`);
+                      alert(`✓ ${rounds.length} Runden, ${friends.length} Freunde, ${customClubs.length} Clubs, ${trips.length} Trips, ${goals.length} Ziele zur Cloud hochgeladen`);
                     } else {
                       alert("Push fehlgeschlagen — bist du online?");
                     }
