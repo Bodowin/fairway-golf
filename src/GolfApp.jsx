@@ -11466,10 +11466,15 @@ WICHTIG:
     // 1. Sync enabled?
     if (!SYNC_ENABLED) {
       results.push("❌ Cloud-Sync nicht konfiguriert");
+      results.push("   → VITE_SUPABASE_URL fehlt: " + (!SUPABASE_URL ? "JA ❌" : "nein ✓"));
+      results.push("   → VITE_SUPABASE_ANON_KEY fehlt: " + (!SUPABASE_KEY ? "JA ❌" : "nein ✓"));
       alert(results.join("\n"));
       return;
     }
-    results.push("✅ Cloud-Sync konfiguriert");
+    // v56: Zeige Konfig-Details für Diagnose
+    results.push(`✅ Cloud-Sync konfiguriert`);
+    results.push(`   URL: ${SUPABASE_URL.replace(/^https?:\/\//, "").slice(0, 30)}...`);
+    results.push(`   Key: ${SUPABASE_KEY.slice(0, 12)}...${SUPABASE_KEY.slice(-4)} (${SUPABASE_KEY.length} chars)`);
 
     // 2. Online?
     if (typeof navigator !== "undefined" && navigator.onLine === false) {
@@ -11484,15 +11489,23 @@ WICHTIG:
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
       const t0 = Date.now();
+      // v56-fix: Authorization-Header MUSS dabei sein, sonst antwortet Supabase mit 401 selbst bei Erreichbarkeit
       const res = await fetch(`${SUPABASE_URL}/rest/v1/`, {
         method: "HEAD",
-        headers: { "apikey": SUPABASE_KEY },
+        headers: {
+          "apikey": SUPABASE_KEY,
+          "Authorization": `Bearer ${SUPABASE_KEY}`,
+        },
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
       const ms = Date.now() - t0;
       if (res.ok || res.status === 404) {
         results.push(`✅ Supabase erreichbar (${ms}ms)`);
+      } else if (res.status === 401) {
+        results.push(`❌ Supabase Auth fehlgeschlagen (HTTP 401, ${ms}ms)`);
+        results.push(`   → Anon-Key falsch oder VITE_SUPABASE_ANON_KEY in Vercel fehlt`);
+        results.push(`   → Prüfe: vercel.com → Settings → Environment Variables`);
       } else {
         results.push(`⚠️ Supabase antwortet mit HTTP ${res.status} (${ms}ms)`);
       }
