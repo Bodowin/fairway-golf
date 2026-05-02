@@ -224,16 +224,76 @@ async function cloudPull(syncCode) {
 // Anyone with the URL can view (read-only) the round data.
 // Auto-expires after 48h (DB-side via DEFAULT and optional cron cleanup).
 
+// v56-fix: Säubert Daten für JSON.stringify — entfernt zirkuläre Refs + nicht-serialisierbare Werte.
+// Returns { __error } wenn Säuberung scheitert (sehr selten).
+function sanitizeForJson(input) {
+  const seen = new WeakSet();
+  function clean(obj, depth) {
+    if (depth > 50) return null; // Tiefen-Limit zur Sicherheit
+    if (obj === null || obj === undefined) return obj;
+    const t = typeof obj;
+    if (t === "string" || t === "number" || t === "boolean") return obj;
+    if (t === "function" || t === "symbol") return undefined; // Funktionen droppen
+    if (t === "bigint") return obj.toString();
+    // DOM-Elemente, Events, React-Refs etc. droppen
+    if (typeof window !== "undefined" && obj instanceof window.Element) return undefined;
+    if (typeof window !== "undefined" && obj instanceof window.Event) return undefined;
+    if (obj instanceof Date) return obj.toISOString();
+    if (obj instanceof RegExp) return obj.toString();
+    if (obj instanceof Error) return { name: obj.name, message: obj.message };
+    if (t === "object") {
+      // Zirkel-Erkennung
+      if (seen.has(obj)) return null; // Statt Zirkel: null
+      seen.add(obj);
+      // Arrays
+      if (Array.isArray(obj)) {
+        return obj.map(item => clean(item, depth + 1));
+      }
+      // Plain objects
+      const out = {};
+      for (const key of Object.keys(obj)) {
+        // Skippe interne React/DOM-Keys
+        if (key.startsWith("__react") || key.startsWith("_owner") || key === "_self" || key === "_source") continue;
+        const cleaned = clean(obj[key], depth + 1);
+        if (cleaned !== undefined) out[key] = cleaned;
+      }
+      return out;
+    }
+    return null; // Alles andere droppen
+  }
+  try {
+    return clean(input, 0);
+  } catch (e) {
+    return { __error: String(e.message || e) };
+  }
+}
+
 // Create a new live ticker. Returns { code } on success, or { error } on failure.
 async function liveCreate(data) {
   if (!SYNC_ENABLED) return { error: "sync-disabled" };
   const code = genSyncCode(); // reuse same alphabet, 8 chars
+  // v56-fix: Sanitize data — entferne zirkuläre Refs + nicht-serialisierbare Werte
+  const cleanData = sanitizeForJson(data);
+  if (cleanData.__error) {
+    return { error: "serialize", detail: cleanData.__error };
+  }
   // v56: Versuche bis zu 3× — Supabase kann beim Cold-Start kurz timeout-en
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       // 15s Timeout damit's nicht ewig hängt
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 15000);
+      let bodyStr;
+      try {
+        bodyStr = JSON.stringify({
+          code,
+          data: cleanData,
+          updated_at: new Date().toISOString(),
+        });
+      } catch (e) {
+        clearTimeout(timeoutId);
+        return { error: "serialize", detail: String(e.message || e) };
+      }
       const res = await fetch(`${SUPABASE_URL}/rest/v1/live_rounds`, {
         method: "POST",
         headers: {
@@ -242,11 +302,7 @@ async function liveCreate(data) {
           "Content-Type": "application/json",
           "Prefer": "return=minimal",
         },
-        body: JSON.stringify({
-          code,
-          data,
-          updated_at: new Date().toISOString(),
-        }),
+        body: bodyStr,
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
@@ -287,11 +343,28 @@ async function liveCreate(data) {
 // Push an update to an existing live ticker.
 async function liveUpdate(code, data) {
   if (!SYNC_ENABLED || !code) return false;
+  // v56-fix: Sanitize data — entferne zirkuläre Refs
+  const cleanData = sanitizeForJson(data);
+  if (cleanData.__error) {
+    console.error("liveUpdate sanitize failed:", cleanData.__error);
+    return false;
+  }
   // v56: Bei Updates ein Retry — ist nicht so wichtig wie liveCreate
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 10000);
+      let bodyStr;
+      try {
+        bodyStr = JSON.stringify({
+          data: cleanData,
+          updated_at: new Date().toISOString(),
+        });
+      } catch (e) {
+        clearTimeout(timeoutId);
+        console.error("liveUpdate stringify failed:", e);
+        return false;
+      }
       const res = await fetch(
         `${SUPABASE_URL}/rest/v1/live_rounds?code=eq.${encodeURIComponent(code)}`,
         {
@@ -301,10 +374,7 @@ async function liveUpdate(code, data) {
             "Authorization": `Bearer ${SUPABASE_KEY}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            data,
-            updated_at: new Date().toISOString(),
-          }),
+          body: bodyStr,
           signal: controller.signal,
         }
       );
@@ -11601,6 +11671,8 @@ WICHTIG:
         alert("Live-Ticker-Tabelle existiert noch nicht in Supabase.\n\nBitte das SQL aus SUPABASE-LIVE-TICKER-SQL.md im Supabase Dashboard ausführen.");
       } else if (result.status === 401 || result.status === 403) {
         alert("Keine Berechtigung für Live-Ticker.\n\nBitte prüfen ob die RLS-Policies in Supabase angelegt sind (siehe SUPABASE-LIVE-TICKER-SQL.md).");
+      } else if (result.error === "serialize") {
+        alert(`Daten-Konflikt — Live-Ticker konnte nicht gesendet werden.\n\nDie Runden-Daten enthalten ein internes Problem (zirkuläre Referenz).\n\nFix: Lade die App komplett neu (Cache leeren oder Privatfenster).\n\nDetails: ${result.detail || "kein"}`);
       } else if (result.error === "timeout") {
         alert(`Server hat zu lange gebraucht (15s Timeout).\n\nMöglicherweise schwacher Empfang oder Supabase im Cold-Start.\n\nVersuche es nochmal in 30 Sek.`);
       } else if (result.error === "cors") {
