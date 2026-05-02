@@ -71,6 +71,14 @@
   .breakdown-table td { padding: 8px 4px; border-bottom: 1px solid #1a2e22; }
   .breakdown-table td.hole-num { color: #c9a85c; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 12px; text-align: left; padding-left: 10px; width: 28px; }
   .breakdown-table td.par { color: #7a9281; font-family: 'JetBrains Mono', monospace; font-weight: 500; text-align: center; }
+  /* v55: Drama-Banner Animations */
+  @keyframes dramaPulse {
+    0% { opacity: 0; transform: translateY(-4px) scale(0.98); }
+    60% { opacity: 1; transform: translateY(0) scale(1.01); }
+    100% { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .drama-banner { transition: transform 0.2s ease; }
+  .drama-banner:hover { transform: translateY(-1px); }
 </style>
 </head>
 <body>
@@ -456,6 +464,705 @@
     }[c]));
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // DRAMA SYSTEM — Schnippische Spannungs-Banner für Live-Zuschauer
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Helper: pseudo-random aus Seed (deterministic per round — gleiche Daten = gleicher Spruch)
+  function dramaPick(arr, seed) {
+    if (!arr || arr.length === 0) return "";
+    const idx = Math.abs(seed) % arr.length;
+    return arr[idx];
+  }
+
+  // Hash für Seed (basierend auf Spielername + Loch + Modus)
+  function dramaSeed(parts) {
+    let h = 0;
+    const str = parts.filter(Boolean).join("|");
+    for (let i = 0; i < str.length; i++) {
+      h = ((h << 5) - h) + str.charCodeAt(i);
+      h |= 0;
+    }
+    return h;
+  }
+
+  // Banner-Pool: alle Drama-Sprüche organisiert nach Trigger
+  const DRAMA = {
+    // ─── Hot Streak (mehrere Löcher in Folge mit Best/Punkten/Birdie) ─────────
+    hotStreak: {
+      points: [
+        "🔥 {name} brennt — {n} Löcher in Folge mit Punkten!",
+        "🚀 {name} im Tunnel — {n} Löcher en suite",
+        "⚡ {name} unstoppable — {n} Löcher Glanzleistung",
+        "🌋 {name} explodiert — {n} Löcher Punkte am Stück",
+        "💎 {name} im Diamantmodus — {n} Löcher in Folge",
+        "🏆 {name} liefert ab — {n} Löcher Klasse",
+        "🔥 {name} legt nach — {n}× in Folge geliefert",
+        "⭐ {name} gönnt sich Magie — {n} Löcher kompromisslos",
+      ],
+      birdies: [
+        "🎯 {name} mit {n} Birdies in Serie — heute läuft was",
+        "🎯🎯 {name} zaubert — {n} Birdies in Folge!",
+        "🦅 {name} im Adler-Modus — {n} Birdies hintereinander",
+        "🔥 {name} mit Putter wie ein Magnet — {n} Birdies",
+      ],
+    },
+    // ─── Cold Streak (mehrere Löcher ohne Punkt/SF) ───────────────────────────
+    coldStreak: {
+      shorter: [
+        "😴 {name} schläft wohl noch — {n} Löcher kein Punkt",
+        "🥶 {name} eingefroren — {n} Löcher Funkstille",
+        "🧊 {name} im Tiefkühlfach — {n} Löcher nichts",
+        "💤 {name} träumt vor sich hin — {n} Löcher kein Tribut",
+        "🪦 {name} läuft trocken — {n} Löcher keine Punkte",
+        "📵 {name} außer Reichweite — {n} Löcher nix",
+      ],
+      longer: [
+        "🩻 {name} sucht noch sein Spiel — {n} Löcher ohne Punkt",
+        "😶 {name} bekommt heute kein Bein auf den Boden — {n} Löcher",
+        "🚪 {name} hat das Spiel im Clubhaus vergessen — {n} Löcher",
+        "🎪 {name} im Zirkus — {n} Löcher zur Belustigung",
+        "🐌 {name} schleicht sich durch — {n} Löcher kein Punkt",
+        "🦥 {name} scheint zufrieden mit Faulpelz-Modus — {n} Löcher",
+        "📉 {name} im Sinkflug — {n} Löcher kein Land in Sicht",
+      ],
+    },
+    // ─── Comeback (nach Cold-Streak wieder Punkt) ─────────────────────────────
+    comeback: [
+      "🚀 {name} ist zurück nach {n} stillen Löchern!",
+      "⚡ {name} reißt sich am Riemen — Punkt nach {n} mauen",
+      "🔄 {name} dreht den Schalter um — endlich wieder Punkte",
+      "💥 {name} aus dem Nichts — der Aufwachzeitpunkt ist da",
+      "🎬 {name} mit dem Comeback — {n} Löcher Pause vorbei",
+      "🌅 {name} wacht auf — Punkt nach {n} Löchern Funkstille",
+    ],
+    // ─── Big Lead (großer Vorsprung) ──────────────────────────────────────────
+    bigLead: [
+      "👑 {name} regiert — {n} {unit} Vorsprung",
+      "🎩 {name} im Smoking, der Rest im Trainingsanzug — {n} {unit} vorne",
+      "📏 Zwischen {name} und Verfolgern liegen {n} {unit} — uneinholbar?",
+      "🏰 {name} baut die Burg aus — {n} {unit} Vorsprung",
+      "⛰️ {name} thront — {n} {unit} über dem Rest",
+      "🚁 {name} hebt ab — {n} {unit} Vorsprung",
+    ],
+    // ─── Close Race (knappes Rennen) ──────────────────────────────────────────
+    closeRace: [
+      "⚔️ Nur {n} {unit} zwischen {name1} und {name2} — jetzt wird's spicy",
+      "🥊 {name1} vs {name2} — {n} {unit} Differenz, das wird ein Krimi",
+      "🎯 Der Abstand schmilzt: {name1} vs {name2}, nur {n} {unit}",
+      "🔥 Top 2 dicht beisammen — {name1} mit nur {n} {unit} vor {name2}",
+      "💢 Hier brennt's: {name1} und {name2} trennen {n} {unit}",
+      "⚡ Spannung pur — {name1} und {name2} im Schlagabtausch",
+    ],
+    // ─── Last Place (letzter Platz weit hinten) ───────────────────────────────
+    lastPlace: [
+      "💀 {name} am Boden — fest in der Schaufel",
+      "🪦 {name} bewohnt heute das Tabellenende",
+      "🥲 {name} hat den Abend schon verloren — Zeit für ein Bier",
+      "🛌 {name} wirft das Handtuch — letzter Platz",
+      "📉 {name} tief im Keller — und es geht weiter runter",
+      "🙈 {name} hofft dass keiner zuschaut — letzter mit Abstand",
+    ],
+    // ─── Comeback im Stand (aufgeholt) ────────────────────────────────────────
+    catchUp: [
+      "📈 {name} kommt — {n} {unit} aufgeholt auf den letzten Löchern",
+      "🚂 {name} mit dem Aufholzug — {n} {unit} gut gemacht",
+      "🎢 {name} klettert — {n} {unit} näher an die Spitze",
+      "🏃 {name} sprintet — {n} {unit} aufgeholt",
+      "📊 Aufholjagd! {name} verkürzt um {n} {unit}",
+    ],
+    // ─── Birdie ───────────────────────────────────────────────────────────────
+    firstBirdie: [
+      "🎯 PREMIERE: {name} mit dem ersten Birdie der Runde!",
+      "🎯 {name} eröffnet das Birdie-Festival auf Loch {hole}",
+      "🦅 Erster Birdie: {name} auf Loch {hole}",
+      "✨ {name} bricht das Eis — Birdie auf Loch {hole}",
+    ],
+    multiBirdie: [
+      "🎯🎯 {name} mit {n} Birdies — Putter heiß",
+      "🦅 {name} ist heute Birdie-King: {n} Stück",
+      "🔥 {name} Birdie-Mode aktiv — {n} bisher",
+      "⭐ {name} sammelt Birdies wie andere Pilze: {n}",
+    ],
+    eagle: [
+      "🦅🦅 EAGLE! {name} auf Loch {hole} — Geschichte geschrieben",
+      "💥 {name} mit dem EAGLE auf Loch {hole}!",
+      "🚀 EAGLE für {name} auf Loch {hole} — irre",
+    ],
+    // ─── Uschi-Drama ──────────────────────────────────────────────────────────
+    uschiCarryBuilds: [
+      "🎀 Carry steht bei {n}× — die Spannung kocht",
+      "💧 {n}× Carry in der Pipeline — wer kassiert?",
+      "🎀 Uschi-Topf füllt sich: {n}× — kommt jetzt der große Coup?",
+      "🔥 Carry baut sich auf: {n}× — ein Putt entscheidet alles",
+    ],
+    uschiWon: [
+      "🎀💥 {name} räumt {n}× Carry ab!",
+      "🏆 {name} kassiert den Carry — {n} Punkte auf einen Schlag",
+      "💧 {name} mit dem Coup — {n}× Uschi-Beute",
+      "🎉 {name} sahnt ab — {n}× Carry geknackt",
+    ],
+    uschiBurnt: [
+      "🔥 {name} verbrennt {n}× — autsch, das tut weh",
+      "💸 {name} pulvert {n}× Carry weg — oh nein",
+      "😱 {name} verschenkt {n}× — Carry verbrannt",
+      "🪦 {name} versemmelt den Carry — {n}× futsch",
+    ],
+    // ─── Position-Wechsel ─────────────────────────────────────────────────────
+    newLeader: [
+      "👑 NEUER LEADER: {name} überholt — die Krone wechselt",
+      "🔄 {name} ist jetzt vorne — Führungswechsel",
+      "⚡ {name} schnappt sich die Spitze — soeben überholt",
+      "🚨 LEADER-WECHSEL: {name} ist jetzt der Boss",
+    ],
+    // ─── Halbzeit / Endspurt ──────────────────────────────────────────────────
+    halftime: [
+      "⛳ HALBZEIT: {name} führt — kann ihn noch jemand stoppen?",
+      "🕘 Halbzeit-Pfiff: {name} an der Spitze — zweite Hälfte entscheidet",
+      "📊 Nach 9 Löchern: {name} oben — Spannung bleibt",
+    ],
+    finalStretch: [
+      "🏁 NUR NOCH {n} LÖCHER: {name} riecht den Sieg",
+      "⏳ Endspurt — {n} Löcher, {name} im Auge des Sturms",
+      "🎬 Finale: noch {n} Löcher, {name} hat alle Trümpfe",
+      "🔥 Showdown — {n} Löcher entscheiden, {name} vorne",
+    ],
+    finalHole: [
+      "🏆 LETZTES LOCH! {name} muss nur noch durchatmen",
+      "⛳ Finale auf Loch 18 — {name} im Driving-Seat",
+      "🎯 Letzter Schlag-Akt — {name} hat den Sieg in der Hand",
+    ],
+    // ─── Spezial: alle gleichauf ──────────────────────────────────────────────
+    allTied: [
+      "🤝 Alle gleichauf — was für ein Krimi",
+      "⚖️ Pari-Pari quer durch die Bank — sehenswert",
+      "🎭 Niemand setzt sich ab — der Kampf bleibt offen",
+    ],
+    // ─── Spezial: Best Ball+ Spezialitäten ────────────────────────────────────
+    bestBallSweep: [
+      "🏆 {name} schnappt sich {n} Best-Punkte in Folge — Dominanz",
+      "⚡ {name} mit dem Sweep — {n} Best in Serie",
+      "🌟 {name} dominiert das Loch-für-Loch-Game — {n}× Best",
+    ],
+    bestBallTied: [
+      "🤝 Loch {hole}: {name1} & {name2} teilen sich den Best — beide +1",
+      "⚖️ Best-Tie auf Loch {hole}: gleicher Netto-SF",
+      "🎯 Loch {hole} bringt eine Patt-Situation: {name1} & {name2}",
+    ],
+    // ─── Snarky / schnippische Sprüche (random insertions) ────────────────────
+    snarky: [
+      "🍻 {name} trinkt mehr Bier als Punkte sammeln",
+      "📱 {name} — bist du noch dabei oder schon im Clubhaus?",
+      "🎩 {name} scheint auf 'Bequem' geschaltet zu haben",
+      "🪥 {name} putzt die Schläger lieber als die Bahn",
+      "☕ {name} braucht wohl noch einen Espresso",
+      "🍫 {name} sollte vielleicht eine Schokolade essen",
+      "🐢 {name} im Schildkröten-Tempo unterwegs",
+      "🌫️ {name} unter Nebel — bisher unsichtbar",
+    ],
+    // ─── SF-Pace (nur für Stableford) ─────────────────────────────────────────
+    paceFire: [
+      "🚀 {name} auf Pace {n} SF — Sim-HCP-Buster?",
+      "⭐ {name} läuft auf {n} SF — heißer Tag",
+      "🔥 {name} marschiert: {n} SF Pace, jetzt nicht nachlassen!",
+      "💎 {name} mit Pace {n} — Tagesform pur",
+    ],
+    paceCold: [
+      "📉 {name} crasht auf Pace {n} SF — übler Tag",
+      "🥲 {name} tropft Punkte — Pace {n} SF",
+      "😬 {name} heute weit unter Form — Pace {n}",
+    ],
+    // ─── Strich-Drama ─────────────────────────────────────────────────────────
+    multiStrich: [
+      "✗ {name} mit {n} Strichen — der Tag der verlorenen Bälle",
+      "💀 {name}: {n}× Strich — autsch",
+      "🪦 {name} mit {n} Aussetzern — heute nicht der Tag",
+    ],
+  };
+
+  // ─── Drama-Computer: analysiert Daten und gibt priorisierte Banner zurück ──
+  function computeDrama(d, players, holes, scores, stats, sorted, gameMode, isUschi, isBestBallPlus, isPointsMode, pointsResult, par3Data, holesPlayed, totalHoles) {
+    const banners = [];
+    const mode = isBestBallPlus ? "bb" : isUschi ? "uschi" : "sf";
+    const unit = isPointsMode ? "Pkt" : "SF";
+
+    // Holes-played per player (für Streaks etc)
+    const playerHoles = {};
+    players.forEach(p => {
+      const playedIdx = [];
+      holes.forEach((h, i) => {
+        const g = scores[p.id] && scores[p.id][i];
+        if (typeof g === "number" || g === "X") playedIdx.push(i);
+      });
+      playerHoles[p.id] = playedIdx;
+    });
+
+    // ─── 1. HOT STREAK (Punkte/Best/Birdie in Folge) ──────────────────────────
+    players.forEach(p => {
+      const idx = playerHoles[p.id];
+      if (idx.length < 2) return;
+
+      // Best Ball+ / Uschi: Punkte in Folge
+      if (isPointsMode && pointsResult && pointsResult.perHole) {
+        let streak = 0;
+        for (let i = idx.length - 1; i >= 0; i--) {
+          const ph = pointsResult.perHole.find(x => x.holeIdx === idx[i]);
+          const pts = ph?.holePoints?.[p.id] || 0;
+          if (pts > 0) streak++;
+          else break;
+        }
+        if (streak >= 2) {
+          const seed = dramaSeed([p.id, "hot", streak, holesPlayed]);
+          banners.push({
+            playerKey: p.id,
+            priority: streak >= 4 ? 90 : streak >= 3 ? 70 : 40,
+            text: dramaPick(DRAMA.hotStreak.points, seed)
+              .replace("{name}", escapeHtml(p.name))
+              .replace("{n}", streak),
+            color: "#c9a85c", icon: "🔥",
+          });
+        }
+
+        // Best-only Streak (Best Ball+)
+        if (isBestBallPlus) {
+          let bestStreak = 0;
+          for (let i = idx.length - 1; i >= 0; i--) {
+            const ph = pointsResult.perHole.find(x => x.holeIdx === idx[i]);
+            if (ph?.holeBreakdown?.[p.id]?.best) bestStreak++;
+            else break;
+          }
+          if (bestStreak >= 3) {
+            const seed = dramaSeed([p.id, "bbsweep", bestStreak]);
+            banners.push({
+              playerKey: p.id,
+              priority: 75,
+              text: dramaPick(DRAMA.bestBallSweep, seed)
+                .replace("{name}", escapeHtml(p.name))
+                .replace("{n}", bestStreak),
+              color: "#c9a85c", icon: "🏆",
+            });
+          }
+        }
+      }
+
+      // Stableford: SF ≥ 2 in Folge (Bogey oder besser)
+      if (mode === "sf") {
+        const s = stats.find(x => x.p.id === p.id);
+        if (!s) return;
+        let streak = 0;
+        for (let i = idx.length - 1; i >= 0; i--) {
+          const hl = s.holeLog && s.holeLog.find(x => x.holeIdx === idx[i]);
+          if (hl && hl.score !== null) {
+            const h = holes[idx[i]];
+            const hs = holeHS(s.ph, h.si, holes.length);
+            const sf = sfNetto(hl.score, hs, h.par) || 0;
+            if (sf >= 2) streak++;
+            else break;
+          } else break;
+        }
+        if (streak >= 3) {
+          const seed = dramaSeed([p.id, "hotsf", streak]);
+          banners.push({
+            playerKey: p.id,
+            priority: streak >= 5 ? 80 : 50,
+            text: dramaPick(DRAMA.hotStreak.points, seed)
+              .replace("{name}", escapeHtml(p.name))
+              .replace("{n}", streak),
+            color: "#c9a85c", icon: "🔥",
+          });
+        }
+      }
+
+      // Birdies in Folge (alle Modi)
+      let birdieStreak = 0;
+      for (let i = idx.length - 1; i >= 0; i--) {
+        const g = scores[p.id][idx[i]];
+        const h = holes[idx[i]];
+        if (typeof g === "number" && g <= h.par - 1) birdieStreak++;
+        else break;
+      }
+      if (birdieStreak >= 2) {
+        const seed = dramaSeed([p.id, "birdiestreak", birdieStreak]);
+        banners.push({
+          playerKey: p.id,
+          priority: birdieStreak >= 3 ? 95 : 60,
+          text: dramaPick(DRAMA.hotStreak.birdies, seed)
+            .replace("{name}", escapeHtml(p.name))
+            .replace("{n}", birdieStreak),
+          color: "#c9a85c", icon: "🎯",
+        });
+      }
+    });
+
+    // ─── 2. COLD STREAK (mehrere Löcher ohne Punkt/SF ≥ 1) ────────────────────
+    if (holesPlayed >= 4) {
+      players.forEach(p => {
+        const idx = playerHoles[p.id];
+        if (idx.length < 4) return;
+
+        let coldStreak = 0;
+        for (let i = idx.length - 1; i >= 0; i--) {
+          if (isPointsMode && pointsResult && pointsResult.perHole) {
+            const ph = pointsResult.perHole.find(x => x.holeIdx === idx[i]);
+            const pts = ph?.holePoints?.[p.id] || 0;
+            if (pts <= 0) coldStreak++;
+            else break;
+          } else if (mode === "sf") {
+            const s = stats.find(x => x.p.id === p.id);
+            if (!s) break;
+            const hl = s.holeLog && s.holeLog.find(x => x.holeIdx === idx[i]);
+            if (hl && hl.score !== null) {
+              const h = holes[idx[i]];
+              const hs = holeHS(s.ph, h.si, holes.length);
+              const sf = sfNetto(hl.score, hs, h.par) || 0;
+              if (sf < 1) coldStreak++;
+              else break;
+            } else break;
+          }
+        }
+        if (coldStreak >= 4) {
+          const pool = coldStreak >= 6 ? DRAMA.coldStreak.longer : DRAMA.coldStreak.shorter;
+          const seed = dramaSeed([p.id, "cold", coldStreak]);
+          banners.push({
+            playerKey: p.id,
+            priority: coldStreak >= 6 ? 70 : 35,
+            text: dramaPick(pool, seed)
+              .replace("{name}", escapeHtml(p.name))
+              .replace("{n}", coldStreak),
+            color: "#5d6e63", icon: "😴",
+          });
+        }
+      });
+    }
+
+    // ─── 3. BIG LEAD ──────────────────────────────────────────────────────────
+    if (sorted.length >= 2 && holesPlayed >= 3) {
+      const top = sorted[0];
+      const second = sorted[1];
+      let topScore, secondScore;
+      if (isPointsMode && pointsResult) {
+        topScore = pointsResult.totals[top.p.id]?.total || 0;
+        secondScore = pointsResult.totals[second.p.id]?.total || 0;
+      } else {
+        topScore = top.sfNT;
+        secondScore = second.sfNT;
+      }
+      const lead = topScore - secondScore;
+      if (lead >= 5) {
+        const seed = dramaSeed([top.p.id, "biglead", lead]);
+        banners.push({
+          playerKey: top.p.id,
+          priority: lead >= 8 ? 85 : 55,
+          text: dramaPick(DRAMA.bigLead, seed)
+            .replace("{name}", escapeHtml(top.p.name))
+            .replace("{n}", lead)
+            .replace("{unit}", unit),
+          color: "#c9a85c", icon: "👑",
+        });
+      } else if (lead <= 2 && lead >= 0 && holesPlayed >= 5) {
+        // Knappes Rennen
+        const seed = dramaSeed([top.p.id, second.p.id, "close", lead]);
+        banners.push({
+          playerKey: top.p.id,
+          priority: 65,
+          text: dramaPick(DRAMA.closeRace, seed)
+            .replace("{name1}", escapeHtml(top.p.name))
+            .replace("{name2}", escapeHtml(second.p.name))
+            .replace("{n}", lead === 0 ? "0" : lead)
+            .replace("{unit}", unit),
+          color: "#d67a5c", icon: "⚔️",
+        });
+      }
+    }
+
+    // ─── 4. LAST PLACE (letzter Platz, mind. 5 Löcher gespielt) ───────────────
+    if (sorted.length >= 3 && holesPlayed >= 6) {
+      const last = sorted[sorted.length - 1];
+      const second = sorted[sorted.length - 2];
+      let lastScore, secondScore;
+      if (isPointsMode && pointsResult) {
+        lastScore = pointsResult.totals[last.p.id]?.total || 0;
+        secondScore = pointsResult.totals[second.p.id]?.total || 0;
+      } else {
+        lastScore = last.sfNT;
+        secondScore = second.sfNT;
+      }
+      // Last muss klar abgeschlagen sein
+      if (secondScore - lastScore >= 4) {
+        const seed = dramaSeed([last.p.id, "last", lastScore]);
+        banners.push({
+          playerKey: last.p.id,
+          priority: 40,
+          text: dramaPick(DRAMA.lastPlace, seed)
+            .replace("{name}", escapeHtml(last.p.name)),
+          color: "#5d6e63", icon: "💀",
+        });
+      }
+    }
+
+    // ─── 5. EAGLES ────────────────────────────────────────────────────────────
+    holes.forEach((h, i) => {
+      players.forEach(p => {
+        const g = scores[p.id] && scores[p.id][i];
+        if (typeof g === "number" && g <= h.par - 2) {
+          // Nur die letzten 2 Löcher als "frisch" zeigen
+          if (i >= holesPlayed - 2) {
+            const seed = dramaSeed([p.id, "eagle", i]);
+            banners.push({
+              playerKey: p.id,
+              priority: 100, // höchste Prio!
+              text: dramaPick(DRAMA.eagle, seed)
+                .replace("{name}", escapeHtml(p.name))
+                .replace("{hole}", i + 1),
+              color: "#c9a85c", icon: "🦅",
+            });
+          }
+        }
+      });
+    });
+
+    // ─── 6. BIRDIE COUNT (alle Modi) ──────────────────────────────────────────
+    players.forEach(p => {
+      let birdieCount = 0;
+      let firstBirdieHole = -1;
+      holes.forEach((h, i) => {
+        const g = scores[p.id] && scores[p.id][i];
+        if (typeof g === "number" && g === h.par - 1) {
+          birdieCount++;
+          if (firstBirdieHole === -1) firstBirdieHole = i;
+        }
+      });
+      if (birdieCount >= 2) {
+        const seed = dramaSeed([p.id, "birdies", birdieCount]);
+        banners.push({
+          playerKey: p.id,
+          priority: birdieCount >= 3 ? 88 : 58,
+          text: dramaPick(DRAMA.multiBirdie, seed)
+            .replace("{name}", escapeHtml(p.name))
+            .replace("{n}", birdieCount),
+          color: "#c9a85c", icon: "🎯",
+        });
+      }
+    });
+
+    // ─── 7. ERSTER BIRDIE der Runde ───────────────────────────────────────────
+    if (holesPlayed >= 1 && holesPlayed <= 5) {
+      let firstBirdiePlayer = null;
+      let firstBirdieHole = 99;
+      players.forEach(p => {
+        holes.forEach((h, i) => {
+          const g = scores[p.id] && scores[p.id][i];
+          if (typeof g === "number" && g === h.par - 1 && i < firstBirdieHole) {
+            firstBirdiePlayer = p;
+            firstBirdieHole = i;
+          }
+        });
+      });
+      if (firstBirdiePlayer && firstBirdieHole < 99) {
+        // Nur wenn niemand sonst auch Birdies hat
+        let totalBirdies = 0;
+        players.forEach(p => {
+          holes.forEach((h, i) => {
+            const g = scores[p.id] && scores[p.id][i];
+            if (typeof g === "number" && g === h.par - 1) totalBirdies++;
+          });
+        });
+        if (totalBirdies === 1) {
+          const seed = dramaSeed([firstBirdiePlayer.id, "first", firstBirdieHole]);
+          banners.push({
+            playerKey: p.id,
+            priority: 50,
+            text: dramaPick(DRAMA.firstBirdie, seed)
+              .replace("{name}", escapeHtml(firstBirdiePlayer.name))
+              .replace("{hole}", firstBirdieHole + 1),
+            color: "#c9a85c", icon: "🎯",
+          });
+        }
+      }
+    }
+
+    // ─── 8. USCHI CARRY (Best Ball+ mit uschiBonus oder Uschi-Modus) ──────────
+    if (isUschi || (isBestBallPlus && d.bestBallConfig && d.bestBallConfig.uschiBonus)) {
+      const carry = pointsResult?.carry || 1;
+      if (carry > 1) {
+        const seed = dramaSeed(["carry", carry, holesPlayed]);
+        banners.push({
+          priority: carry >= 3 ? 80 : 50,
+          text: dramaPick(DRAMA.uschiCarryBuilds, seed)
+            .replace("{n}", carry),
+          color: "#c9a85c", icon: "🎀",
+        });
+      }
+
+      // Uschi gewonnen / verbrannt — letzten Par-3 mit Aktion finden
+      if (pointsResult && pointsResult.perHole) {
+        // Neueste Action finden
+        let lastUschi = null;
+        let lastUschiIdx = -1;
+        pointsResult.perHole.forEach(ph => {
+          if (ph.uschi && (ph.uschi.type === "won" || ph.uschi.type === "burnt") && ph.holeIdx > lastUschiIdx) {
+            lastUschi = ph.uschi;
+            lastUschiIdx = ph.holeIdx;
+          }
+        });
+        if (lastUschi && lastUschiIdx >= holesPlayed - 3) {
+          // Innerhalb der letzten 3 Löcher
+          if (lastUschi.type === "won") {
+            const winner = players.find(p => p.id === lastUschi.winner);
+            if (winner) {
+              const seed = dramaSeed([winner.id, "uschi-won", lastUschiIdx]);
+              banners.push({
+                playerKey: winner.id,
+                priority: 92,
+                text: dramaPick(DRAMA.uschiWon, seed)
+                  .replace("{name}", escapeHtml(winner.name))
+                  .replace("{n}", lastUschi.points || lastUschi.multiplier),
+                color: "#c9a85c", icon: "🎀",
+              });
+            }
+          } else if (lastUschi.type === "burnt") {
+            const burner = players.find(p => p.id === lastUschi.burnBy);
+            if (burner) {
+              const seed = dramaSeed([burner.id, "uschi-burnt", lastUschiIdx]);
+              banners.push({
+                playerKey: burner.id,
+                priority: 88,
+                text: dramaPick(DRAMA.uschiBurnt, seed)
+                  .replace("{name}", escapeHtml(burner.name))
+                  .replace("{n}", lastUschi.multiplier),
+                color: "#d67a5c", icon: "🔥",
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // ─── 9. SF PACE (nur Stableford) ──────────────────────────────────────────
+    if (mode === "sf" && holesPlayed >= 5) {
+      stats.forEach(s => {
+        if (s.projectedSf === null) return;
+        if (s.projectedSf >= 40) {
+          const seed = dramaSeed([s.p.id, "pacefire", s.projectedSf]);
+          banners.push({
+            playerKey: s.p.id,
+            priority: 78,
+            text: dramaPick(DRAMA.paceFire, seed)
+              .replace("{name}", escapeHtml(s.p.name))
+              .replace("{n}", s.projectedSf),
+            color: "#c9a85c", icon: "🚀",
+          });
+        } else if (s.projectedSf <= 20) {
+          const seed = dramaSeed([s.p.id, "pacecold", s.projectedSf]);
+          banners.push({
+            playerKey: s.p.id,
+            priority: 30,
+            text: dramaPick(DRAMA.paceCold, seed)
+              .replace("{name}", escapeHtml(s.p.name))
+              .replace("{n}", s.projectedSf),
+            color: "#5d6e63", icon: "📉",
+          });
+        }
+      });
+    }
+
+    // ─── 10. STRICH-COUNTER ───────────────────────────────────────────────────
+    players.forEach(p => {
+      let strichCount = 0;
+      holes.forEach((h, i) => {
+        if (scores[p.id] && scores[p.id][i] === "X") strichCount++;
+      });
+      if (strichCount >= 3) {
+        const seed = dramaSeed([p.id, "strich", strichCount]);
+        banners.push({
+          playerKey: p.id,
+          priority: 32,
+          text: dramaPick(DRAMA.multiStrich, seed)
+            .replace("{name}", escapeHtml(p.name))
+            .replace("{n}", strichCount),
+          color: "#5d6e63", icon: "✗",
+        });
+      }
+    });
+
+    // ─── 11. FINAL STRETCH ────────────────────────────────────────────────────
+    const holesLeft = totalHoles - holesPlayed;
+    if (holesPlayed >= Math.floor(totalHoles / 2) && holesLeft > 0 && sorted.length >= 1) {
+      if (holesLeft === 1) {
+        const top = sorted[0];
+        const seed = dramaSeed([top.p.id, "final"]);
+        banners.push({
+          playerKey: top.p.id,
+          priority: 75,
+          text: dramaPick(DRAMA.finalHole, seed)
+            .replace("{name}", escapeHtml(top.p.name)),
+          color: "#c9a85c", icon: "🏆",
+        });
+      } else if (holesLeft <= 3) {
+        const top = sorted[0];
+        const seed = dramaSeed([top.p.id, "stretch", holesLeft]);
+        banners.push({
+          playerKey: top.p.id,
+          priority: 60,
+          text: dramaPick(DRAMA.finalStretch, seed)
+            .replace("{name}", escapeHtml(top.p.name))
+            .replace("{n}", holesLeft),
+          color: "#c9a85c", icon: "🏁",
+        });
+      }
+    }
+
+    // ─── 12. HALBZEIT ─────────────────────────────────────────────────────────
+    if (totalHoles === 18 && holesPlayed === 9 && sorted.length >= 1) {
+      const top = sorted[0];
+      const seed = dramaSeed([top.p.id, "halftime"]);
+      banners.push({
+        playerKey: top.p.id,
+        priority: 65,
+        text: dramaPick(DRAMA.halftime, seed)
+          .replace("{name}", escapeHtml(top.p.name)),
+        color: "#c9a85c", icon: "⛳",
+      });
+    }
+
+    // ─── 13. SNARKY (nur wenn wenig anderes Drama da ist) ─────────────────────
+    // Wird nur eingeführt wenn keine spannenden Banner vorhanden
+    if (banners.length < 1 && holesPlayed >= 6) {
+      // Suche jemanden mit 0 Punkten / niedrigster SF für Snark
+      let target = null;
+      if (isPointsMode && pointsResult) {
+        target = sorted[sorted.length - 1];
+      } else if (mode === "sf") {
+        target = sorted[sorted.length - 1];
+      }
+      if (target) {
+        const seed = dramaSeed([target.p.id, "snark", holesPlayed]);
+        banners.push({
+          playerKey: target.p.id,
+          priority: 20,
+          text: dramaPick(DRAMA.snarky, seed)
+            .replace("{name}", escapeHtml(target.p.name)),
+          color: "#5d6e63", icon: "😏",
+        });
+      }
+    }
+
+    // Sortiere nach Prio (höchste zuerst)
+    banners.sort((a, b) => b.priority - a.priority);
+
+    // v55: Dedupliziere — gleicher Spieler nur 1× zeigen
+    const seen = new Set();
+    const filtered = [];
+    for (const b of banners) {
+      const key = b.playerKey;
+      if (key && seen.has(key)) continue;
+      if (key) seen.add(key);
+      filtered.push(b);
+      if (filtered.length >= 2) break;
+    }
+    return filtered;
+  }
+
   function renderData(row) {
     const d = row.data;
     if (!d || !d.players) {
@@ -726,6 +1433,42 @@
           </div>
         </div>
       `;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // v55: DRAMA-BANNER — schnippische Spannungs-Ankündigungen
+    // ═══════════════════════════════════════════════════════════════════════
+    const dramaBanners = computeDrama(d, players, holes, scores, stats, sorted, gameMode, isUschi, isBestBallPlus, isPointsMode, pointsResult, par3Data, holesPlayed, holes.length);
+    if (dramaBanners.length > 0) {
+      html += `<div class="drama-stack" style="margin-bottom:14px; display:flex; flex-direction:column; gap:8px">`;
+      dramaBanners.forEach((banner, i) => {
+        const bgGrad = banner.color === "#c9a85c"
+          ? "linear-gradient(135deg, #c9a85c20 0%, #c9a85c05 100%)"
+          : banner.color === "#d67a5c"
+            ? "linear-gradient(135deg, #d67a5c20 0%, #d67a5c05 100%)"
+            : "linear-gradient(135deg, #2a3530 0%, #1f2a25 100%)";
+        const borderCol = banner.color === "#c9a85c" ? "#c9a85c50"
+          : banner.color === "#d67a5c" ? "#d67a5c50"
+          : "#3a4a40";
+        html += `
+          <div class="drama-banner" style="
+            background:${bgGrad};
+            border:1px solid ${borderCol};
+            border-radius:12px;
+            padding:10px 14px;
+            display:flex;
+            align-items:center;
+            gap:10px;
+            animation: dramaPulse 0.5s ease-out ${i * 0.1}s both;
+          ">
+            <span style="font-size:20px; flex-shrink:0">${banner.icon}</span>
+            <div style="flex:1; font-size:13px; color:#f5f1ea; font-weight:600; line-height:1.35">
+              ${banner.text}
+            </div>
+          </div>
+        `;
+      });
+      html += `</div>`;
     }
 
     // ─── TensionBar: visual gap between top 2 ─────────────────────────────────
