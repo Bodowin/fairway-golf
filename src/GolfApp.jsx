@@ -228,56 +228,104 @@ async function cloudPull(syncCode) {
 async function liveCreate(data) {
   if (!SYNC_ENABLED) return { error: "sync-disabled" };
   const code = genSyncCode(); // reuse same alphabet, 8 chars
-  try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/live_rounds`, {
-      method: "POST",
-      headers: {
-        "apikey": SUPABASE_KEY,
-        "Authorization": `Bearer ${SUPABASE_KEY}`,
-        "Content-Type": "application/json",
-        "Prefer": "return=minimal",
-      },
-      body: JSON.stringify({
-        code,
-        data,
-        updated_at: new Date().toISOString(),
-      }),
-    });
-    if (res.ok) return { code };
-    // Try to extract useful error info
-    let detail = "";
+  // v56: Versuche bis zu 3× — Supabase kann beim Cold-Start kurz timeout-en
+  for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const body = await res.text();
-      detail = body.slice(0, 200);
-    } catch {}
-    return { error: `http-${res.status}`, status: res.status, detail };
-  } catch (e) {
-    console.error("Live create failed", e);
-    return { error: "network", detail: String(e.message || e) };
+      // 15s Timeout damit's nicht ewig hängt
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/live_rounds`, {
+        method: "POST",
+        headers: {
+          "apikey": SUPABASE_KEY,
+          "Authorization": `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json",
+          "Prefer": "return=minimal",
+        },
+        body: JSON.stringify({
+          code,
+          data,
+          updated_at: new Date().toISOString(),
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (res.ok) return { code };
+      // Try to extract useful error info
+      let detail = "";
+      try {
+        const body = await res.text();
+        detail = body.slice(0, 200);
+      } catch {}
+      // v56: Wenn 5xx, retry
+      if (res.status >= 500 && attempt < 3) {
+        console.warn(`Live create attempt ${attempt} failed with ${res.status}, retrying...`);
+        await new Promise(r => setTimeout(r, 1000 * attempt)); // 1s, 2s
+        continue;
+      }
+      return { error: `http-${res.status}`, status: res.status, detail };
+    } catch (e) {
+      console.error(`Live create attempt ${attempt} failed`, e);
+      // Wenn AbortError (Timeout) oder Network-Fehler, retry
+      if (attempt < 3) {
+        await new Promise(r => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+      // v56: Bessere Diagnose
+      const isTimeout = e.name === "AbortError";
+      const isCors = String(e.message || "").toLowerCase().includes("cors");
+      return {
+        error: isTimeout ? "timeout" : isCors ? "cors" : "network",
+        detail: String(e.message || e),
+        attempts: attempt,
+      };
+    }
   }
+  return { error: "max-retries", detail: "Nach 3 Versuchen gescheitert" };
 }
 
 // Push an update to an existing live ticker.
 async function liveUpdate(code, data) {
   if (!SYNC_ENABLED || !code) return false;
-  try {
-    const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/live_rounds?code=eq.${encodeURIComponent(code)}`,
-      {
-        method: "PATCH",
-        headers: {
-          "apikey": SUPABASE_KEY,
-          "Authorization": `Bearer ${SUPABASE_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          data,
-          updated_at: new Date().toISOString(),
-        }),
+  // v56: Bei Updates ein Retry — ist nicht so wichtig wie liveCreate
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/live_rounds?code=eq.${encodeURIComponent(code)}`,
+        {
+          method: "PATCH",
+          headers: {
+            "apikey": SUPABASE_KEY,
+            "Authorization": `Bearer ${SUPABASE_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            data,
+            updated_at: new Date().toISOString(),
+          }),
+          signal: controller.signal,
+        }
+      );
+      clearTimeout(timeoutId);
+      if (res.ok) return true;
+      // 5xx → retry
+      if (res.status >= 500 && attempt < 2) {
+        await new Promise(r => setTimeout(r, 1000));
+        continue;
       }
-    );
-    return res.ok;
-  } catch (e) { console.error("Live update failed", e); return false; }
+      return false;
+    } catch (e) {
+      console.error(`Live update attempt ${attempt} failed`, e);
+      if (attempt < 2) {
+        await new Promise(r => setTimeout(r, 1000));
+        continue;
+      }
+      return false;
+    }
+  }
+  return false;
 }
 
 // ─── v40: Stable Device-ID ──────────────────────────────────────────────────
@@ -11410,6 +11458,79 @@ WICHTIG:
   // LIVE TICKER — share round live via URL
   // ═══════════════════════════════════════════════════════════════════════════
 
+  // v56: Diagnose-Funktion — testet ob Live-Ticker funktionieren würde
+  const liveDiagnose = async () => {
+    const results = [];
+    results.push("🔍 Live-Ticker Diagnose...\n");
+
+    // 1. Sync enabled?
+    if (!SYNC_ENABLED) {
+      results.push("❌ Cloud-Sync nicht konfiguriert");
+      alert(results.join("\n"));
+      return;
+    }
+    results.push("✅ Cloud-Sync konfiguriert");
+
+    // 2. Online?
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      results.push("❌ Browser sagt: offline");
+      alert(results.join("\n"));
+      return;
+    }
+    results.push("✅ Browser online");
+
+    // 3. Supabase erreichbar?
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      const t0 = Date.now();
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/`, {
+        method: "HEAD",
+        headers: { "apikey": SUPABASE_KEY },
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      const ms = Date.now() - t0;
+      if (res.ok || res.status === 404) {
+        results.push(`✅ Supabase erreichbar (${ms}ms)`);
+      } else {
+        results.push(`⚠️ Supabase antwortet mit HTTP ${res.status} (${ms}ms)`);
+      }
+    } catch (e) {
+      results.push(`❌ Supabase nicht erreichbar: ${e.name === "AbortError" ? "Timeout 8s" : e.message}`);
+      alert(results.join("\n"));
+      return;
+    }
+
+    // 4. Live-Tabelle prüfen
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/live_rounds?limit=1`, {
+        headers: {
+          "apikey": SUPABASE_KEY,
+          "Authorization": `Bearer ${SUPABASE_KEY}`,
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        results.push("✅ live_rounds Tabelle existiert + lesbar");
+      } else if (res.status === 404) {
+        results.push("❌ Tabelle 'live_rounds' fehlt — SQL-Setup nötig");
+      } else if (res.status === 401 || res.status === 403) {
+        results.push("❌ Keine Berechtigung — RLS-Policies prüfen");
+      } else {
+        results.push(`⚠️ Tabellen-Test: HTTP ${res.status}`);
+      }
+    } catch (e) {
+      results.push(`❌ Tabellen-Test fehlgeschlagen: ${e.message}`);
+    }
+
+    results.push("\nFertig.");
+    alert(results.join("\n"));
+  };
+
   const liveStart = async () => {
     if (!SYNC_ENABLED) {
       showUndoToast("⚠️ Live-Ticker braucht Cloud-Sync — bitte erst in Settings → Cloud Sync aktivieren", null);
@@ -11436,6 +11557,10 @@ WICHTIG:
       teams,
       par3Data,
       ladies,
+      // v50: Best Ball+ Config — für Live-Ticker damit Drama-System richtig rechnet
+      bestBallConfig: gameMode === "bestball-plus" ? bestBallConfig : null,
+      // v56: Pro-Runde-Ziele
+      roundGoals: Object.keys(roundGoals).length > 0 ? roundGoals : null,
       clubName: cfg.clubName,
       // Tag this live entry with the user's sync code so that only
       // friends with the same sync code can see it on their home screen.
@@ -11458,13 +11583,19 @@ WICHTIG:
       setLiveStatus("active");
     } else {
       setLiveStatus("error");
-      // Helpful error messages based on error type
+      // v56: Bessere Fehlermeldungen
       if (result.status === 404 || result.detail?.includes("does not exist")) {
         alert("Live-Ticker-Tabelle existiert noch nicht in Supabase.\n\nBitte das SQL aus SUPABASE-LIVE-TICKER-SQL.md im Supabase Dashboard ausführen.");
       } else if (result.status === 401 || result.status === 403) {
         alert("Keine Berechtigung für Live-Ticker.\n\nBitte prüfen ob die RLS-Policies in Supabase angelegt sind (siehe SUPABASE-LIVE-TICKER-SQL.md).");
+      } else if (result.error === "timeout") {
+        alert(`Server hat zu lange gebraucht (15s Timeout).\n\nMöglicherweise schwacher Empfang oder Supabase im Cold-Start.\n\nVersuche es nochmal in 30 Sek.`);
+      } else if (result.error === "cors") {
+        alert(`Cross-Origin-Fehler. Bitte App komplett neu laden (Cache leeren).`);
       } else if (result.error === "network") {
-        alert("Netzwerk-Fehler. Bist du online?");
+        alert(`Netzwerk-Fehler nach ${result.attempts || 3} Versuchen.\n\nMöglich:\n• Schwaches Mobil-Netz (WLAN versuchen)\n• VPN/Firewall blockiert Supabase\n• Browser blockt Connection\n\nDetails: ${result.detail || "kein"}`);
+      } else if (result.error === "max-retries") {
+        alert("Server nach 3 Versuchen nicht erreichbar.\n\nBitte später nochmal versuchen.");
       } else {
         alert("Live-Ticker konnte nicht gestartet werden.\n\nFehler: " + (result.detail || result.error || "unbekannt"));
       }
@@ -15032,6 +15163,20 @@ WICHTIG:
                 style={{ ...S.btnPrimary, width: "100%", opacity: liveStatus === "creating" ? 0.5 : 1 }}>
                 {liveStatus === "creating" ? "Wird erstellt…" : "📡 Live-Ticker starten"}
               </button>
+              {/* v56: Diagnose-Button bei Fehler-Status */}
+              {liveStatus === "error" && (
+                <button onClick={liveDiagnose}
+                  style={{ ...S.btnGhost, width: "100%", marginTop: "8px", fontSize: "12px" }}>
+                  🔍 Verbindung testen (Diagnose)
+                </button>
+              )}
+              {/* v56: Diagnose immer sichtbar als Lifesaver */}
+              {liveStatus !== "error" && (
+                <button onClick={liveDiagnose}
+                  style={{ background: "transparent", border: "none", color: T.textDim, fontSize: "11px", marginTop: "8px", width: "100%", padding: "6px", cursor: "pointer", textDecoration: "underline" }}>
+                  🔍 Verbindung testen
+                </button>
+              )}
             </>
           )}
 
