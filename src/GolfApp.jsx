@@ -357,7 +357,7 @@ function sanitizeForJson(input) {
 }
 
 // Create a new live ticker. Returns { code } on success, or { error } on failure.
-async function liveCreate(data) {
+async function liveCreate(data, deviceId, scorerName) {
   if (!SYNC_ENABLED) return { error: "sync-disabled" };
   const code = genSyncCode(); // reuse same alphabet, 8 chars
   // v56-fix: Sanitize data — entferne zirkuläre Refs + nicht-serialisierbare Werte
@@ -365,6 +365,10 @@ async function liveCreate(data) {
   if (cleanData.__error) {
     return { error: "serialize", detail: cleanData.__error };
   }
+  // v58: Lease initial setzen — 15 Min in die Zukunft
+  const now = Date.now();
+  const leaseUntil = new Date(now + 15 * 60 * 1000).toISOString();
+  const heartbeatAt = new Date(now).toISOString();
   // v56: Versuche bis zu 3× — Supabase kann beim Cold-Start kurz timeout-en
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
@@ -377,6 +381,11 @@ async function liveCreate(data) {
           code,
           data: cleanData,
           updated_at: new Date().toISOString(),
+          // v58: Live-Lock-Felder
+          scorer_device_id: deviceId || null,
+          scorer_name: scorerName || null,
+          scorer_lease_until: deviceId ? leaseUntil : null,
+          last_heartbeat_at: deviceId ? heartbeatAt : null,
         });
       } catch (e) {
         clearTimeout(timeoutId);
@@ -394,7 +403,7 @@ async function liveCreate(data) {
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
-      if (res.ok) return { code };
+      if (res.ok) return { code, leaseUntil };
       // Try to extract useful error info
       let detail = "";
       try {
@@ -504,7 +513,7 @@ async function liveCheckScorer(code) {
   if (!SYNC_ENABLED || !code) return null;
   try {
     const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/live_rounds?code=eq.${encodeURIComponent(code)}&select=data,updated_at`,
+      `${SUPABASE_URL}/rest/v1/live_rounds?code=eq.${encodeURIComponent(code)}&select=data,updated_at,scorer_device_id,scorer_name,scorer_lease_until,last_heartbeat_at`,
       { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
     );
     if (!res.ok) return null;
@@ -512,11 +521,140 @@ async function liveCheckScorer(code) {
     if (!rows?.length) return null;
     const d = rows[0].data || {};
     return {
-      scorerId: d.scorerId || null,
-      scorerName: d.scorerName || null,
+      scorerId: d.scorerId || rows[0].scorer_device_id || null,
+      scorerName: d.scorerName || rows[0].scorer_name || null,
+      scorerLeaseUntil: rows[0].scorer_lease_until || null,
+      lastHeartbeatAt: rows[0].last_heartbeat_at || null,
       updatedAt: rows[0].updated_at,
     };
   } catch (e) { console.error("Live check scorer failed", e); return null; }
+}
+
+// v58: Live-Lock — Lease holen oder verlängern
+// Returns: { ok: bool, currentScorer?: {name, deviceId, leaseUntil}, error?: string }
+async function liveAcquireLease(code, deviceId, scorerName, leaseMinutes = 15) {
+  if (!SYNC_ENABLED || !code || !deviceId) return { ok: false, error: "missing-params" };
+  try {
+    // First check current lease
+    const current = await liveCheckScorer(code);
+    if (!current) {
+      // No live round found — can't acquire lease
+      return { ok: false, error: "no-round" };
+    }
+    const now = Date.now();
+    const leaseUntil = current.scorerLeaseUntil ? new Date(current.scorerLeaseUntil).getTime() : 0;
+    const isMyLease = current.scorerId === deviceId;
+    const leaseExpired = leaseUntil < now;
+
+    // Fall: Es gibt schon einen anderen aktiven Scorer mit gültigem Lease → kein Acquire
+    if (!isMyLease && !leaseExpired) {
+      return {
+        ok: false,
+        error: "lease-held",
+        currentScorer: {
+          name: current.scorerName,
+          deviceId: current.scorerId,
+          leaseUntil: current.scorerLeaseUntil,
+        },
+      };
+    }
+
+    // Lease setzen / verlängern (wir sind Scorer ODER niemand hat aktiven Lease)
+    const newLeaseUntil = new Date(now + leaseMinutes * 60 * 1000).toISOString();
+    const heartbeatAt = new Date(now).toISOString();
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/live_rounds?code=eq.${encodeURIComponent(code)}`,
+      {
+        method: "PATCH",
+        headers: {
+          "apikey": SUPABASE_KEY,
+          "Authorization": `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          scorer_device_id: deviceId,
+          scorer_name: scorerName || "Unbekannter Scorer",
+          scorer_lease_until: newLeaseUntil,
+          last_heartbeat_at: heartbeatAt,
+        }),
+      }
+    );
+    if (!res.ok) return { ok: false, error: `http-${res.status}` };
+    return {
+      ok: true,
+      leaseUntil: newLeaseUntil,
+      wasTakeover: !isMyLease, // true wenn wir den Lock von jemand anderem übernommen haben
+    };
+  } catch (e) {
+    console.error("liveAcquireLease failed", e);
+    return { ok: false, error: "network" };
+  }
+}
+
+// v58: Live-Lock — Heartbeat-Update (verlängert nur den Lease wenn ich Scorer bin)
+async function liveHeartbeat(code, deviceId, leaseMinutes = 15) {
+  if (!SYNC_ENABLED || !code || !deviceId) return { ok: false };
+  try {
+    const current = await liveCheckScorer(code);
+    if (!current) return { ok: false, error: "no-round" };
+    if (current.scorerId !== deviceId) {
+      // Wir sind nicht (mehr) der Scorer
+      return { ok: false, error: "not-scorer", currentScorer: { name: current.scorerName, deviceId: current.scorerId } };
+    }
+    const now = Date.now();
+    const newLeaseUntil = new Date(now + leaseMinutes * 60 * 1000).toISOString();
+    const heartbeatAt = new Date(now).toISOString();
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/live_rounds?code=eq.${encodeURIComponent(code)}`,
+      {
+        method: "PATCH",
+        headers: {
+          "apikey": SUPABASE_KEY,
+          "Authorization": `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          scorer_lease_until: newLeaseUntil,
+          last_heartbeat_at: heartbeatAt,
+        }),
+      }
+    );
+    return { ok: res.ok, leaseUntil: newLeaseUntil };
+  } catch (e) {
+    console.error("liveHeartbeat failed", e);
+    return { ok: false, error: "network" };
+  }
+}
+
+// v58: Live-Lock — Lease freigeben (beim Beenden des Live-Tickers)
+async function liveReleaseLease(code, deviceId) {
+  if (!SYNC_ENABLED || !code || !deviceId) return { ok: false };
+  try {
+    const current = await liveCheckScorer(code);
+    if (!current || current.scorerId !== deviceId) {
+      return { ok: true }; // bereits nicht (mehr) Scorer, alles gut
+    }
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/live_rounds?code=eq.${encodeURIComponent(code)}`,
+      {
+        method: "PATCH",
+        headers: {
+          "apikey": SUPABASE_KEY,
+          "Authorization": `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          scorer_device_id: null,
+          scorer_name: null,
+          scorer_lease_until: null,
+        }),
+      }
+    );
+    return { ok: res.ok };
+  } catch (e) {
+    console.error("liveReleaseLease failed", e);
+    return { ok: false };
+  }
 }
 
 // Pull the current snapshot of a live ticker (used by the viewer page).
@@ -1149,8 +1287,8 @@ const BUILT_IN_CLUBS = [
 const STRICH = null;
 
 // ─── v40: Versions-Marker — sichtbar im App-Footer ──────────────────────────
-const APP_VERSION = "v57";
-const APP_BUILD_DATE = "2026-05-02";
+const APP_VERSION = "v58";
+const APP_BUILD_DATE = "2026-05-03";
 
 function makeHoles(totalPar, numHoles) {
   const si18 = [1,3,5,7,9,11,13,15,17,2,4,6,8,10,12,14,16,18];
@@ -3751,6 +3889,11 @@ function GolfAppInner() {
   // v40: Device-ID + Scorer-Konflikt
   const [deviceId, setDeviceId] = useState(null);
   const [scorerConflict, setScorerConflict] = useState(null); // { existingScorer: "Bodos iPhone", code: "ABCD1234" }
+  // v58: Live-Lock — wann läuft mein Lease aus, bin ich (noch) Scorer?
+  const [liveLeaseUntil, setLiveLeaseUntil] = useState(null);
+  const [liveLeaseStatus, setLiveLeaseStatus] = useState("none"); // "none" | "active" | "lost" | "viewer"
+  const [liveCurrentScorer, setLiveCurrentScorer] = useState(null); // { name, deviceId } wenn anderer Gerät schreibt
+  const liveHeartbeatTimerRef = useRef(null);
   const [showLiveModal, setShowLiveModal] = useState(false); // controls the Live-Share modal
   // List of live rounds from anyone in the wider community (refreshed every minute)
   const [activeLiveRounds, setActiveLiveRounds] = useState([]);
@@ -4239,6 +4382,33 @@ function GolfAppInner() {
     if (!liveCode || !SYNC_ENABLED || liveStatus !== "active") return;
     clearTimeout(livePushTimerRef.current);
     livePushTimerRef.current = setTimeout(async () => {
+      // v58: Vor dem Schreiben — Lease-Check
+      // Wenn ich nicht (mehr) der Scorer bin, NICHT schreiben
+      if (liveLeaseStatus === "viewer" || liveLeaseStatus === "lost") {
+        console.log("Skipping live update — lease lost / viewer mode");
+        return;
+      }
+      // v58: Kulant — wenn Lease abgelaufen, automatisch verlängern (User schreibt aktiv)
+      const now = Date.now();
+      const leaseEnd = liveLeaseUntil ? new Date(liveLeaseUntil).getTime() : 0;
+      if (leaseEnd < now) {
+        // Lease abgelaufen — versuche zu erneuern
+        const result = await liveAcquireLease(liveCode, deviceId, ownerProfile?.name || "Anonymes Gerät", 15);
+        if (!result.ok) {
+          if (result.error === "lease-held") {
+            // Jemand anderes hat schon übernommen
+            setLiveLeaseStatus("viewer");
+            setLiveCurrentScorer(result.currentScorer);
+            console.warn("Lease wurde während Inaktivität übernommen von", result.currentScorer?.name);
+            return;
+          }
+          // Anderer Fehler: trotzdem versuchen das alte Update zu pushen (best-effort)
+        } else {
+          setLiveLeaseUntil(result.leaseUntil);
+          setLiveLeaseStatus("active");
+        }
+      }
+
       const payload = {
         cfg,
         holes,
@@ -4269,7 +4439,38 @@ function GolfAppInner() {
       await liveUpdate(liveCode, payload);
     }, 2500);
     return () => clearTimeout(livePushTimerRef.current);
-  }, [liveCode, liveStatus, cfg, holes, players, scores, gameMode, teams, par3Data, selectedClub, syncCode, ladies, deviceId, ownerProfile, bestBallConfig, roundGoals]);
+  }, [liveCode, liveStatus, liveLeaseStatus, liveLeaseUntil, cfg, holes, players, scores, gameMode, teams, par3Data, selectedClub, syncCode, ladies, deviceId, ownerProfile, bestBallConfig, roundGoals]);
+
+  // ── v58: Live-Lock Heartbeat — alle 5 Min Lease verlängern wenn ich Scorer bin ──
+  useEffect(() => {
+    if (!liveCode || !SYNC_ENABLED || liveStatus !== "active" || liveLeaseStatus !== "active") return;
+    if (!deviceId) return;
+
+    const tick = async () => {
+      const result = await liveHeartbeat(liveCode, deviceId, 15);
+      if (result.ok) {
+        setLiveLeaseUntil(result.leaseUntil);
+        // Stay in "active"
+      } else if (result.error === "not-scorer") {
+        // Jemand anderes hat übernommen
+        setLiveLeaseStatus("viewer");
+        setLiveCurrentScorer(result.currentScorer);
+        console.warn("Heartbeat: Lease lost — andere(r) ist jetzt Scorer:", result.currentScorer?.name);
+      } else if (result.error === "no-round") {
+        // Live-Runde wurde gelöscht
+        setLiveLeaseStatus("none");
+        setLiveStatus("idle");
+        setLiveCode(null);
+      }
+      // Bei "network" Fehler: nichts tun, beim nächsten Tick nochmal versuchen
+    };
+
+    // Erstes Heartbeat sofort, dann alle 5 Min
+    tick();
+    const interval = setInterval(tick, 5 * 60 * 1000); // 5 Minuten
+    liveHeartbeatTimerRef.current = interval;
+    return () => clearInterval(interval);
+  }, [liveCode, liveStatus, liveLeaseStatus, deviceId]);
 
   // ── v40: Periodic Scorer-Conflict Check ──
   // Alle 30s prüfen ob ein anderes Gerät den Scorer-Status übernommen hat.
@@ -9564,9 +9765,9 @@ function GolfAppInner() {
             <button onClick={() => setShowLiveModal(true)}
               style={{
                 flex: "1 1 140px",
-                background: liveCode ? `${T.gold}20` : "transparent",
-                color: liveCode ? T.gold : T.textSoft,
-                border: `1px solid ${liveCode ? T.gold + "60" : T.line}`,
+                background: liveCode ? (liveLeaseStatus === "viewer" ? `${T.bogey}20` : `${T.gold}20`) : "transparent",
+                color: liveCode ? (liveLeaseStatus === "viewer" ? T.bogey : T.gold) : T.textSoft,
+                border: `1px solid ${liveCode ? (liveLeaseStatus === "viewer" ? T.bogey + "60" : T.gold + "60") : T.line}`,
                 borderRadius: "10px",
                 padding: "10px 12px",
                 fontSize: "13px", fontWeight: 600,
@@ -9574,10 +9775,16 @@ function GolfAppInner() {
                 display: "flex", alignItems: "center", justifyContent: "center", gap: "6px",
               }}>
               {liveCode ? (
-                <>
-                  <span style={{ width: "7px", height: "7px", borderRadius: "50%", background: T.gold, display: "inline-block", boxShadow: `0 0 6px ${T.gold}` }}/>
-                  Live aktiv
-                </>
+                liveLeaseStatus === "viewer" ? (
+                  <>
+                    👁 Zuschauer · {liveCurrentScorer?.name || "Anderer"}
+                  </>
+                ) : (
+                  <>
+                    <span style={{ width: "7px", height: "7px", borderRadius: "50%", background: T.gold, display: "inline-block", boxShadow: `0 0 6px ${T.gold}` }}/>
+                    Live aktiv 🔒
+                  </>
+                )
               ) : (
                 <>📡 Live-Ticker</>
               )}
@@ -11876,10 +12083,15 @@ WICHTIG:
         holes: selectedClub.holes,
       } : null,
     };
-    const result = await liveCreate(payload);
+    const result = await liveCreate(payload, deviceId, ownerProfile?.name || "Anonymes Gerät");
     if (result.code) {
       setLiveCode(result.code);
       setLiveStatus("active");
+      // v58: Lease-Bis-Wann merken + Status setzen
+      if (result.leaseUntil) {
+        setLiveLeaseUntil(result.leaseUntil);
+        setLiveLeaseStatus("active");
+      }
     } else {
       setLiveStatus("error");
       // v56: Bessere Fehlermeldungen
@@ -11905,10 +12117,23 @@ WICHTIG:
 
   const liveEnd = async () => {
     if (!liveCode) return;
-    if (!confirm("Live-Ticker wirklich beenden? Die geteilte URL wird sofort ungültig.")) return;
+    // v58: Bessere Bestätigung mit Erklärung
+    const msg = "Live-Ticker beenden?\n\n" +
+      "✅ Diese Runde bleibt in deinem Spielstand erhalten\n" +
+      "❌ Zuschauer können den Live-Ticker nicht mehr sehen\n" +
+      "💡 Du kannst später wieder starten — über das Runden-Detail-Fenster oder neue Live-Ticker für eine neue Runde\n\n" +
+      "Weiter beenden?";
+    if (!confirm(msg)) return;
+    // v58: Lease freigeben bevor wir die Live-Runde löschen
+    if (deviceId) {
+      try { await liveReleaseLease(liveCode, deviceId); } catch {}
+    }
     await liveDelete(liveCode);
     setLiveCode(null);
     setLiveStatus("idle");
+    setLiveLeaseUntil(null);
+    setLiveLeaseStatus("none");
+    setLiveCurrentScorer(null);
     setShowLiveModal(false);
   };
 
@@ -15487,6 +15712,40 @@ WICHTIG:
                 <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: T.sage, display: "inline-block" }}/>
                 <span><b>Aktiv</b> — Freunde können live zuschauen</span>
               </div>
+
+              {/* v58: Live-Lock Status — wer scort gerade? */}
+              {liveLeaseStatus === "active" && liveLeaseUntil && (
+                <div style={{ padding: "10px 12px", background: `${T.gold}10`, border: `1px solid ${T.gold}40`, borderRadius: "10px", marginBottom: "12px", fontSize: "11px", color: T.gold, display: "flex", alignItems: "center", gap: "8px" }}>
+                  <span>🔒</span>
+                  <span>
+                    <b>Du scort</b> · Schreibrechte aktiv bis {new Date(liveLeaseUntil).toLocaleTimeString("de-AT", { hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                </div>
+              )}
+              {liveLeaseStatus === "viewer" && liveCurrentScorer && (
+                <div style={{ padding: "12px 14px", background: `${T.bogey}15`, border: `1px solid ${T.bogey}60`, borderRadius: "10px", marginBottom: "12px", fontSize: "12px", color: T.bogey, lineHeight: 1.5 }}>
+                  <div style={{ fontWeight: 700, marginBottom: "4px" }}>👁 Du bist Zuschauer</div>
+                  <div style={{ fontSize: "11px" }}>
+                    <b>{liveCurrentScorer.name}</b> scort gerade. Deine Eingaben werden NICHT in den Live-Ticker geschrieben.
+                  </div>
+                  <button
+                    onClick={async () => {
+                      if (!confirm(`Möchtest du das Scoring wirklich von ${liveCurrentScorer.name} übernehmen?\n\nDanach kannst du Scores eingeben — ${liveCurrentScorer.name} wird zum Zuschauer.`)) return;
+                      const result = await liveAcquireLease(liveCode, deviceId, ownerProfile?.name || "Anonymes Gerät", 15);
+                      if (result.ok) {
+                        setLiveLeaseUntil(result.leaseUntil);
+                        setLiveLeaseStatus("active");
+                        setLiveCurrentScorer(null);
+                        alert("✅ Scoring übernommen! Du kannst jetzt Scores eingeben.");
+                      } else {
+                        alert("❌ Übernahme fehlgeschlagen: " + (result.error || "?"));
+                      }
+                    }}
+                    style={{ ...S.btnSecondary, width: "100%", fontSize: "11px", padding: "6px", marginTop: "8px", color: T.gold, borderColor: `${T.gold}60` }}>
+                    🎯 Scoring übernehmen
+                  </button>
+                </div>
+              )}
 
               <div style={{ background: T.surface2, border: `1px solid ${T.gold}40`, borderRadius: "12px", padding: "14px", marginBottom: "12px" }}>
                 <div style={{ ...S.eyebrow, color: T.gold, marginBottom: "8px" }}>LIVE-URL</div>
