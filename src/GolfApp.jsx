@@ -185,7 +185,24 @@ const isValidSyncCode = c => {
 
 async function cloudPush(syncCode, data) {
   if (!SYNC_ENABLED || !syncCode) return null;
+  // v57: Sanitize data um Zirkel zu vermeiden
+  const cleanData = sanitizeForJson(data);
+  if (cleanData.__error) {
+    console.error("cloudPush sanitize failed:", cleanData.__error);
+    return false;
+  }
   try {
+    let bodyStr;
+    try {
+      bodyStr = JSON.stringify({
+        sync_code: syncCode,
+        data: cleanData,
+        updated_at: new Date().toISOString(),
+      });
+    } catch (e) {
+      console.error("cloudPush stringify failed:", e);
+      return false;
+    }
     const res = await fetch(`${SUPABASE_URL}/rest/v1/user_data`, {
       method: "POST",
       headers: {
@@ -194,14 +211,85 @@ async function cloudPush(syncCode, data) {
         "Content-Type": "application/json",
         "Prefer": "resolution=merge-duplicates",
       },
-      body: JSON.stringify({
-        sync_code: syncCode,
-        data,
-        updated_at: new Date().toISOString(),
-      }),
+      body: bodyStr,
     });
     return res.ok;
   } catch (e) { console.error("Cloud push failed", e); return false; }
+}
+
+// v57: Pro-Runde-Sync — schreibt eine einzelne Runde in synced_rounds
+// Returns: { ok: bool, version: number, error?: string }
+async function cloudPushRound(syncCode, round, deviceId) {
+  if (!SYNC_ENABLED || !syncCode || !round?.id) return { ok: false, error: "missing-params" };
+  const cleanData = sanitizeForJson(round);
+  if (cleanData.__error) return { ok: false, error: "sanitize-failed" };
+  // Version automatisch hochzählen — bestehende lokale version + 1
+  const newVersion = (round.cloudVersion || 0) + 1;
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/synced_rounds`, {
+      method: "POST",
+      headers: {
+        "apikey": SUPABASE_KEY,
+        "Authorization": `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates",
+      },
+      body: JSON.stringify({
+        id: round.id,
+        sync_code: syncCode,
+        round_data: cleanData,
+        version: newVersion,
+        device_id: deviceId || null,
+        updated_at: new Date().toISOString(),
+        deleted_at: null,
+      }),
+    });
+    if (res.ok) return { ok: true, version: newVersion };
+    return { ok: false, error: `http-${res.status}` };
+  } catch (e) {
+    console.error("cloudPushRound failed", e);
+    return { ok: false, error: "network" };
+  }
+}
+
+// v57: Pro-Runde-Sync — soft-delete eine Runde
+async function cloudDeleteRound(syncCode, roundId) {
+  if (!SYNC_ENABLED || !syncCode || !roundId) return null;
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/synced_rounds?id=eq.${encodeURIComponent(roundId)}&sync_code=eq.${encodeURIComponent(syncCode)}`,
+      {
+        method: "PATCH",
+        headers: {
+          "apikey": SUPABASE_KEY,
+          "Authorization": `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          deleted_at: new Date().toISOString(),
+        }),
+      }
+    );
+    return res.ok;
+  } catch (e) { console.error("cloudDeleteRound failed", e); return false; }
+}
+
+// v57: Pro-Runde-Sync — alle Runden für einen Sync-Code holen (nur nicht-gelöschte)
+async function cloudPullAllRounds(syncCode) {
+  if (!SYNC_ENABLED || !syncCode) return null;
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/synced_rounds?sync_code=eq.${encodeURIComponent(syncCode)}&deleted_at=is.null&select=*&order=updated_at.desc`,
+      { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
+    );
+    if (!res.ok) {
+      if (res.status === 404) {
+        console.warn("synced_rounds Tabelle existiert nicht — bitte SQL aus SUPABASE-PRO-ROUND-SYNC.md ausführen");
+      }
+      return null;
+    }
+    return await res.json();
+  } catch (e) { console.error("cloudPullAllRounds failed", e); return null; }
 }
 
 async function cloudPull(syncCode) {
@@ -1061,7 +1149,7 @@ const BUILT_IN_CLUBS = [
 const STRICH = null;
 
 // ─── v40: Versions-Marker — sichtbar im App-Footer ──────────────────────────
-const APP_VERSION = "v56";
+const APP_VERSION = "v57";
 const APP_BUILD_DATE = "2026-05-02";
 
 function makeHoles(totalPar, numHoles) {
@@ -3874,6 +3962,19 @@ function GolfAppInner() {
         const stored = await window.storage.get("golf-sync-code");
         const code = stored?.value;
         if (code && SYNC_ENABLED) {
+          // v57: Versuche zuerst Pro-Runde-Pull (synced_rounds Tabelle)
+          let proRoundsAvailable = false;
+          let proRoundsList = null;
+          try {
+            proRoundsList = await cloudPullAllRounds(code);
+            if (Array.isArray(proRoundsList)) {
+              proRoundsAvailable = true;
+              console.log(`✓ Pro-Runde-Sync verfügbar: ${proRoundsList.length} Runden in der Cloud`);
+            }
+          } catch (e) {
+            console.warn("Pro-round pull not available, fallback to user_data");
+          }
+
           const cloud = await cloudPull(code);
           if (cloud && cloud.data) {
             const localTsRaw = await window.storage.get("golf-last-sync");
@@ -3884,7 +3985,11 @@ function GolfAppInner() {
             const localRoundsRaw = await window.storage.get("golf-rounds");
             const localRounds = localRoundsRaw?.value ? JSON.parse(localRoundsRaw.value) : [];
 
-            const cloudRounds = Array.isArray(cloud.data.rounds) ? cloud.data.rounds : [];
+            // v57: Wenn Pro-Runde-Sync verfügbar, nutze diese (granularer + sicherer)
+            // Das Blob bleibt nur als Fallback für friends/customClubs/trips/goals
+            const cloudRounds = proRoundsAvailable && proRoundsList
+              ? proRoundsList.map(pr => ({ ...pr.round_data, cloudVersion: pr.version }))
+              : (Array.isArray(cloud.data.rounds) ? cloud.data.rounds : []);
 
             // ── SAFETY CHECK 1: Cloud is empty / drastically smaller ──
             // If we have local data and cloud has none (or much fewer), DON'T overwrite.
@@ -4033,17 +4138,100 @@ function GolfAppInner() {
     if (syncConflict) return;
     clearTimeout(syncTimerRef.current);
     syncTimerRef.current = setTimeout(async () => {
+      // v56-fix: PRE-SYNC SNAPSHOT — sichere lokalen Stand BEVOR wir pushen
+      // Das schützt davor dass ein fehlgeschlagener Push + nachfolgender Pull Daten verliert
+      try {
+        const now = Date.now();
+        const lastBackupRaw = await window.storage.get("golf-pre-sync-last");
+        const lastBackup = lastBackupRaw?.value ? parseInt(lastBackupRaw.value) : 0;
+        // Nur wenn letztes Pre-Sync-Backup älter als 30 Min ist (oder erstes mal)
+        if (now - lastBackup > 30 * 60 * 1000) {
+          const snapshotKey = `golf-pre-sync-${now}`;
+          const snapshot = JSON.stringify({
+            timestamp: new Date().toISOString(),
+            rounds, friends, customClubs, trips, ownerProfile, goals,
+          });
+          await window.storage.set(snapshotKey, snapshot);
+          await window.storage.set("golf-pre-sync-last", String(now));
+          // Cleanup: behalte nur die letzten 10 Pre-Sync-Snapshots
+          const allKeys = await window.storage.list?.("golf-pre-sync-");
+          if (allKeys?.keys) {
+            const filtered = allKeys.keys.filter(k => k !== "golf-pre-sync-last");
+            const sorted = [...filtered].sort();
+            while (sorted.length > 10) {
+              const oldKey = sorted.shift();
+              try { await window.storage.delete(oldKey); } catch {}
+            }
+          }
+        }
+      } catch (e) { console.warn("Pre-sync snapshot failed", e); }
+
       setSyncStatus("syncing");
-      // v47.1: trips + ownerProfile mit synchronisieren
-      // v56: goals (Saison-Ziele) auch synchronisieren
+
+      // v57: PRO-RUNDE-SYNC — jede Runde einzeln + altes Blob als Fallback
+      // 1. Versuche zuerst Pro-Runde-Sync (kann fehlschlagen wenn synced_rounds-Tabelle nicht existiert)
+      // 2. Pushe immer auch das alte Blob als Backup-Fallback
+      let perRoundOk = true;
+      let perRoundCount = 0;
+      try {
+        // Hole bestehende Cloud-Versionen für Konflikt-Detection
+        const cloudRoundsList = await cloudPullAllRounds(syncCode);
+        const cloudVersionMap = new Map();
+        if (Array.isArray(cloudRoundsList)) {
+          cloudRoundsList.forEach(cr => cloudVersionMap.set(cr.id, cr));
+        }
+
+        // Pushe nur die Runden die sich geändert haben (oder neu sind)
+        for (const round of rounds) {
+          if (!round?.id) continue;
+          const cloudRound = cloudVersionMap.get(round.id);
+          // Lokale Modification-Time
+          const localTs = round.savedAt ? new Date(round.savedAt).getTime() : 0;
+          const cloudTs = cloudRound?.updated_at ? new Date(cloudRound.updated_at).getTime() : 0;
+          // Skip wenn Cloud neuer ist (anderes Gerät hat aktualisiert)
+          if (cloudRound && cloudTs > localTs && cloudRound.version > (round.cloudVersion || 0)) {
+            console.log(`Skipping ${round.id}: cloud is newer (v${cloudRound.version} vs v${round.cloudVersion || 0})`);
+            continue;
+          }
+          // Push die Runde
+          const result = await cloudPushRound(syncCode, { ...round, cloudVersion: cloudRound?.version || 0 }, deviceId);
+          if (result.ok) {
+            perRoundCount++;
+          } else {
+            perRoundOk = false;
+            console.warn(`Push round ${round.id} failed:`, result.error);
+            if (result.error?.startsWith("http-404")) {
+              // Tabelle existiert nicht — Pro-Runde-Sync nicht verfügbar
+              break;
+            }
+          }
+        }
+        // Soft-delete für Cloud-Runden die lokal nicht mehr existieren
+        if (Array.isArray(cloudRoundsList)) {
+          const localIds = new Set(rounds.map(r => r.id).filter(Boolean));
+          for (const cr of cloudRoundsList) {
+            if (!localIds.has(cr.id)) {
+              await cloudDeleteRound(syncCode, cr.id);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("Pro-round sync failed (Tabelle nicht erstellt?):", e);
+        perRoundOk = false;
+      }
+
+      // v47.1: trips + ownerProfile + goals als Blob mit synchronisieren (legacy backup)
       const ok = await cloudPush(syncCode, { rounds, friends, customClubs, trips, ownerProfile, goals });
       setSyncStatus(ok ? "idle" : "error");
       if (ok) {
         try { await window.storage.set("golf-last-sync", String(Date.now())); } catch {}
+        if (perRoundOk && perRoundCount > 0) {
+          console.log(`✓ Pro-Runde-Sync: ${perRoundCount} Runden gepushed`);
+        }
       }
     }, 2000);
     return () => clearTimeout(syncTimerRef.current);
-  }, [rounds, friends, customClubs, trips, ownerProfile, goals, syncCode, loaded, syncConflict]);
+  }, [rounds, friends, customClubs, trips, ownerProfile, goals, syncCode, loaded, syncConflict, deviceId]);
 
   // ── Live ticker auto-push (debounced) ─────────────────────────────────────
   // When a live ticker is active, push current round state to Supabase on any change.
@@ -15779,13 +15967,17 @@ WICHTIG:
               />
             </div>
             <button onClick={async () => {
-              // Build list of backups (auto-backups + cloud-pull-backups)
+              // Build list of backups (auto-backups + cloud-pull-backups + pre-sync-snapshots)
               try {
                 const auto = await window.storage.list("golf-rounds-backup-");
                 const cloudPull = await window.storage.list("golf-backup-before-cloud-pull-");
+                // v56-fix: Pre-Sync-Backups (häufiger erstellt, alle 30 Min)
+                const preSyncRaw = await window.storage.list("golf-pre-sync-");
+                const preSync = preSyncRaw?.keys?.filter(k => k !== "golf-pre-sync-last") || [];
                 const allKeys = [
                   ...(auto?.keys || []).map(k => ({ key: k, type: "daily" })),
                   ...(cloudPull?.keys || []).map(k => ({ key: k, type: "cloud-pull" })),
+                  ...preSync.map(k => ({ key: k, type: "pre-sync" })),
                 ];
                 if (!allKeys.length) {
                   alert("Keine Backups gefunden.");
@@ -15806,13 +15998,18 @@ WICHTIG:
                     if (type === "daily") {
                       const dateStr = key.replace("golf-rounds-backup-", "");
                       label = `Auto-Backup vom ${dateStr}`;
-                      // Parse YYYYMMDD
                       const yyyy = dateStr.slice(0, 4), mm = dateStr.slice(4, 6), dd = dateStr.slice(6, 8);
                       timestamp = new Date(`${yyyy}-${mm}-${dd}`).getTime();
-                    } else {
+                    } else if (type === "cloud-pull") {
                       const ts = parseInt(key.replace("golf-backup-before-cloud-pull-", ""));
                       timestamp = ts;
                       label = `Vor Cloud-Pull · ${new Date(ts).toLocaleString("de-AT", {
+                        day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"
+                      })}`;
+                    } else if (type === "pre-sync") {
+                      const ts = parseInt(key.replace("golf-pre-sync-", ""));
+                      timestamp = ts;
+                      label = `🛡️ Pre-Sync · ${new Date(ts).toLocaleString("de-AT", {
                         day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"
                       })}`;
                     }
@@ -15989,6 +16186,58 @@ WICHTIG:
                   style={{ ...S.btnSecondary, width: "100%", fontSize: "11px", padding: "8px", color: T.double, borderColor: `${T.double}40` }}>
                   🚨 Aus Live-Ticker-Code wiederherstellen
                 </button>
+
+                {/* v56-fix: Manueller Runden-Import per JSON — letzter Notausweg */}
+                <button
+                  onClick={async () => {
+                    const json = prompt("Runden-JSON einfügen (von Claude generiert):", "");
+                    if (!json) return;
+                    try {
+                      const parsed = JSON.parse(json);
+                      const rs = Array.isArray(parsed) ? parsed : [parsed];
+
+                      // Validate
+                      const valid = rs.filter(r => r.cfg && r.holes && r.players && r.scores);
+                      if (valid.length === 0) {
+                        alert("❌ Kein gültiges Runden-Objekt gefunden.\n\nFormat muss enthalten: cfg, holes, players, scores");
+                        return;
+                      }
+
+                      // Add IDs if missing
+                      const withIds = valid.map(r => ({
+                        ...r,
+                        id: r.id || uid(),
+                        savedAt: r.savedAt || new Date().toISOString(),
+                        manuallyImported: true,
+                      }));
+
+                      // Check for duplicates
+                      const fp = (r) => `${r.cfg?.clubName || ""}::${r.cfg?.date || ""}::${(r.players || []).map(p => p.name).sort().join("|")}::${(r.holes || []).length}`;
+                      const existingFps = new Set(rounds.map(fp));
+                      const dups = withIds.filter(r => existingFps.has(fp(r)));
+                      if (dups.length > 0) {
+                        if (!confirm(`⚠️ ${dups.length} ähnliche Runde(n) existieren bereits. Trotzdem importieren?`)) return;
+                      }
+
+                      const summary = withIds.map(r =>
+                        `📍 ${r.cfg?.clubName || "?"} · ${r.cfg?.date || "?"} · ${(r.holes || []).length} Loch · ${(r.players || []).length} Spieler`
+                      ).join("\n");
+
+                      if (!confirm(`Folgende ${withIds.length} Runde(n) importieren?\n\n${summary}`)) return;
+
+                      const newRounds = [...withIds, ...rounds].sort((a, b) =>
+                        (b.savedAt || 0) - (a.savedAt || 0)
+                      );
+                      setRounds(newRounds);
+                      try { await window.storage.set("golf-rounds", JSON.stringify(newRounds)); } catch {}
+                      alert(`✅ ${withIds.length} Runde(n) importiert!`);
+                    } catch (e) {
+                      alert("❌ Fehler beim Parsen: " + (e.message || "?"));
+                    }
+                  }}
+                  style={{ ...S.btnSecondary, width: "100%", fontSize: "11px", padding: "8px", marginTop: "6px", color: T.gold, borderColor: `${T.gold}40` }}>
+                  📋 Runde aus JSON importieren
+                </button>
               </div>
             )}
           </div>
@@ -16010,6 +16259,18 @@ WICHTIG:
                   const localRounds = rounds.length;
                   const localFriends = friends.length;
                   const localClubs = customClubs.length;
+
+                  // v57: Pro-Runde-Sync-Status
+                  let proRoundStatus = "❌ Pro-Runde-Sync NICHT aktiv (synced_rounds Tabelle fehlt)";
+                  let proRoundCount = 0;
+                  try {
+                    const proRounds = await cloudPullAllRounds(syncCode);
+                    if (Array.isArray(proRounds)) {
+                      proRoundCount = proRounds.length;
+                      proRoundStatus = `✓ Pro-Runde-Sync AKTIV: ${proRoundCount} Runden in synced_rounds`;
+                    }
+                  } catch {}
+
                   let recommendation = "";
                   if (!cloud) {
                     recommendation = "❌ Kein Cloud-Eintrag gefunden. Drück 'Cloud erzwingen ▲' damit dein lokaler Stand hochgeladen wird.";
@@ -16022,11 +16283,12 @@ WICHTIG:
                   } else if (localRounds > cloudRounds + 2) {
                     recommendation = "ℹ Lokal hat mehr Runden als Cloud. Drück 'Cloud erzwingen ▲' damit andere Geräte sie sehen.";
                   } else {
-                    recommendation = "✓ Beide Stände sehen ähnlich aus. Wenn andere Geräte trotzdem nicht synchron sind, beide Buttons probieren.";
+                    recommendation = "✓ Beide Stände sehen ähnlich aus.";
                   }
                   alert(
                     `Sync-Diagnose für „${syncCode}"\n\n` +
-                    `📊 Cloud-Stand:\n` +
+                    `🆕 Pro-Runde-Sync (v57):\n${proRoundStatus}\n\n` +
+                    `📊 Legacy Cloud-Stand (Blob):\n` +
                     `   ${cloudRounds} Runden, ${cloudFriends} Freunde, ${cloudClubs} Clubs\n` +
                     `   Zuletzt: ${cloudUpdated}\n\n` +
                     `💾 Lokaler Stand:\n` +
