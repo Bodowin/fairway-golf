@@ -1342,7 +1342,16 @@ function calcCourseHcp(hcp, slope, cr, par, conversionTable) {
   return { ph: calcPH(hcp, slope, cr, par), source: "formula" };
 }
 
-const holeHS     = (ph, si, n) => Math.floor(Math.abs(ph)/n) + (si <= Math.abs(ph)%n ? 1 : 0);
+// ─── v58-fix: 9-Loch-Spielvorgaben korrekt verteilen ───────────────────────
+// Birdiebook-Tabellen liefern Spielvorgaben für 18 Loch (z.B. HC 29.4 → SV 30).
+// Bei 9-Loch-Runden halbieren wir das automatisch (15 Schläge auf 9 Löcher).
+// Die Erkennung läuft über n: ist n=9, halbieren wir ph vor der Verteilung.
+const holeHS     = (ph, si, n) => {
+  // v58-fix: Bei 9-Loch-Runden halbiere die volle 18-Loch-Spielvorgabe
+  // (Math.round für faire Aufrundung — z.B. SV 30 → 15, SV 31 → 16, SV 29 → 15)
+  const adjustedPh = n === 9 ? Math.round(Math.abs(ph) / 2) : Math.abs(ph);
+  return Math.floor(adjustedPh / n) + (si <= adjustedPh % n ? 1 : 0);
+};
 const isStrich   = v => v === null;
 const isValid    = v => typeof v === "number" && v > 0;
 
