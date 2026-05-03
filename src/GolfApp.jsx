@@ -5644,15 +5644,25 @@ function GolfAppInner() {
 
   // Open Uschi par-3 dialog if conditions are met
   // Called right after a score is set for `latestPlayerId` on `holeIdx`
+  // v58: Auch bei Stableford-Modus prompten wenn Runde zu einem Trip mit Nearest-Pin-Pot gehört
   const maybePromptUschi = (holeIdx, latestPlayerId) => {
-    if (gameMode === "stableford") return;
-    // v50: Bei Best Ball+ nur prompten wenn uschiBonus aktiviert
-    if (gameMode === "bestball-plus" && !bestBallConfig.uschiBonus) return;
     const hole = holes[holeIdx];
     if (!hole || hole.par !== 3) return;
     if (par3Data[holeIdx]) return; // already have data
+
+    // v58: Check Trip-Context für Nearest-Pin
+    const trip = cfg.tripContext ? trips.find(t => t.id === cfg.tripContext.tripId) : null;
+    const tripWantsNearest = trip && (trip.pots?.nearestPin || 0) > 0;
+
+    // Bedingungen für Par3-Prompt:
+    // 1. Uschi-Modus aktiv
+    // 2. Best Ball+ mit uschiBonus
+    // 3. Trip-Runde mit Nearest-Pin-Pot
+    const isUschiMode = gameMode === "uschi-single" || gameMode === "uschi-team";
+    const isBestBallWithUschi = gameMode === "bestball-plus" && bestBallConfig.uschiBonus;
+    if (!isUschiMode && !isBestBallWithUschi && !tripWantsNearest) return;
+
     // check all players have a score (valid or strich) for this hole.
-    // Use latestPlayerId as a hint: treat that player as scored even if state not yet flushed.
     const allScored = players.every(p => {
       if (p.id === latestPlayerId) return true;
       const g = scores[p.id]?.[holeIdx];
@@ -5811,6 +5821,8 @@ function GolfAppInner() {
         });
       }
     }
+    // v58: Return savedRound damit Aufrufer (z.B. Trip-Nearest) die ID weiß
+    return savedRound;
   };
 
   // ── v33: Manual full archive — pushes ALL local rounds to cloud archive ──
@@ -9280,46 +9292,72 @@ function GolfAppInner() {
           Club, Abschlag und Spieler wählen
         </p>
 
-        {/* v47: TRIP-CONTEXT-CARD */}
+        {/* v47+v58: TRIP-CONTEXT-CARD — smart: nur zeigen wenn cfg.date in Trip-Zeitfenster fällt */}
         {(() => {
           const activeTrip = cfg.tripContext ? trips.find(t => t.id === cfg.tripContext.tripId) : null;
           const activeDay = activeTrip?.days?.find(d => d.dayNumber === cfg.tripContext?.dayNumber);
           const availableTrips = trips.filter(t => (t.days || []).length > 0);
 
-          // Wenn keine Trips: Card nicht anzeigen
-          if (availableTrips.length === 0 && !activeTrip) return null;
+          // v58: Smart-Match — finde Trip dessen Tag mit cfg.date übereinstimmt
+          const matchingTripDays = [];
+          if (cfg.date && availableTrips.length > 0) {
+            availableTrips.forEach(trip => {
+              (trip.days || []).forEach(day => {
+                if (day.date === cfg.date) {
+                  matchingTripDays.push({ trip, day });
+                }
+              });
+            });
+          }
+          const hasAutoMatch = matchingTripDays.length > 0;
 
-          return (
-            <div style={{ ...S.card, marginBottom: "12px", borderColor: activeTrip ? `${T.gold}50` : T.line, background: activeTrip ? `${T.gold}10` : T.surface1 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
-                <div style={{ ...S.eyebrow, color: activeTrip ? T.gold : T.textDim }}>
-                  🏖️ Trip-Zuweisung
-                </div>
-                {activeTrip && (
+          // v58: Manueller Override-State — falls Bodo trotzdem manuell wählen will
+          const showManualOverride = cfg.tripContext === null && !hasAutoMatch && cfg._showManualTripPicker;
+
+          // Card NUR zeigen wenn:
+          // 1. Eine Runde aktiv einem Trip zugeordnet ist, ODER
+          // 2. Datum in Trip-Zeitfenster fällt (Auto-Match), ODER
+          // 3. User explizit "manuell zuordnen" aktiviert hat
+          if (!activeTrip && !hasAutoMatch && !showManualOverride) {
+            // Wenn Trips existieren aber Datum nicht passt: dezenten Link anbieten
+            if (availableTrips.length > 0) {
+              return (
+                <div style={{ marginBottom: "10px", textAlign: "right" }}>
                   <button
-                    onClick={() => setCfg(c => ({ ...c, tripContext: null }))}
-                    style={{ background: "transparent", border: "none", color: T.textDim, fontSize: "11px", cursor: "pointer", textDecoration: "underline" }}>
-                    entfernen
+                    onClick={() => setCfg(c => ({ ...c, _showManualTripPicker: true }))}
+                    style={{
+                      background: "transparent", border: "none",
+                      color: T.textDim, fontSize: "11px",
+                      textDecoration: "underline", cursor: "pointer",
+                      padding: "4px 8px",
+                    }}>
+                    🏖️ Manuell zu einem Trip zuordnen
                   </button>
-                )}
-              </div>
+                </div>
+              );
+            }
+            return null;
+          }
 
-              {!activeTrip && (
-                <>
-                  <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px", lineHeight: 1.5, fontStyle: "italic" }}>
-                    Gehört diese Runde zu einem Trip? Dann werden die Spieler mit angepasstem HCP automatisch geladen.
-                  </p>
-                  <select
-                    onChange={(e) => {
-                      if (!e.target.value) return;
-                      const [tripId, dayNum] = e.target.value.split("::");
-                      const trip = trips.find(t => t.id === tripId);
-                      if (!trip) return;
-                      const dayNumber = parseInt(dayNum);
-
-                      // Spieler aus Trip übernehmen mit angepasstem HCP
+          // Auto-Match (genau 1 Match): Hinweis-Card mit Vorschlag
+          if (!activeTrip && hasAutoMatch && matchingTripDays.length === 1) {
+            const { trip, day } = matchingTripDays[0];
+            return (
+              <div style={{ ...S.card, marginBottom: "12px", borderColor: `${T.gold}50`, background: `${T.gold}08` }}>
+                <div style={{ ...S.eyebrow, color: T.gold, marginBottom: "8px" }}>
+                  🏖️ Trip erkannt
+                </div>
+                <div style={{ fontSize: "13px", color: T.text, marginBottom: "4px" }}>
+                  Das Datum passt zu <b style={{ color: T.gold }}>{trip.name}</b> (Tag {day.dayNumber})
+                </div>
+                <div style={{ fontSize: "11px", color: T.textDim, marginBottom: "12px", lineHeight: 1.5 }}>
+                  Soll diese Runde zum Trip gehören? Dann werden die Spieler mit angepasstem HCP automatisch geladen.
+                </div>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <button
+                    onClick={() => {
                       const tripPlayers = (trip.players || []).map(tp => {
-                        const adjustment = tp.hcpAdjustments?.[dayNumber] || 0;
+                        const adjustment = tp.hcpAdjustments?.[day.dayNumber] || 0;
                         const friend = friends.find(f => f.playerId === tp.playerId || normName(f.name) === normName(tp.name));
                         const realHcp = friend ? parseFloat(friend.hcp) || 0 : (parseFloat(tp.hcp) || 0);
                         const adjustedHcp = realHcp + adjustment;
@@ -9334,62 +9372,132 @@ function GolfAppInner() {
                         };
                       });
                       setPlayers(tripPlayers);
-                      setCfg(c => ({ ...c, tripContext: { tripId, dayNumber } }));
-                      e.target.value = "";
+                      setCfg(c => ({ ...c, tripContext: { tripId: trip.id, dayNumber: day.dayNumber } }));
                     }}
-                    style={{ ...S.input, fontSize: "13px", padding: "10px 12px" }}
-                    defaultValue="">
-                    <option value="">— kein Trip ausgewählt —</option>
-                    {availableTrips.map(trip =>
-                      (trip.days || []).map(day => (
-                        <option key={`${trip.id}::${day.dayNumber}`} value={`${trip.id}::${day.dayNumber}`}>
-                          🏖️ {trip.name} — Tag {day.dayNumber} ({fmtDate(day.date)})
-                        </option>
-                      ))
-                    )}
-                  </select>
-                </>
-              )}
+                    style={{ ...S.btnPrimary, flex: 1, fontSize: "13px", padding: "10px" }}>
+                    ✓ Ja, zum Trip
+                  </button>
+                  <button
+                    onClick={() => setCfg(c => ({ ...c, _showManualTripPicker: false, tripContext: null }))}
+                    style={{ ...S.btnGhost, fontSize: "12px", padding: "10px 14px" }}>
+                    Nein
+                  </button>
+                </div>
+              </div>
+            );
+          }
 
-              {activeTrip && activeDay && (
-                <>
-                  <div style={{ fontSize: "14px", color: T.gold, fontWeight: 700, marginBottom: "4px" }}>
-                    {activeTrip.name} · Tag {activeDay.dayNumber}
+          // Mehrere Auto-Matches ODER manueller Override
+          if ((!activeTrip && hasAutoMatch && matchingTripDays.length > 1) || showManualOverride) {
+            return (
+              <div style={{ ...S.card, marginBottom: "12px", borderColor: T.line, background: T.surface1 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                  <div style={{ ...S.eyebrow, color: T.textDim }}>
+                    🏖️ Trip-Zuweisung
                   </div>
-                  <div style={{ fontSize: "11px", color: T.textSoft, marginBottom: "10px" }}>
-                    {fmtDate(activeDay.date)} · {activeTrip.players?.length || 0} Spieler übernommen
-                  </div>
-                  {/* Spieler-Vorschau mit HCP-Adjustments */}
-                  <div style={{ display: "flex", flexDirection: "column", gap: "4px", padding: "8px", background: T.surface2, borderRadius: "6px" }}>
-                    {(activeTrip.players || []).map(tp => {
-                      const adj = tp.hcpAdjustments?.[activeDay.dayNumber] || 0;
+                  <button
+                    onClick={() => setCfg(c => ({ ...c, _showManualTripPicker: false }))}
+                    style={{ background: "transparent", border: "none", color: T.textDim, fontSize: "11px", cursor: "pointer", textDecoration: "underline" }}>
+                    abbrechen
+                  </button>
+                </div>
+                <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px", lineHeight: 1.5, fontStyle: "italic" }}>
+                  {hasAutoMatch
+                    ? "Mehrere Trips passen zu diesem Datum — wähle einen aus:"
+                    : "Welcher Trip soll zugeordnet werden?"
+                  }
+                </p>
+                <select
+                  onChange={(e) => {
+                    if (!e.target.value) return;
+                    const [tripId, dayNum] = e.target.value.split("::");
+                    const trip = trips.find(t => t.id === tripId);
+                    if (!trip) return;
+                    const dayNumber = parseInt(dayNum);
+                    const tripPlayers = (trip.players || []).map(tp => {
+                      const adjustment = tp.hcpAdjustments?.[dayNumber] || 0;
                       const friend = friends.find(f => f.playerId === tp.playerId || normName(f.name) === normName(tp.name));
                       const realHcp = friend ? parseFloat(friend.hcp) || 0 : (parseFloat(tp.hcp) || 0);
-                      const adjusted = realHcp + adj;
+                      const adjustedHcp = realHcp + adjustment;
+                      return {
+                        id: uid(),
+                        playerId: tp.playerId,
+                        name: tp.name,
+                        hcp: adjustedHcp,
+                        realHcp: realHcp,
+                        tripAdjustment: adjustment,
+                        teeName: "",
+                      };
+                    });
+                    setPlayers(tripPlayers);
+                    setCfg(c => ({ ...c, tripContext: { tripId, dayNumber }, _showManualTripPicker: false }));
+                    e.target.value = "";
+                  }}
+                  style={{ ...S.input, fontSize: "13px", padding: "10px 12px" }}
+                  defaultValue="">
+                  <option value="">— Trip & Tag wählen —</option>
+                  {availableTrips.map(trip =>
+                    (trip.days || []).map(day => {
+                      const isMatching = day.date === cfg.date;
                       return (
-                        <div key={tp.playerId} style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px" }}>
-                          <span style={{ flex: 1, color: T.text, fontWeight: 600 }}>{tp.name}</span>
-                          <span className="mono" style={{ color: T.textSoft }}>HCP {realHcp}</span>
-                          {adj !== 0 && (
-                            <>
-                              <span style={{ color: T.textDim }}>→</span>
-                              <span className="mono" style={{ color: T.gold, fontWeight: 700 }}>{adjusted}</span>
-                              <span style={{ fontSize: "10px", color: adj > 0 ? T.double : T.sage, fontWeight: 700 }}>
-                                ({adj > 0 ? "+" : ""}{adj})
-                              </span>
-                            </>
-                          )}
-                        </div>
+                        <option key={`${trip.id}::${day.dayNumber}`} value={`${trip.id}::${day.dayNumber}`}>
+                          {isMatching ? "✨ " : ""}🏖️ {trip.name} — Tag {day.dayNumber} ({fmtDate(day.date)})
+                        </option>
                       );
-                    })}
+                    })
+                  )}
+                </select>
+              </div>
+            );
+          }
+
+          // Aktiver Trip — Anzeige mit Spielerübernahme + Entfernen-Button
+          if (activeTrip && activeDay) {
+            return (
+              <div style={{ ...S.card, marginBottom: "12px", borderColor: `${T.gold}50`, background: `${T.gold}10` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                  <div style={{ ...S.eyebrow, color: T.gold }}>
+                    🏖️ Trip-Zuweisung
                   </div>
-                  <p style={{ fontSize: "10px", color: T.textDim, marginTop: "8px", lineHeight: 1.4, fontStyle: "italic" }}>
-                    Beim Speichern wird die Runde automatisch diesem Trip-Tag zugewiesen.
-                  </p>
-                </>
-              )}
-            </div>
-          );
+                  <button
+                    onClick={() => setCfg(c => ({ ...c, tripContext: null }))}
+                    style={{ background: "transparent", border: "none", color: T.textDim, fontSize: "11px", cursor: "pointer", textDecoration: "underline" }}>
+                    entfernen
+                  </button>
+                </div>
+                <div style={{ fontSize: "14px", color: T.gold, fontWeight: 700, marginBottom: "4px" }}>
+                  {activeTrip.name} · Tag {activeDay.dayNumber}
+                </div>
+                <div style={{ fontSize: "11px", color: T.textSoft, marginBottom: "10px" }}>
+                  {fmtDate(activeDay.date)} · {activeTrip.players?.length || 0} Spieler übernommen
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "4px", padding: "8px", background: T.surface2, borderRadius: "6px" }}>
+                  {(activeTrip.players || []).map(tp => {
+                    const adj = tp.hcpAdjustments?.[activeDay.dayNumber] || 0;
+                    const friend = friends.find(f => f.playerId === tp.playerId || normName(f.name) === normName(tp.name));
+                    const realHcp = friend ? parseFloat(friend.hcp) || 0 : (parseFloat(tp.hcp) || 0);
+                    const adjusted = realHcp + adj;
+                    return (
+                      <div key={tp.playerId} style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px" }}>
+                        <span style={{ flex: 1, color: T.text, fontWeight: 600 }}>{tp.name}</span>
+                        <span className="mono" style={{ color: T.textSoft, fontSize: "10px" }}>
+                          {realHcp.toFixed(1)}
+                          {adj !== 0 && (
+                            <span style={{ color: adj > 0 ? T.double : T.sage, marginLeft: "4px" }}>
+                              {adj > 0 ? "+" : ""}{adj.toFixed(1)}
+                            </span>
+                          )}
+                          {adj !== 0 && <span style={{ color: T.gold, marginLeft: "4px" }}>= {adjusted.toFixed(1)}</span>}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          }
+
+          return null;
         })()}
 
         {/* CLUB */}
@@ -11531,6 +11639,14 @@ function GolfAppInner() {
     const greenHits = current.greenHits || [];
     const closest = current.closest || null;
 
+    // v58: Context — Trip mit Nearest-Pin? Dann ist Header "Nearest-to-Pin"
+    const trip = cfg.tripContext ? trips.find(t => t.id === cfg.tripContext.tripId) : null;
+    const isTripNearest = trip && (trip.pots?.nearestPin || 0) > 0
+                          && gameMode === "stableford";
+    const nearestPot = trip?.pots?.nearestPin || 0;
+    const dialogTitle = isTripNearest ? "Nearest-to-Pin" : "Uschi";
+    const dialogEmoji = isTripNearest ? "🎯" : "🎯";
+
     const toggleGreen = (pid) => {
       const next = greenHits.includes(pid)
         ? greenHits.filter(x => x !== pid)
@@ -11557,55 +11673,114 @@ function GolfAppInner() {
           <SwipeHandle onClose={() => canClose && setUschiPromptHole(null)} />
 
           <div style={{ display: "flex", alignItems: "flex-start", gap: "14px", marginBottom: "16px" }}>
-            <div style={{ fontSize: "32px" }}>🎯</div>
+            <div style={{ fontSize: "32px" }}>{dialogEmoji}</div>
             <div>
               <div className="serif" style={{ fontSize: "22px", color: T.text, lineHeight: 1.1 }}>
-                Uschi · Loch <span style={{ color: T.gold }}>{holeIdx + 1}</span>
+                {dialogTitle} · Loch <span style={{ color: T.gold }}>{holeIdx + 1}</span>
               </div>
               <div style={{ fontSize: "12px", color: T.textSoft, marginTop: "4px" }}>
                 Par {hole.par} · SI {hole.si}
+                {isTripNearest && (
+                  <span style={{ color: T.gold, marginLeft: "8px" }}>
+                    · €{nearestPot}/Spieler
+                  </span>
+                )}
               </div>
             </div>
           </div>
 
-          {/* Step 1: Green hits */}
-          <div style={{ ...S.eyebrow, marginBottom: "8px" }}>1 · Wer hat das Grün getroffen?</div>
-          <div style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px" }}>
-            Auch jene die Par verfehlt haben — das bestimmt ob die Uschi "verbrannt" wird.
-          </div>
-          <div style={{ display: "grid", gap: "6px", marginBottom: "18px" }}>
-            {players.map(p => {
-              const sc = scores[p.id]?.[holeIdx];
-              const isStr = isStrich(sc);
-              const active = greenHits.includes(p.id);
-              return (
-                <button key={p.id} onClick={() => !isStr && toggleGreen(p.id)}
-                  disabled={isStr}
-                  style={{
-                    padding: "12px 14px", textAlign: "left",
-                    background: active ? `${T.sage}15` : T.surface2,
-                    color: isStr ? T.textDim : T.text,
-                    border: `1.5px solid ${active ? T.sage : T.line}`,
-                    borderRadius: "10px",
-                    display: "flex", alignItems: "center", gap: "10px",
-                    opacity: isStr ? 0.5 : 1,
-                  }}>
-                  <div style={{ width: "22px", height: "22px", borderRadius: "5px", background: active ? T.sage : "transparent", border: `1.5px solid ${active ? T.sage : T.lineStrong}`, display: "flex", alignItems: "center", justifyContent: "center", color: T.canvas, fontSize: "13px", fontWeight: 700 }}>
-                    {active ? "✓" : ""}
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: "14px", fontWeight: 600 }}>{p.name}</div>
-                    <div style={{ fontSize: "11px", color: T.textSoft }}>
-                      Score: {isStr ? "Gestrichen" : isValid(sc) ? `${sc} (${scoreLabel(sc, hole.par)})` : "—"}
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
+          {/* v58: Bei Trip-Nearest direkt zu Step 2 — Step 1 nicht relevant */}
+          {!isTripNearest && (
+            <>
+              {/* Step 1: Green hits */}
+              <div style={{ ...S.eyebrow, marginBottom: "8px" }}>1 · Wer hat das Grün getroffen?</div>
+              <div style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px" }}>
+                Auch jene die Par verfehlt haben — das bestimmt ob die Uschi "verbrannt" wird.
+              </div>
+              <div style={{ display: "grid", gap: "6px", marginBottom: "18px" }}>
+                {players.map(p => {
+                  const sc = scores[p.id]?.[holeIdx];
+                  const isStr = isStrich(sc);
+                  const active = greenHits.includes(p.id);
+                  return (
+                    <button key={p.id} onClick={() => !isStr && toggleGreen(p.id)}
+                      disabled={isStr}
+                      style={{
+                        padding: "12px 14px", textAlign: "left",
+                        background: active ? `${T.sage}15` : T.surface2,
+                        color: isStr ? T.textDim : T.text,
+                        border: `1.5px solid ${active ? T.sage : T.line}`,
+                        borderRadius: "10px",
+                        display: "flex", alignItems: "center", gap: "10px",
+                        opacity: isStr ? 0.5 : 1,
+                      }}>
+                      <div style={{ width: "22px", height: "22px", borderRadius: "5px", background: active ? T.sage : "transparent", border: `1.5px solid ${active ? T.sage : T.lineStrong}`, display: "flex", alignItems: "center", justifyContent: "center", color: T.canvas, fontSize: "13px", fontWeight: 700 }}>
+                        {active ? "✓" : ""}
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: "14px", fontWeight: 600 }}>{p.name}</div>
+                        <div style={{ fontSize: "11px", color: T.textSoft }}>
+                          Score: {isStr ? "Gestrichen" : isValid(sc) ? `${sc} (${scoreLabel(sc, hole.par)})` : "—"}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
 
-          {/* Step 2: Closest - only if at least one green hit */}
-          {greenHits.length > 0 && (
+          {/* v58: Bei Trip-Nearest — direkt Step für Closest mit allen Spielern */}
+          {isTripNearest && (
+            <>
+              <div style={{ ...S.eyebrow, marginBottom: "8px" }}>Wer war Nearest-to-Pin? 🎯</div>
+              <div style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px" }}>
+                Wähle den Sieger — alle anderen zahlen je €{nearestPot}.
+              </div>
+              <div style={{ display: "grid", gap: "6px", marginBottom: "12px" }}>
+                {players.map(p => {
+                  const active = closest === p.id;
+                  const sc = scores[p.id]?.[holeIdx];
+                  return (
+                    <button key={p.id} onClick={() => {
+                      // Bei Trip-Nearest: setze direkt closest und alle als greenHit (für Konsistenz mit par3Data)
+                      setPar3Data({
+                        ...par3Data,
+                        [holeIdx]: {
+                          greenHits: closest === p.id ? [] : [p.id],
+                          closest: closest === p.id ? null : p.id,
+                        },
+                      });
+                    }}
+                      style={{
+                        padding: "12px 14px", textAlign: "left",
+                        background: active ? `${T.gold}15` : T.surface2,
+                        color: T.text,
+                        border: `1.5px solid ${active ? T.gold : T.line}`,
+                        borderRadius: "10px",
+                        display: "flex", alignItems: "center", gap: "10px",
+                      }}>
+                      <div style={{ width: "22px", height: "22px", borderRadius: "50%", background: active ? T.gold : "transparent", border: `1.5px solid ${active ? T.gold : T.lineStrong}`, display: "flex", alignItems: "center", justifyContent: "center", color: T.canvas, fontSize: "13px", fontWeight: 700 }}>
+                        {active ? "✓" : ""}
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: "14px", fontWeight: 600 }}>{p.name}</div>
+                        <div style={{ fontSize: "11px", color: T.textSoft }}>
+                          {isValid(sc) ? `${sc} (${scoreLabel(sc, hole.par)})` : "—"}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ fontSize: "11px", color: T.textDim, marginBottom: "12px", lineHeight: 1.5, fontStyle: "italic", textAlign: "center" }}>
+                Niemand Nearest? Einfach niemanden auswählen und speichern.
+              </div>
+            </>
+          )}
+
+          {/* Step 2: Closest - only if at least one green hit (NICHT bei Trip-Nearest) */}
+          {!isTripNearest && greenHits.length > 0 && (
             <>
               <div style={{ ...S.eyebrow, marginBottom: "8px" }}>2 · Wer war am nächsten zur Fahne?</div>
               <div style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px" }}>
@@ -11635,8 +11810,8 @@ function GolfAppInner() {
             </>
           )}
 
-          {/* If no green hits */}
-          {greenHits.length === 0 && (
+          {/* If no green hits — Uschi-Hinweis */}
+          {!isTripNearest && greenHits.length === 0 && (
             <div style={{ background: `${T.bogey}15`, border: `1px solid ${T.bogey}40`, borderRadius: "10px", padding: "12px 14px", marginBottom: "12px", fontSize: "12px", color: T.bogey, lineHeight: 1.4 }}>
               ⚠️ Wenn niemand das Grün getroffen hat, wird die Uschi zum nächsten Par 3 weitervererbt (Doppel-Uschi).
             </div>
@@ -11646,7 +11821,7 @@ function GolfAppInner() {
             <button onClick={clearAll} style={{ ...S.btnGhost, flex: 1, color: T.textSoft }}>
               Zurücksetzen
             </button>
-            <button onClick={() => {
+            <button onClick={async () => {
                 // CRITICAL: always persist the current state, even if nobody hit the green.
                 // Without this, an empty {greenHits:[], closest:null} entry is missing
                 // and the carry-over logic cannot track that this par-3 was resolved as "nobody hit".
@@ -11654,12 +11829,29 @@ function GolfAppInner() {
                   ...prev,
                   [holeIdx]: { greenHits: [...greenHits], closest: closest || null },
                 }));
+                // v58: Bei Trip-Nearest auch in trip.nearestPins eintragen
+                if (isTripNearest && trip) {
+                  // Wenn die Runde noch nicht gespeichert wurde, erst saveRound aufrufen
+                  // saveRound returnt jetzt das savedRound-Objekt mit id
+                  let rId = loadedRoundId;
+                  if (!rId) {
+                    const saved = await saveRound();
+                    rId = saved?.id || null;
+                  }
+                  if (rId) {
+                    const key = `${rId}::${holeIdx}`;
+                    await setNearestPinWinner(trip.id, key, closest || null);
+                  }
+                }
                 setUschiPromptHole(null);
               }}
               className={canClose ? "gold-hover" : ""}
               disabled={!canClose}
               style={{ ...S.btnPrimary, flex: 2, opacity: canClose ? 1 : 0.4 }}>
-              {greenHits.length === 0 ? "Niemand trifft → Speichern" : "Speichern"}
+              {isTripNearest
+                ? (closest ? "✓ Sieger speichern" : "Niemand → Speichern")
+                : (greenHits.length === 0 ? "Niemand trifft → Speichern" : "Speichern")
+              }
             </button>
           </div>
         </div>
