@@ -715,6 +715,12 @@ const ARCHIVE_RETENTION_DAYS = 30;
 
 async function archivePush(round, syncCode) {
   if (!SYNC_ENABLED || !round?.id) return false;
+  // v58-fix: Sanitize round data — verhindert zirkuläre Refs
+  const cleanRound = sanitizeForJson(round);
+  if (cleanRound.__error) {
+    console.error("archivePush sanitize failed:", cleanRound.__error);
+    return false;
+  }
   try {
     const res = await fetch(`${SUPABASE_URL}/rest/v1/rounds_archive`, {
       method: "POST",
@@ -728,7 +734,7 @@ async function archivePush(round, syncCode) {
         id: round.id,
         owner_email: ARCHIVE_OWNER_EMAIL,
         sync_code: syncCode || "",
-        round_data: round,
+        round_data: cleanRound,
         last_modified: new Date().toISOString(),
       }),
     });
@@ -1355,6 +1361,19 @@ const sfNetto    = (g, hs, par) => {
 };
 const sfBrutto   = (g, par)     => isStrich(g) ? 0 : (isValid(g) ? Math.max(0, par - g + 2) : null);
 
+// ── v58: 9-Loch-SF auf 18-Loch normalisieren ──
+// Offizielle WHS-Regel (Deutschland/Österreich): bei 9-Loch-Runden werden für die
+// nicht gespielten 9 Löcher 18 Stableford-Punkte hinzugefügt (handicap-neutral,
+// also als hätte man "Spielvorgabe genau erreicht" gespielt).
+// Quelle: golf-schule.com, gut-heckenhof.de, golfclubabenberg.de
+//
+// Verwendung: für Best-SF-Vergleiche, Saison-Stats, Form-Tab
+// NICHT für: Live-Anzeige während der Runde (da wollen wir den echten 9-Loch-Wert)
+function sfNormalized(sfRaw, numHoles) {
+  if (numHoles === 9) return (sfRaw || 0) + 18;
+  return sfRaw || 0;
+}
+
 // ── v34: Total Strokes — Summe aller Schläge pro Spieler ──
 // Manueller Strich zählt mit Cap-Wert (Par + Vorgabeschläge + 2).
 // Manuelle Eingabe (auch ≥ Cap, z.B. 10) zählt mit echtem Wert.
@@ -1925,7 +1944,9 @@ function computeSimHcp(playerNameOrId, allRounds, fallbackName) {
     // v53: Lockerere Schwelle — entweder ≥50% der Runde ODER ≥5 Löcher
     const minPlayed = Math.min(Math.ceil(holes.length * 0.5), 5);
     if (played >= minPlayed) {
-      const normalizedSf = holes.length === 9 ? sfTotal * 2 : sfTotal;
+      // v58: Offizielle WHS-Hochrechnung — bei 9-Loch +18 SF (handicap-neutral)
+      // statt × 2 (was zu optimistisch war für gut gespielte 9-Loch-Runden)
+      const normalizedSf = sfNormalized(sfTotal, holes.length);
       sfList.push(normalizedSf);
     } else {
       droppedRounds.push({ date: r.cfg?.date, reason: `nur ${played}/${holes.length} Löcher gespielt` });
@@ -2096,7 +2117,10 @@ function aggregateClubStats(clubName, allRounds) {
         }
       });
 
-      pm.sfList.push({ score: roundSF, date: roundDate });
+      // v58: 9-Loch-Runden auf 18-Loch normalisieren für faire Vergleiche
+      const isNineHole = (holes.length === 9);
+      const normalizedRoundSF = isNineHole ? roundSF + 18 : roundSF;
+      pm.sfList.push({ score: normalizedRoundSF, rawScore: roundSF, date: roundDate, is9L: isNineHole });
 
       // Aggregate ladies for this player from this round's ladies map
       const rLadies = r.ladies || {};
@@ -6961,7 +6985,7 @@ function GolfAppInner() {
   const renderHome = () => {
     const totalRounds = rounds.length;
     const clubsPlayed = new Set(rounds.map(r => r.cfg.clubName).filter(Boolean)).size;
-    const bestSF = rounds.reduce((max, r) => {
+    const bestSFData = rounds.reduce((max, r) => {
       const rClub = r.selectedClubSnapshot || allClubs.find(c => c.name === r.cfg.clubName);
       const par = sumPar(r.holes);
       const stats = r.players.map(p => {
@@ -6969,14 +6993,21 @@ function GolfAppInner() {
         if (!tee) return 0;
         // v36: resolvePlayerPH konsistent zu allen anderen Stellen
         const ph = resolvePlayerPH(p, r.cfg, rClub, par).ph;
-        return r.holes.reduce((s, h, i) => {
+        const sfRaw = r.holes.reduce((s, h, i) => {
           const g = r.scores[p.id]?.[i];
           const hs = holeHS(ph, h.si, r.cfg.numHoles);
           return s + (sfNetto(g, hs, h.par) || 0);
         }, 0);
+        // v58: 9-Loch-Runden auf 18-Loch normalisieren (+18 für nicht gespielte Löcher)
+        return sfNormalized(sfRaw, r.cfg.numHoles);
       });
-      return Math.max(max, ...stats, 0);
-    }, 0);
+      const roundMax = Math.max(...stats, 0);
+      if (roundMax > max.value) {
+        return { value: roundMax, is9L: r.cfg.numHoles === 9, clubName: r.cfg.clubName };
+      }
+      return max;
+    }, { value: 0, is9L: false, clubName: null });
+    const bestSF = bestSFData.value;
 
     return (
       <div className="fade-in">
@@ -7194,18 +7225,25 @@ function GolfAppInner() {
               {[
                 { label: "Runden", value: totalRounds, action: () => setTab("rounds") },
                 { label: "Clubs", value: clubsPlayed, action: () => setShowClubsModal(true) },
-                { label: "Bester SF", value: bestSF || "—", accent: true, action: () => setTab("stats") },
+                { label: "Bester SF", value: bestSF || "—", accent: true, badge: bestSFData.is9L ? "9L*" : null, action: () => setTab("stats") },
               ].map((s,i,arr) => (
                 <button key={s.label}
                   onClick={s.action}
+                  title={s.badge ? "Bester SF aus 9-Loch-Runde — auf 18 Loch hochgerechnet (+18 Punkte für nicht gespielte 9 Löcher, WHS-konform)" : undefined}
                   style={{
                     padding: "14px 8px", textAlign: "center",
                     borderRight: i < arr.length-1 ? `1px solid ${T.line}` : "none",
                     background: "transparent", border: "none",
                     cursor: "pointer", color: "inherit",
                     fontFamily: "inherit",
+                    position: "relative",
                   }}>
-                  <div className="mono" style={{ fontSize: "22px", fontWeight: 700, color: s.accent ? T.gold : T.text }}>{s.value}</div>
+                  <div className="mono" style={{ fontSize: "22px", fontWeight: 700, color: s.accent ? T.gold : T.text }}>
+                    {s.value}
+                    {s.badge && (
+                      <span style={{ fontSize: "9px", color: T.textDim, marginLeft: "3px", verticalAlign: "super" }}>{s.badge}</span>
+                    )}
+                  </div>
                   <div style={{ ...S.eyebrow, marginTop: "4px", fontSize: "9px" }}>{s.label}</div>
                 </button>
               ))}
@@ -13073,44 +13111,76 @@ WICHTIG:
   const renderCleanupModal = () => {
     if (!showCleanup) return null;
 
-    // Heuristiken
-    const isTestRound = (r) => {
-      const players = r.players || [];
-      return players.length <= 1 && (r.scores ? Object.values(r.scores).every(s => Object.keys(s || {}).length === 0) : true);
-    };
-    const hasBadName = (r) => {
-      const club = (r.cfg?.clubName || "").trim().toLowerCase();
-      return /^(test|asdf|qwer|123|abc|xxx|aaaa)$/.test(club) || club === "";
-    };
-    const isUnfinished = (r) => {
-      const holes = r.holes || [];
-      if (holes.length === 0) return true;
-      const players = r.players || [];
-      if (players.length === 0) return true;
-      // Prüfe ob mindestens ein Spieler weniger als 50% gespielt hat
-      const someUnfinished = players.some(p => {
-        let played = 0;
-        holes.forEach((h, i) => {
-          const g = r.scores?.[p.id]?.[i];
-          if (isValid(g) || isStrich(g)) played++;
-        });
-        return played < holes.length * 0.5;
-      });
-      // Aber NICHT zählen wenn die Runde "läuft" (resumeRoundId)
-      if (r.id === resumeRoundId) return false;
-      return someUnfinished;
-    };
-    const isEmptyTrip = (t) => {
-      const days = t.days || [];
-      const noRounds = days.every(d => (d.roundIds || []).length === 0);
-      return noRounds && (t.players || []).length === 0;
+    // v58: DEFENSIV — alle Heuristiken in try-catch packen damit ein einzelner
+    // korrupter Eintrag nicht das ganze Modal crashen lässt
+    const safeJSON = (v) => {
+      try { return v && typeof v === "object" ? v : {}; } catch { return {}; }
     };
 
-    // Kandidaten sammeln
-    const testCandidates = rounds.filter(isTestRound);
-    const badNameCandidates = rounds.filter(r => !isTestRound(r) && hasBadName(r));
-    const unfinishedCandidates = rounds.filter(r => !isTestRound(r) && !hasBadName(r) && isUnfinished(r));
-    const emptyTripCandidates = trips.filter(isEmptyTrip);
+    // Heuristiken
+    const isTestRound = (r) => {
+      try {
+        if (!r || typeof r !== "object") return false;
+        const players = Array.isArray(r.players) ? r.players : [];
+        const scores = safeJSON(r.scores);
+        if (players.length > 1) return false;
+        // Prüfe ob scores leer ist
+        const scoreValues = Object.values(scores);
+        if (scoreValues.length === 0) return true;
+        return scoreValues.every(s => {
+          const obj = safeJSON(s);
+          return Object.keys(obj).length === 0;
+        });
+      } catch (e) { console.error("isTestRound error:", e, r?.id); return false; }
+    };
+    const hasBadName = (r) => {
+      try {
+        if (!r || typeof r !== "object") return false;
+        const club = ((r.cfg?.clubName || "") + "").trim().toLowerCase();
+        return /^(test|asdf|qwer|123|abc|xxx|aaaa)$/.test(club) || club === "";
+      } catch (e) { console.error("hasBadName error:", e, r?.id); return false; }
+    };
+    const isUnfinished = (r) => {
+      try {
+        if (!r || typeof r !== "object") return false;
+        const holes = Array.isArray(r.holes) ? r.holes : [];
+        if (holes.length === 0) return true;
+        const players = Array.isArray(r.players) ? r.players : [];
+        if (players.length === 0) return true;
+        const scores = safeJSON(r.scores);
+        // Prüfe ob mindestens ein Spieler weniger als 50% gespielt hat
+        const someUnfinished = players.some(p => {
+          if (!p || !p.id) return false;
+          let played = 0;
+          holes.forEach((h, i) => {
+            const playerScores = safeJSON(scores[p.id]);
+            const g = playerScores[i];
+            if (isValid(g) || isStrich(g)) played++;
+          });
+          return played < holes.length * 0.5;
+        });
+        // v58-fix: Aber NICHT zählen wenn die Runde gerade in Bearbeitung ist (loadedRoundId)
+        if (r.id === loadedRoundId) return false;
+        return someUnfinished;
+      } catch (e) { console.error("isUnfinished error:", e, r?.id); return false; }
+    };
+    const isEmptyTrip = (t) => {
+      try {
+        if (!t || typeof t !== "object") return false;
+        const days = Array.isArray(t.days) ? t.days : [];
+        const noRounds = days.every(d => !d || !Array.isArray(d.roundIds) || d.roundIds.length === 0);
+        const noPlayers = !Array.isArray(t.players) || t.players.length === 0;
+        return noRounds && noPlayers;
+      } catch (e) { console.error("isEmptyTrip error:", e, t?.id); return false; }
+    };
+
+    // Kandidaten sammeln — defensiv
+    const safeRounds = Array.isArray(rounds) ? rounds : [];
+    const safeTrips = Array.isArray(trips) ? trips : [];
+    const testCandidates = safeRounds.filter(isTestRound);
+    const badNameCandidates = safeRounds.filter(r => !isTestRound(r) && hasBadName(r));
+    const unfinishedCandidates = safeRounds.filter(r => !isTestRound(r) && !hasBadName(r) && isUnfinished(r));
+    const emptyTripCandidates = safeTrips.filter(isEmptyTrip);
 
     // Was zum Aufräumen ausgewählt?
     const toCleanRounds = [
@@ -16358,7 +16428,15 @@ WICHTIG:
                               const newRounds = [recoveredRound, ...rounds];
                               setRounds(newRounds);
                               try { await window.storage.set("golf-rounds", JSON.stringify(newRounds)); } catch {}
-                              alert(`✅ Runde wiederhergestellt!\n\n${club} · ${dat}\n${numH} Loch · ${numP} Spieler\n${scoreCount} Scores`);
+                              // v58-fix: SOFORT in Cloud pushen — verhindert Daten-Verlust bei Crash
+                              if (SYNC_ENABLED && syncCode) {
+                                try {
+                                  await cloudPushRound(syncCode, recoveredRound, deviceId);
+                                  // Auch im Legacy-Blob speichern als Backup
+                                  await cloudPush(syncCode, { rounds: newRounds, friends, customClubs, trips, ownerProfile, goals });
+                                } catch (e) { console.warn("Recovery cloud-push failed:", e); }
+                              }
+                              alert(`✅ Runde wiederhergestellt!\n\n${club} · ${dat}\n${numH} Loch · ${numP} Spieler\n${scoreCount} Scores\n\n${SYNC_ENABLED && syncCode ? "✓ In Cloud gesichert" : ""}`);
                             }}
                             style={{ ...S.btnSecondary, fontSize: "10px", padding: "5px 10px", color: T.gold, borderColor: `${T.gold}60` }}>
                             ⬇️ In meine Runden importieren
@@ -16437,7 +16515,14 @@ WICHTIG:
                       const newRounds = [recoveredRound, ...rounds];
                       setRounds(newRounds);
                       try { await window.storage.set("golf-rounds", JSON.stringify(newRounds)); } catch {}
-                      alert(`✅ Runde wiederhergestellt!\n\n${club} · ${date}\n${numHoles} Loch · ${(d.players || []).length} Spieler\n${scoreCount} Scores`);
+                      // v58-fix: SOFORT in Cloud pushen
+                      if (SYNC_ENABLED && syncCode) {
+                        try {
+                          await cloudPushRound(syncCode, recoveredRound, deviceId);
+                          await cloudPush(syncCode, { rounds: newRounds, friends, customClubs, trips, ownerProfile, goals });
+                        } catch (e) { console.warn("Recovery cloud-push failed:", e); }
+                      }
+                      alert(`✅ Runde wiederhergestellt!\n\n${club} · ${date}\n${numHoles} Loch · ${(d.players || []).length} Spieler\n${scoreCount} Scores${SYNC_ENABLED && syncCode ? "\n\n✓ In Cloud gesichert" : ""}`);
                     } catch (e) {
                       alert("Fehler beim Wiederherstellen: " + (e.message || "?"));
                     }
@@ -16489,7 +16574,16 @@ WICHTIG:
                       );
                       setRounds(newRounds);
                       try { await window.storage.set("golf-rounds", JSON.stringify(newRounds)); } catch {}
-                      alert(`✅ ${withIds.length} Runde(n) importiert!`);
+                      // v58-fix: SOFORT in Cloud pushen
+                      if (SYNC_ENABLED && syncCode) {
+                        try {
+                          for (const r of withIds) {
+                            await cloudPushRound(syncCode, r, deviceId);
+                          }
+                          await cloudPush(syncCode, { rounds: newRounds, friends, customClubs, trips, ownerProfile, goals });
+                        } catch (e) { console.warn("Import cloud-push failed:", e); }
+                      }
+                      alert(`✅ ${withIds.length} Runde(n) importiert!${SYNC_ENABLED && syncCode ? "\n\n✓ In Cloud gesichert" : ""}`);
                     } catch (e) {
                       alert("❌ Fehler beim Parsen: " + (e.message || "?"));
                     }
