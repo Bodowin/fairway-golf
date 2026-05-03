@@ -3556,17 +3556,34 @@ function computeUschiPoints(players, holes, scores, adjStrokes, par3Data) {
  * - Optional: Birdie-Bonus (+1)
  * - Optional: Uschi-Mechanik mit Verbrennung (wie Uschi-Modus)
  *
+ * v58: Optional 2vs2-Modus via teams-Parameter:
+ * - teams = { A: [pid, pid], B: [pid, pid] }
+ * - Bestes Team-Mitglied (Netto-SF) zählt für das Team
+ * - Team mit besserem Score holt das Loch (+1 Team-Punkt für jeden Team-Spieler)
+ * - Birdie-Bonus bleibt individuell
+ *
  * config: { birdieBonus: bool, uschiBonus: bool }
  */
-function computeBestBallPlusPoints(players, holes, scores, adjStrokes, par3Data, config) {
+function computeBestBallPlusPoints(players, holes, scores, adjStrokes, par3Data, config, teams) {
   const cfg = config || { birdieBonus: true, uschiBonus: false };
   const strokesByPid = {};
   adjStrokes.forEach(a => { strokesByPid[a.playerId] = a.perHole; });
+
+  // v58: Team-Modus erkannt wenn teams-Objekt mit beiden Teams vorhanden
+  const isTeamMode = teams && Array.isArray(teams.A) && teams.A.length > 0
+                            && Array.isArray(teams.B) && teams.B.length > 0;
+  const teamOf = {};
+  if (isTeamMode) {
+    teams.A.forEach(p => { teamOf[p] = "A"; });
+    teams.B.forEach(p => { teamOf[p] = "B"; });
+  }
 
   const totals = {};
   players.forEach(p => {
     totals[p.id] = { total: 0, best: 0, birdies: 0, uschi: 0 };
   });
+  // v58: Team-Totals (separat)
+  const teamTotals = isTeamMode ? { A: 0, B: 0 } : null;
 
   const perHole = [];
   let carry = 1;
@@ -3597,7 +3614,37 @@ function computeBestBallPlusPoints(players, holes, scores, adjStrokes, par3Data,
     });
 
     // v50: Bester Netto-SF holt +1 (Tie: alle Tied bekommen +1)
-    if (sfList.length >= 1) {
+    // v58: Team-Modus — bestes Team-Mitglied vs bestes Team-Mitglied
+    if (isTeamMode) {
+      // Bester Spieler je Team finden
+      const teamABest = sfList.filter(x => teamOf[x.pid] === "A").reduce((m, x) => x.sf > m ? x.sf : m, -Infinity);
+      const teamBBest = sfList.filter(x => teamOf[x.pid] === "B").reduce((m, x) => x.sf > m ? x.sf : m, -Infinity);
+      // Beide Teams haben einen gespielt? (mindestens einer)
+      const teamAPlayed = isFinite(teamABest);
+      const teamBPlayed = isFinite(teamBBest);
+      let winningTeam = null;
+      if (teamAPlayed && teamBPlayed) {
+        if (teamABest > teamBBest) winningTeam = "A";
+        else if (teamBBest > teamABest) winningTeam = "B";
+        // Tie → kein Punkt für beide
+      } else if (teamAPlayed && !teamBPlayed) winningTeam = "A";
+      else if (teamBPlayed && !teamAPlayed) winningTeam = "B";
+
+      if (winningTeam) {
+        // Beide Spieler des gewinnenden Teams kriegen den Punkt (Loch geholt)
+        teamTotals[winningTeam] += 1;
+        (teams[winningTeam] || []).forEach(pid => {
+          // Loch-Punkte für UI auf den Top-Scorer des gewinnenden Teams
+          // (die Anzeige bleibt pro Spieler verständlich)
+          const isBest = sfList.find(x => x.pid === pid)?.sf === (winningTeam === "A" ? teamABest : teamBBest);
+          if (isBest) {
+            holePoints[pid] += 1;
+            totals[pid].best += 1;
+            holeBreakdown[pid].best = true;
+          }
+        });
+      }
+    } else if (sfList.length >= 1) {
       const bestSf = Math.max(...sfList.map(x => x.sf));
       // Nur vergeben wenn der beste > 0 ist (also wirklich Punkte gemacht wurden)
       if (bestSf > 0) {
@@ -3667,7 +3714,7 @@ function computeBestBallPlusPoints(players, holes, scores, adjStrokes, par3Data,
     players.forEach(p => { totals[p.id].total += holePoints[p.id]; });
   }
 
-  return { perHole, totals, carry, openUschi };
+  return { perHole, totals, carry, openUschi, teamTotals, isTeamMode };
 }
 
 /**
@@ -3972,10 +4019,12 @@ function GolfAppInner() {
   // v48+v50+v52: Best Ball+ Config — Loch-für-Loch ohne Minus
   // Always Netto. Bonus-Toggles sind optional.
   // hcpMode: "adjusted" = 0.8-Regel (Best Ball Standard), "normal" = volle HCPs für alle
+  // v58: teamMode = 2vs2 statt Free-for-All (nur bei 4 Spielern verfügbar)
   const [bestBallConfig, setBestBallConfig] = useState({
     birdieBonus: true,    // Brutto-Birdie als +1 Bonus
     uschiBonus: false,    // Uschi-Verbrennungs-Mechanik bei Par-3 (wie Uschi-Modus)
     hcpMode: "adjusted",  // "adjusted" = 0.8-Regel | "normal" = volle HCPs
+    teamMode: false,      // v58: 2vs2 Team-Modus (statt Free-for-All)
   });
   const [showBestBallExplain, setShowBestBallExplain] = useState(false);
   const [teams, setTeams] = useState(null); // { A: [pid], B: [pid], nameA?, nameB? } | null
@@ -5684,14 +5733,19 @@ function GolfAppInner() {
   }, [gameMode, uschiResult, teams]);
 
   // v48+v50+v52: Best Ball+ — Loch-für-Loch Logik (wie Uschi aber ohne Minus)
+  // v58: Optional 2vs2-Modus wenn Team-Mode aktiv und 4 Spieler
   const bestBallResult = useMemo(() => {
     if (gameMode !== "bestball-plus" || players.length < 2) return null;
     // v52: hcpMode "adjusted" = 0.8-Regel (wie Uschi), "normal" = volle HCPs
     const strokes = bestBallConfig.hcpMode === "normal"
       ? normalHcpStrokes(players, cfg, selectedClub, holes)
       : uschiStrokes;
-    return computeBestBallPlusPoints(players, holes, scores, strokes, par3Data, bestBallConfig);
-  }, [gameMode, players, holes, scores, uschiStrokes, par3Data, bestBallConfig, cfg, selectedClub]);
+    // v58: Team-Modus aktiv? Nur bei 4 Spielern + bestBallConfig.teamMode + gültige teams
+    const useTeams = bestBallConfig.teamMode && players.length === 4
+                     && teams && teams.A?.length === 2 && teams.B?.length === 2
+                     ? teams : null;
+    return computeBestBallPlusPoints(players, holes, scores, strokes, par3Data, bestBallConfig, useTeams);
+  }, [gameMode, players, holes, scores, uschiStrokes, par3Data, bestBallConfig, cfg, selectedClub, teams]);
 
   // v52: Best Ball+ Strokes für UI-Anzeige (welche Strokes der Spieler bekommt)
   const bestBallStrokes = useMemo(() => {
@@ -7555,18 +7609,34 @@ function GolfAppInner() {
 
             // ─── v55: Spieler-Brille — alle Form-Daten beziehen sich auf den ausgewählten Spieler ───
             const realOwnerName = ownerProfile?.name;
-            // Sammle alle Spieler die in Runden vorkamen (für Selector)
+            // v58-fix: Sammle alle Spieler die in Runden vorkamen — IMMER über NORMNAME deduplizieren,
+            // damit gleiche Personen mit verschiedenen playerIds (z.B. mal als Friend, mal Ad-hoc) zusammengefasst werden
             const allPlayersMap = new Map();
             rounds.forEach(r => (r.players || []).forEach(p => {
-              const key = p.playerId || `n:${normName(p.name)}`;
-              if (!allPlayersMap.has(key)) {
+              const nameKey = normName(p.name);
+              if (!nameKey) return; // Skip leere Namen
+              if (!allPlayersMap.has(nameKey)) {
+                // Zähle Runden in denen dieser Spieler (per Name) vorkommt
                 let count = 0;
+                let bestPlayerId = p.playerId || null;
+                let bestHcp = p.hcp;
+                let displayName = p.name;
                 rounds.forEach(rr => {
-                  if ((rr.players || []).some(pp =>
-                    (p.playerId && pp.playerId === p.playerId) || normName(pp.name) === normName(p.name)
-                  )) count++;
+                  const matchInRound = (rr.players || []).find(pp => normName(pp.name) === nameKey);
+                  if (matchInRound) {
+                    count++;
+                    // Behalte beste Daten — bevorzuge Friend-ID falls vorhanden, neueres HCP
+                    if (matchInRound.playerId && !bestPlayerId) bestPlayerId = matchInRound.playerId;
+                    if (typeof matchInRound.hcp === "number") bestHcp = matchInRound.hcp;
+                  }
                 });
-                allPlayersMap.set(key, { name: p.name, key, playerId: p.playerId || null, count, hcp: p.hcp });
+                allPlayersMap.set(nameKey, {
+                  name: displayName,
+                  key: nameKey, // konsistent: immer Name-basiert für Selector
+                  playerId: bestPlayerId,
+                  count,
+                  hcp: bestHcp,
+                });
               }
             }));
             const allPlayersList = Array.from(allPlayersMap.values()).sort((a, b) => b.count - a.count);
@@ -7578,7 +7648,15 @@ function GolfAppInner() {
             let isViewingOwner = true;
 
             if (formViewPlayer) {
-              const p = allPlayersList.find(x => x.key === formViewPlayer);
+              // v58-fix: Lookup über key (=nameKey), aber auch alten playerId-basierten Key migrieren
+              let p = allPlayersList.find(x => x.key === formViewPlayer);
+              // Fallback: alter Key war evtl. eine playerId — finde zugehörigen Eintrag über playerId
+              if (!p) p = allPlayersList.find(x => x.playerId === formViewPlayer);
+              // Fallback 2: alter Key war "n:NAME" — finde über normName
+              if (!p && formViewPlayer.startsWith("n:")) {
+                const oldName = formViewPlayer.slice(2);
+                p = allPlayersList.find(x => x.key === oldName);
+              }
               if (p) {
                 viewPlayerName = p.name;
                 viewPlayerKey = p.playerId || p.name;
@@ -7618,8 +7696,10 @@ function GolfAppInner() {
                   sfTotal += sfNetto(g, hs, h.par) || 0;
                 });
                 if (played < r.holes.length * 0.5) return null;
-                const normalized = r.holes.length === 9 ? sfTotal * 2 : sfTotal;
-                return { sf: normalized, date: r.cfg?.date || r.savedAt, club: r.cfg?.clubName };
+                // v58-fix: Offizielle WHS-Hochrechnung — bei 9-Loch +18 SF (handicap-neutral)
+                const is9L = r.holes.length === 9;
+                const normalized = sfNormalized(sfTotal, r.holes.length);
+                return { sf: normalized, rawSf: sfTotal, is9L, date: r.cfg?.date || r.savedAt, club: r.cfg?.clubName };
               })
               .filter(Boolean) : [];
 
@@ -7834,8 +7914,11 @@ function GolfAppInner() {
                   sf += sfNetto(g, hs, h.par) || 0;
                 });
                 if (played < r.holes.length * 0.5) return null;
+                // v58-fix: Offizielle WHS-Hochrechnung — bei 9-Loch +18 SF (handicap-neutral)
                 return {
-                  sf: r.holes.length === 9 ? sf * 2 : sf,
+                  sf: sfNormalized(sf, r.holes.length),
+                  rawSf: sf,
+                  is9L: r.holes.length === 9,
                   date: new Date(r.cfg?.date || r.savedAt || 0).getTime(),
                   club: r.cfg?.clubName,
                 };
@@ -8016,7 +8099,18 @@ function GolfAppInner() {
                                   background: T.surface2,
                                   borderRadius: "6px",
                                   border: `1px solid ${r.sf >= 36 ? T.sage + "40" : T.line}`,
-                                }}>
+                                  position: "relative",
+                                }}
+                                title={r.is9L ? `9-Loch-Runde · ${r.rawSf} SF gespielt + 18 (für nicht gespielte Löcher) = ${r.sf} (auf 18L hochgerechnet, WHS-konform)` : undefined}
+                                >
+                                  {/* v58: 9L-Badge in der Ecke wenn 9-Loch-Runde */}
+                                  {r.is9L && (
+                                    <span style={{
+                                      position: "absolute", top: "2px", right: "3px",
+                                      fontSize: "8px", color: T.sage, fontWeight: 700,
+                                      letterSpacing: "0.04em",
+                                    }}>9L</span>
+                                  )}
                                   <div className="mono" style={{
                                     fontSize: "16px", fontWeight: 700, lineHeight: 1,
                                     color: r.sf >= 36 ? T.sage : r.sf >= 30 ? T.gold : T.textSoft,
@@ -8553,6 +8647,16 @@ function GolfAppInner() {
           {top && !isNotStarted && (
             <div style={{ textAlign: "right", marginTop: "4px" }}>
               <div className="mono" style={{ fontSize: "20px", fontWeight: 700, color: T.gold, lineHeight: 1 }}>{top.sfNT}</div>
+              {/* v58: 9-Loch-Hochrechnung transparent anzeigen — 13 → +18 = 31 */}
+              {r.cfg.numHoles === 9 && top.sfNT > 0 && (
+                <div
+                  className="mono"
+                  title="9-Loch-Hochrechnung auf 18 Loch (handicap-neutral, WHS-konform): +18 Punkte für die nicht gespielten 9 Löcher"
+                  style={{ fontSize: "10px", color: T.textDim, fontStyle: "italic", marginTop: "1px" }}
+                >
+                  → 18L: {top.sfNT + 18}
+                </div>
+              )}
               <div style={{ fontSize: "9px", color: T.textDim, letterSpacing: "0.06em", marginTop: "2px" }}>SF NETTO</div>
             </div>
           )}
@@ -8632,8 +8736,26 @@ function GolfAppInner() {
                 );
               })()}
             </div>
-            <div style={{ fontSize: "11px", color: T.textSoft, marginBottom: "4px" }}>
-              {fmtDate(r.cfg.date)} · {r.cfg.numHoles}L
+            <div style={{ fontSize: "11px", color: T.textSoft, marginBottom: "4px", display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+              <span>{fmtDate(r.cfg.date)}</span>
+              <span style={{ color: T.textDim }}>·</span>
+              {/* v58: 9L mit Tooltip-Hinweis dass +18 für 18-Loch-Vergleiche addiert werden */}
+              {r.cfg.numHoles === 9 ? (
+                <span
+                  title="9-Loch-Runde — für Statistik-Vergleiche werden +18 Punkte addiert (handicap-neutrale Hochrechnung, WHS-konform)"
+                  style={{
+                    fontSize: "10px", padding: "1px 5px",
+                    background: `${T.sage}20`, color: T.sage,
+                    border: `1px solid ${T.sage}40`,
+                    borderRadius: "4px", fontWeight: 700,
+                    letterSpacing: "0.04em",
+                  }}
+                >
+                  9L
+                </span>
+              ) : (
+                <span>{r.cfg.numHoles}L</span>
+              )}
             </div>
             {/* Player initials with winner highlighted */}
             {!isNotStarted && sortedPlayers.length > 0 && (
@@ -8728,7 +8850,10 @@ function GolfAppInner() {
                     const strokes = uschiAdjustedStrokes(players, cfg, selectedClub, holes);
                     setTeams(autoAssignTeams(strokes));
                   }
-                  if (m.k === "stableford" || m.k === "bestball-plus") setTeams(null);
+                  // v58: Best Ball+ behält teams (für Team-Mode-Toggle)
+                  if (m.k === "stableford") setTeams(null);
+                  // Bei "uschi-single" ebenfalls Teams resetten — der Modus braucht keine
+                  if (m.k === "uschi-single") setTeams(null);
                 }}
                 style={{
                   padding: "14px 16px", textAlign: "left",
@@ -8760,6 +8885,8 @@ function GolfAppInner() {
 
         {/* Team Assignment UI */}
         {gameMode === "uschi-team" && canTeam && renderTeamAssignmentUI()}
+        {/* v58: Team-Assignment auch bei Best Ball+ Team-Mode */}
+        {gameMode === "bestball-plus" && bestBallConfig.teamMode && players.length === 4 && renderTeamAssignmentUI()}
       </div>
     );
   };
@@ -8842,6 +8969,42 @@ function GolfAppInner() {
                 <div style={{ fontSize: "10px", color: T.textDim }}>Echter Brutto-Birdie (Score = Par-1) gibt +1</div>
               </div>
             </button>
+
+            {/* v58: Team-Mode (2vs2) — nur bei genau 4 Spielern */}
+            {players.length === 4 && (
+              <button
+                onClick={() => {
+                  setBestBallConfig(c => ({ ...c, teamMode: !c.teamMode }));
+                  // Beim Aktivieren: Teams auto-assignen falls noch keine
+                  if (!bestBallConfig.teamMode && !teams) {
+                    const strokes = bestBallConfig.hcpMode === "normal"
+                      ? normalHcpStrokes(players, cfg, selectedClub, holes)
+                      : uschiAdjustedStrokes(players, cfg, selectedClub, holes);
+                    setTeams(autoAssignTeams(strokes));
+                  }
+                }}
+                style={{
+                  display: "flex", alignItems: "center", gap: "10px",
+                  padding: "10px 12px",
+                  background: bestBallConfig.teamMode ? `${T.gold}10` : T.surface1,
+                  border: `1px solid ${bestBallConfig.teamMode ? T.gold : T.line}`,
+                  borderRadius: "8px", textAlign: "left", cursor: "pointer",
+                }}>
+                <div style={{
+                  width: "18px", height: "18px", borderRadius: "4px",
+                  border: `2px solid ${bestBallConfig.teamMode ? T.gold : T.textDim}`,
+                  background: bestBallConfig.teamMode ? T.gold : "transparent",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  color: T.canvas, fontSize: "11px", fontWeight: 700,
+                }}>
+                  {bestBallConfig.teamMode && "✓"}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: "12px", fontWeight: 600, color: T.text }}>👥 Team-Modus (2vs2)</div>
+                  <div style={{ fontSize: "10px", color: T.textDim }}>Bestes Team-Mitglied vs bestes Team-Mitglied · Loch-Punkt fürs Gewinner-Team</div>
+                </div>
+              </button>
+            )}
             <button
               onClick={() => setBestBallConfig(c => ({ ...c, uschiBonus: !c.uschiBonus }))}
               style={{
@@ -10125,8 +10288,49 @@ function GolfAppInner() {
             {gameMode === "bestball-plus" && bestBallResult && (
               <div style={{ marginTop: "10px", paddingTop: "10px", borderTop: `1px solid ${T.lineStrong}` }}>
                 <div style={{ fontSize: "9px", color: T.textDim, letterSpacing: "0.08em", fontWeight: 600, marginBottom: "6px" }}>
-                  ☄️ BEST BALL+ · LOCH-FÜR-LOCH
+                  ☄️ BEST BALL+ · LOCH-FÜR-LOCH{bestBallResult.isTeamMode ? " · 2vs2" : ""}
                 </div>
+                {/* v58: Team-Stand prominent anzeigen wenn Team-Mode */}
+                {bestBallResult.isTeamMode && bestBallResult.teamTotals && (() => {
+                  const teamA = teams?.A || [];
+                  const teamB = teams?.B || [];
+                  const teamAName = teams?.nameA || (teamA.map(pid => players.find(p => p.id === pid)?.name?.split(" ")[0] || "?").join(" & "));
+                  const teamBName = teams?.nameB || (teamB.map(pid => players.find(p => p.id === pid)?.name?.split(" ")[0] || "?").join(" & "));
+                  const aWins = bestBallResult.teamTotals.A > bestBallResult.teamTotals.B;
+                  const bWins = bestBallResult.teamTotals.B > bestBallResult.teamTotals.A;
+                  return (
+                    <div style={{ display: "flex", gap: "8px", marginBottom: "10px" }}>
+                      <div style={{
+                        flex: 1, padding: "8px 10px",
+                        background: aWins ? `${T.gold}15` : T.surface2,
+                        border: `1px solid ${aWins ? T.gold + "60" : T.line}`,
+                        borderRadius: "8px", textAlign: "center",
+                      }}>
+                        <div style={{ fontSize: "9px", color: T.textDim, fontWeight: 600, marginBottom: "2px" }}>TEAM A</div>
+                        <div style={{ fontSize: "11px", color: T.textSoft, marginBottom: "4px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {teamAName}
+                        </div>
+                        <div className="mono" style={{ fontSize: "20px", fontWeight: 700, color: aWins ? T.gold : T.text }}>
+                          {bestBallResult.teamTotals.A}
+                        </div>
+                      </div>
+                      <div style={{
+                        flex: 1, padding: "8px 10px",
+                        background: bWins ? `${T.gold}15` : T.surface2,
+                        border: `1px solid ${bWins ? T.gold + "60" : T.line}`,
+                        borderRadius: "8px", textAlign: "center",
+                      }}>
+                        <div style={{ fontSize: "9px", color: T.textDim, fontWeight: 600, marginBottom: "2px" }}>TEAM B</div>
+                        <div style={{ fontSize: "11px", color: T.textSoft, marginBottom: "4px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {teamBName}
+                        </div>
+                        <div className="mono" style={{ fontSize: "20px", fontWeight: 700, color: bWins ? T.gold : T.text }}>
+                          {bestBallResult.teamTotals.B}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
                 {/* Aktueller Carry-Hinweis */}
                 {bestBallConfig.uschiBonus && bestBallResult.carry > 1 && (
                   <div style={{ fontSize: "10px", color: T.gold, marginBottom: "8px", padding: "6px 10px", background: `${T.gold}10`, borderRadius: "6px", border: `1px solid ${T.gold}40` }}>
