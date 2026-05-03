@@ -14067,6 +14067,770 @@ WICHTIG:
   const renderTrash = () => {
     if (!showTrash) return null;
     return (
+      <div onClick={close}
+        style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+        <div onClick={e => e.stopPropagation()} className="slide-up"
+          style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
+          <SwipeHandle onClose={close} />
+          <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>🏖️ Neuer Trip</h3>
+          <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "16px", lineHeight: 1.5 }}>
+            Mehrtägige Golfreise mit Tageswertungen und Pots.
+          </p>
+
+          {/* Basis */}
+          <div style={{ ...S.card, padding: "12px 14px", marginBottom: "12px" }}>
+            <div style={{ ...S.eyebrow, marginBottom: "10px" }}>📍 Basis</div>
+            <label style={{ fontSize: "11px", color: T.textDim, display: "block", marginBottom: "4px" }}>Trip-Name</label>
+            <input value={f.name} onChange={e => setF({ name: e.target.value })}
+              placeholder="z.B. Cyprus 2026" style={{ ...S.input, marginBottom: "10px" }}/>
+            <label style={{ fontSize: "11px", color: T.textDim, display: "block", marginBottom: "4px" }}>Location (optional)</label>
+            <input value={f.location} onChange={e => setF({ location: e.target.value })}
+              placeholder="z.B. Aphrodite Hills" style={{ ...S.input, marginBottom: "10px" }}/>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "10px" }}>
+              <div>
+                <label style={{ fontSize: "11px", color: T.textDim, display: "block", marginBottom: "4px" }}>Start</label>
+                <input type="date" value={f.startDate} onChange={e => setF({ startDate: e.target.value })} style={{ ...S.input }}/>
+              </div>
+              <div>
+                <label style={{ fontSize: "11px", color: T.textDim, display: "block", marginBottom: "4px" }}>Ende</label>
+                <input type="date" value={f.endDate} onChange={e => setF({ endDate: e.target.value })} style={{ ...S.input }}/>
+              </div>
+            </div>
+            <label style={{ fontSize: "11px", color: T.textDim, display: "block", marginBottom: "4px" }}>Spieltage</label>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "6px" }}>
+              {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                <button key={n} onClick={() => setF({ dayCount: n })}
+                  style={{
+                    padding: "10px",
+                    background: f.dayCount === n ? `${T.gold}20` : T.surface2,
+                    color: f.dayCount === n ? T.gold : T.textSoft,
+                    border: `1px solid ${f.dayCount === n ? T.gold : T.line}`,
+                    borderRadius: "8px", fontWeight: 600, fontSize: "14px",
+                    cursor: "pointer",
+                  }}>
+                  {n}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Spieler */}
+          <div style={{ ...S.card, padding: "12px 14px", marginBottom: "12px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "10px" }}>
+              <div style={{ ...S.eyebrow }}>👥 Spieler ({f.selectedFriendIds.length}/8)</div>
+              {f.selectedFriendIds.length >= 7 && (
+                <span style={{ fontSize: "9px", color: f.selectedFriendIds.length === 8 ? T.double : T.gold, fontWeight: 700, letterSpacing: "0.06em" }}>
+                  {f.selectedFriendIds.length === 8 ? "MAX ERREICHT" : "FAST VOLL"}
+                </span>
+              )}
+            </div>
+            {friends.length === 0 ? (
+              <div style={{ padding: "12px", background: `${T.gold}10`, border: `1px solid ${T.gold}40`, borderRadius: "8px" }}>
+                <p style={{ fontSize: "13px", color: T.gold, fontWeight: 600, marginTop: 0, marginBottom: "8px" }}>
+                  ⚠️ Du hast noch keine Spieler in deiner Friend-Liste.
+                </p>
+                <p style={{ fontSize: "11px", color: T.textSoft, marginBottom: "10px", lineHeight: 1.5 }}>
+                  Lege zuerst Spieler an: Tab „Freunde" → Name + HCP eingeben → „+" drücken.
+                  Auch dein eigenes Owner-Profil zählt als Spieler.
+                </p>
+                <button onClick={() => { close(); setTab("friends"); }}
+                  style={{ ...S.btnSecondary, width: "100%", color: T.gold, borderColor: `${T.gold}50` }}>
+                  → Zum Friends-Tab
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                {friends.map(fr => {
+                  const checked = f.selectedFriendIds.includes(fr.playerId);
+                  const atLimit = f.selectedFriendIds.length >= 8 && !checked;
+                  return (
+                    <button key={fr.playerId}
+                      onClick={() => {
+                        if (atLimit) {
+                          showUndoToast("⚠️ Maximum erreicht — ein Trip kann höchstens 8 Spieler haben", null);
+                          return;
+                        }
+                        setF({
+                          selectedFriendIds: checked
+                            ? f.selectedFriendIds.filter(id => id !== fr.playerId)
+                            : [...f.selectedFriendIds, fr.playerId]
+                        });
+                      }}
+                      style={{
+                        display: "flex", alignItems: "center", gap: "10px",
+                        padding: "8px 10px",
+                        background: checked ? `${T.gold}10` : T.surface2,
+                        border: `1px solid ${checked ? T.gold : T.line}`,
+                        borderRadius: "8px",
+                        textAlign: "left",
+                        opacity: atLimit ? 0.4 : 1,
+                        cursor: "pointer",
+                      }}>
+                      <div style={{
+                        width: "20px", height: "20px", borderRadius: "4px",
+                        border: `2px solid ${checked ? T.gold : T.textDim}`,
+                        background: checked ? T.gold : "transparent",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        color: T.canvas, fontSize: "12px", fontWeight: 700,
+                      }}>
+                        {checked && "✓"}
+                      </div>
+                      <span style={{ flex: 1, fontSize: "13px", color: T.text, fontWeight: 600 }}>{fr.name}</span>
+                      <span className="mono" style={{ fontSize: "11px", color: T.textSoft }}>HCP {fr.hcp}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* v43: HCP-Adjustments-Regeln */}
+          <div style={{ ...S.card, padding: "12px 14px", marginBottom: "16px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+              <div style={{ ...S.eyebrow }}>⚖️ HCP-Adjustments für Folgetage</div>
+              <button
+                onClick={() => setF({ hcpRules: { ...f.hcpRules, enabled: !f.hcpRules.enabled } })}
+                style={{
+                  background: f.hcpRules.enabled ? T.gold : T.surface2,
+                  color: f.hcpRules.enabled ? T.canvas : T.textSoft,
+                  border: `1px solid ${f.hcpRules.enabled ? T.gold : T.line}`,
+                  borderRadius: "6px",
+                  padding: "4px 10px",
+                  fontSize: "10px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  letterSpacing: "0.04em",
+                }}>
+                {f.hcpRules.enabled ? "AKTIV" : "AUS"}
+              </button>
+            </div>
+            {f.hcpRules.enabled && (
+              <>
+                <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px", lineHeight: 1.5, fontStyle: "italic" }}>
+                  Nach jedem Spieltag werden HCPs angepasst. Die besten 3 bekommen Abzug, die schlechtesten 3 bekommen Aufschlag. Default: Cyprus-Regeln.
+                </p>
+                <div style={{ background: T.surface2, borderRadius: "8px", padding: "10px", marginBottom: "8px" }}>
+                  <div style={{ fontSize: "10px", color: T.gold, fontWeight: 700, marginBottom: "6px", letterSpacing: "0.04em" }}>BESTE 3 → HCP-ABZUG</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px" }}>
+                    {[0, 1, 2].map(i => (
+                      <div key={i}>
+                        <label style={{ fontSize: "9px", color: T.textDim, display: "block", marginBottom: "2px" }}>{i + 1}. Platz</label>
+                        <input type="number" value={f.hcpRules.bestAdj[i]}
+                          onChange={e => {
+                            const v = parseInt(e.target.value) || 0;
+                            const arr = [...f.hcpRules.bestAdj];
+                            arr[i] = v;
+                            setF({ hcpRules: { ...f.hcpRules, bestAdj: arr } });
+                          }}
+                          style={{ ...S.input, fontSize: "13px", padding: "6px 8px", textAlign: "center", color: T.sage, fontWeight: 700 }}/>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div style={{ background: T.surface2, borderRadius: "8px", padding: "10px" }}>
+                  <div style={{ fontSize: "10px", color: T.double, fontWeight: 700, marginBottom: "6px", letterSpacing: "0.04em" }}>SCHLECHTESTE 3 → HCP-AUFSCHLAG</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px" }}>
+                    {[0, 1, 2].map(i => (
+                      <div key={i}>
+                        <label style={{ fontSize: "9px", color: T.textDim, display: "block", marginBottom: "2px" }}>{i + 1}. Letzter</label>
+                        <input type="number" value={f.hcpRules.worstAdj[i]}
+                          onChange={e => {
+                            const v = parseInt(e.target.value) || 0;
+                            const arr = [...f.hcpRules.worstAdj];
+                            arr[i] = v;
+                            setF({ hcpRules: { ...f.hcpRules, worstAdj: arr } });
+                          }}
+                          style={{ ...S.input, fontSize: "13px", padding: "6px 8px", textAlign: "center", color: T.double, fontWeight: 700 }}/>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Pots */}
+          <div style={{ ...S.card, padding: "12px 14px", marginBottom: "16px" }}>
+            <div style={{ ...S.eyebrow, marginBottom: "10px" }}>💰 Pots (€ pro Kopf)</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+              <div>
+                <label style={{ fontSize: "10px", color: T.textDim, display: "block", marginBottom: "2px" }}>Tagessieg</label>
+                <input type="number" value={f.pots.dayWin} onChange={e => setF({ pots: { ...f.pots, dayWin: parseInt(e.target.value) || 0 } })}
+                  style={{ ...S.input, fontSize: "13px", padding: "8px 10px" }}/>
+              </div>
+              <div>
+                <label style={{ fontSize: "10px", color: T.textDim, display: "block", marginBottom: "2px" }}>Gesamt-Wertung</label>
+                <input type="number" value={f.pots.threeDayPot} onChange={e => setF({ pots: { ...f.pots, threeDayPot: parseInt(e.target.value) || 0 } })}
+                  style={{ ...S.input, fontSize: "13px", padding: "8px 10px" }}/>
+              </div>
+              <div>
+                <label style={{ fontSize: "10px", color: T.textDim, display: "block", marginBottom: "2px" }}>Team-Wertung</label>
+                <input type="number" value={f.pots.weekTeamPot} onChange={e => setF({ pots: { ...f.pots, weekTeamPot: parseInt(e.target.value) || 0 } })}
+                  style={{ ...S.input, fontSize: "13px", padding: "8px 10px" }}/>
+              </div>
+              <div>
+                <label style={{ fontSize: "10px", color: T.textDim, display: "block", marginBottom: "2px" }}>Nearest-to-Pin</label>
+                <input type="number" value={f.pots.nearestPin} onChange={e => setF({ pots: { ...f.pots, nearestPin: parseInt(e.target.value) || 0 } })}
+                  style={{ ...S.input, fontSize: "13px", padding: "8px 10px" }}/>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button onClick={close} style={{ ...S.btnSecondary, flex: 1 }}>Abbrechen</button>
+            <button
+              onClick={async () => {
+                // v42: Klare Pop-Ups statt stumm disabled
+                if (!f.name.trim()) {
+                  showUndoToast("⚠️ Bitte gib deinem Trip einen Namen", null);
+                  return;
+                }
+                if (!f.startDate || !f.endDate) {
+                  showUndoToast("⚠️ Bitte wähle Start- und End-Datum", null);
+                  return;
+                }
+                if (f.dayCount < 1) {
+                  showUndoToast("⚠️ Mindestens 1 Spieltag nötig", null);
+                  return;
+                }
+                if (f.selectedFriendIds.length < 2) {
+                  showUndoToast("⚠️ Wähle mindestens 2 Spieler — ein Trip macht alleine wenig Sinn", null);
+                  return;
+                }
+                if (f.selectedFriendIds.length > 8) {
+                  showUndoToast("⚠️ Maximum 8 Spieler pro Trip", null);
+                  return;
+                }
+                const selectedPlayers = friends.filter(fr => f.selectedFriendIds.includes(fr.playerId));
+                const startDate = new Date(f.startDate);
+                const days = Array.from({ length: f.dayCount }, (_, i) => {
+                  const d = new Date(startDate);
+                  d.setDate(d.getDate() + i);
+                  return { date: d.toISOString().slice(0, 10) };
+                });
+                await createTrip({
+                  name: f.name, location: f.location,
+                  startDate: f.startDate, endDate: f.endDate,
+                  syncCode: f.syncCode,
+                  players: selectedPlayers,
+                  days, pots: f.pots,
+                  hcpRules: f.hcpRules,
+                });
+                close();
+                showUndoToast(`✓ Trip "${f.name}" angelegt`, null);
+              }}
+              className="gold-hover"
+              style={{ ...S.btnPrimary, flex: 2 }}>
+              Trip anlegen
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ── v42: Trip-Detail-Modal ──
+  const renderTripDetail = () => {
+    if (!showTripDetail || !activeTripId) return null;
+    const trip = trips.find(t => t.id === activeTripId);
+    if (!trip) return null;
+    const close = () => { setShowTripDetail(false); setActiveTripId(null); setTripDetailView("overview"); };
+    const standings = computeTripStandings(trip);
+    const totalPot = (trip.players?.length || 0) * (
+      (trip.pots?.dayWin || 0) * (trip.days?.length || 0) +
+      (trip.pots?.threeDayPot || 0) +
+      (trip.pots?.weekTeamPot || 0)
+    );
+
+    return (
+      <div onClick={close}
+        style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+        <div onClick={e => e.stopPropagation()} className="slide-up"
+          style={{ width: "100%", maxWidth: "520px", background: T.surface1, borderTopLeftRadius: "24px", borderTopRightRadius: "24px", border: `1px solid ${T.line}`, padding: "20px 16px 28px", maxHeight: "92vh", overflowY: "auto" }}>
+          <SwipeHandle onClose={close} />
+          <h3 className="serif" style={{ fontSize: "22px", margin: "0 0 4px", color: T.text }}>🏖️ {trip.name}</h3>
+          <div style={{ fontSize: "12px", color: T.textSoft, marginBottom: "16px" }}>
+            {trip.location && <span>📍 {trip.location} · </span>}
+            {fmtDate(trip.startDate)} – {fmtDate(trip.endDate)}
+          </div>
+
+          {/* v44: Tab-Switcher */}
+          <div style={{ display: "flex", background: T.surface2, borderRadius: "10px", padding: "3px", marginBottom: "14px" }}>
+            {[
+              { k: "overview", l: "🏆 Übersicht" },
+              { k: "stats", l: "📊 Stats" },
+              { k: "money", l: "💰 Geld" },
+            ].map(({ k, l }) => (
+              <button key={k}
+                onClick={() => setTripDetailView(k)}
+                style={{
+                  flex: 1, padding: "8px 6px",
+                  background: tripDetailView === k ? T.gold : "transparent",
+                  color: tripDetailView === k ? T.canvas : T.textSoft,
+                  border: "none", borderRadius: "8px",
+                  fontSize: "11px", fontWeight: tripDetailView === k ? 700 : 500,
+                  cursor: "pointer",
+                  transition: "all 0.2s",
+                }}>
+                {l}
+              </button>
+            ))}
+          </div>
+
+          {/* Übersicht-View (= bisheriger Inhalt) */}
+          {tripDetailView === "overview" && (
+            <>
+              {/* Pot-Summary */}
+          <div style={{ ...S.card, padding: "12px 14px", marginBottom: "12px", borderColor: `${T.gold}30` }}>
+            <div style={{ ...S.eyebrow, marginBottom: "8px", color: T.gold }}>💰 Pot-Übersicht</div>
+            <div style={{ fontSize: "20px", fontWeight: 700, color: T.gold, marginBottom: "8px" }}>
+              €{totalPot} <span style={{ fontSize: "11px", color: T.textDim, fontWeight: 500 }}>· {trip.players?.length || 0} Spieler</span>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "5px", fontSize: "10px", color: T.textSoft, lineHeight: 1.4 }}>
+              <div>🥇 <strong>€{trip.pots?.dayWin}</strong> Tagessieger</div>
+              <div>🏆 <strong>€{trip.pots?.threeDayPot}</strong> Gesamt</div>
+              <div>🤝 <strong>€{trip.pots?.weekTeamPot}</strong> Bestes 2er-Team</div>
+              <div>🎯 <strong>€{trip.pots?.nearestPin}</strong> Nearest-to-Pin</div>
+            </div>
+            <p style={{ fontSize: "9px", color: T.textDim, marginTop: "8px", lineHeight: 1.4, fontStyle: "italic" }}>
+              Beträge sind „pro Spieler". Sieger bekommt von allen anderen je den Betrag.
+            </p>
+          </div>
+
+          {/* Tageswertungen */}
+          {standings?.dayResults?.length > 0 && (
+            <div style={{ ...S.card, padding: "12px 14px", marginBottom: "12px" }}>
+              <div style={{ ...S.eyebrow, marginBottom: "10px" }}>📅 Tageswertungen</div>
+              {standings.dayResults.map(dr => (
+                <div key={dr.dayNumber} style={{ padding: "8px 0", borderTop: dr.dayNumber > 1 ? `1px solid ${T.line}` : "none" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+                    <span style={{ fontSize: "12px", fontWeight: 600, color: T.text }}>Tag {dr.dayNumber}</span>
+                    <span style={{ fontSize: "10px", color: T.textDim }}>{fmtDate(dr.date)}</span>
+                  </div>
+                  {dr.complete && dr.winner ? (
+                    <div style={{ fontSize: "11px", color: T.textSoft }}>
+                      🥇 <span style={{ color: T.gold, fontWeight: 700 }}>{dr.winner.name}</span>
+                      {" "}— <span className="mono">{dr.winner.sf} SF</span>
+                      {" "}· €{trip.pots?.dayWin * (trip.players?.length || 0)}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: "11px", color: T.textDim, fontStyle: "italic" }}>Noch nicht gespielt</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Gesamt-Wertung */}
+          {standings?.totalRanked?.length > 0 && (
+            <div style={{ ...S.card, padding: "12px 14px", marginBottom: "12px" }}>
+              <div style={{ ...S.eyebrow, marginBottom: "10px" }}>🏆 Gesamt-Wertung</div>
+              {standings.totalRanked.map((p, i) => (
+                <div key={p.playerId || p.name} style={{
+                  display: "flex", alignItems: "center", gap: "8px",
+                  padding: "6px 0",
+                  borderTop: i > 0 ? `1px solid ${T.line}` : "none",
+                }}>
+                  <span style={{ width: "24px", color: i === 0 ? T.gold : T.textDim, fontWeight: 700, fontSize: "12px" }}>
+                    {i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `${i + 1}.`}
+                  </span>
+                  <span style={{ flex: 1, fontSize: "13px", color: T.text, fontWeight: 600 }}>{p.name}</span>
+                  <span style={{ fontSize: "10px", color: T.textDim }}>{p.daysPlayed} Tage</span>
+                  <span className="mono" style={{ fontSize: "13px", fontWeight: 700, color: T.gold, minWidth: "40px", textAlign: "right" }}>
+                    {p.totalSf}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Tage mit Runden verlinken */}
+          <div style={{ ...S.card, padding: "12px 14px", marginBottom: "12px" }}>
+            <div style={{ ...S.eyebrow, marginBottom: "10px" }}>🔗 Runden zuweisen</div>
+            <p style={{ fontSize: "10px", color: T.textDim, marginBottom: "10px", lineHeight: 1.4, fontStyle: "italic" }}>
+              Spielt eine Runde wie gewohnt und weist sie hier dem entsprechenden Tag zu.
+            </p>
+            {trip.days?.map(day => {
+              const dayHasAdjustments = day.dayNumber > 1 && trip.players.some(p => p.hcpAdjustments?.[day.dayNumber] !== undefined);
+              return (
+              <div key={day.dayNumber} style={{ marginBottom: "12px", padding: "10px", background: T.surface2, borderRadius: "8px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px", alignItems: "center" }}>
+                  <span style={{ fontSize: "12px", fontWeight: 600, color: T.gold }}>Tag {day.dayNumber}</span>
+                  <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                    {dayHasAdjustments && (
+                      <span style={{ fontSize: "9px", color: T.gold, background: `${T.gold}15`, padding: "2px 5px", borderRadius: "3px", fontWeight: 700, letterSpacing: "0.04em" }}>HCP+</span>
+                    )}
+                    <span style={{ fontSize: "10px", color: T.textDim }}>{fmtDate(day.date)}</span>
+                  </div>
+                </div>
+                {day.roundIds?.length > 0 ? (
+                  day.roundIds.map(rid => {
+                    const r = rounds.find(x => x.id === rid);
+                    if (!r) return null;
+                    return (
+                      <div key={rid} style={{ display: "flex", alignItems: "center", gap: "6px", padding: "4px 0" }}>
+                        <span style={{ flex: 1, fontSize: "11px", color: T.text }}>
+                          {r.cfg?.clubName || "Runde"} · {fmtDate(r.cfg?.date)}
+                        </span>
+                        <button onClick={() => unlinkRoundFromTrip(trip.id, rid)}
+                          style={{ background: "transparent", border: "none", color: T.double, fontSize: "14px", cursor: "pointer", padding: "2px 6px" }}>×</button>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div style={{ fontSize: "10px", color: T.textDim, fontStyle: "italic", marginBottom: "6px" }}>Keine Runden zugewiesen</div>
+                )}
+                <select
+                  onChange={async (e) => {
+                    if (e.target.value) {
+                      await linkRoundToTripDay(trip.id, day.dayNumber, e.target.value);
+                      e.target.value = "";
+                    }
+                  }}
+                  style={{ ...S.input, fontSize: "11px", padding: "6px 8px", width: "100%", marginTop: "4px" }}
+                  defaultValue="">
+                  <option value="">+ Runde hinzufügen...</option>
+                  {rounds.filter(r => !day.roundIds?.includes(r.id)).map(r => (
+                    <option key={r.id} value={r.id}>
+                      {r.cfg?.clubName || "Runde"} · {fmtDate(r.cfg?.date)}
+                    </option>
+                  ))}
+                </select>
+
+                {/* v43: HCP-Adjustment-Anwenden + Flight-Allocation */}
+                {day.dayNumber > 1 && trip.hcpRules?.enabled && (
+                  <button
+                    onClick={() => applyHcpAdjustmentsForDay(trip.id, day.dayNumber)}
+                    style={{
+                      ...S.btnSecondary, width: "100%", marginTop: "8px",
+                      fontSize: "11px", padding: "8px 10px",
+                      color: dayHasAdjustments ? T.gold : T.textSoft,
+                      borderColor: dayHasAdjustments ? `${T.gold}50` : T.line,
+                      background: dayHasAdjustments ? `${T.gold}10` : T.surface2,
+                    }}>
+                    {dayHasAdjustments ? "🔄 HCP-Adjustments aktualisieren" : "⚖️ HCP-Adjustments anwenden"}
+                  </button>
+                )}
+
+                {/* Flight-Allocation pro Spieler */}
+                <div style={{ marginTop: "8px" }}>
+                  <div style={{ fontSize: "9px", color: T.textDim, fontWeight: 700, letterSpacing: "0.04em", marginBottom: "5px" }}>FLIGHT-ZUTEILUNG</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                    {trip.players.map(tp => {
+                      const flight = day.flights?.[tp.playerId] || "";
+                      const adjustment = tp.hcpAdjustments?.[day.dayNumber];
+                      return (
+                        <div key={tp.playerId} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          <span style={{ flex: 1, fontSize: "11px", color: T.text }}>
+                            {tp.name}
+                            {adjustment !== undefined && adjustment !== 0 && (
+                              <span style={{ fontSize: "10px", color: adjustment > 0 ? T.double : T.sage, marginLeft: "5px", fontWeight: 700 }}>
+                                {adjustment > 0 ? "+" : ""}{adjustment}
+                              </span>
+                            )}
+                          </span>
+                          <div style={{ display: "flex", gap: "3px" }}>
+                            {["A", "B", "C", ""].map(opt => (
+                              <button
+                                key={opt || "none"}
+                                onClick={() => setPlayerFlightForDay(trip.id, day.dayNumber, tp.playerId, opt || null)}
+                                style={{
+                                  width: "26px", height: "26px",
+                                  background: flight === opt ? T.gold : T.surface1,
+                                  color: flight === opt ? T.canvas : T.textSoft,
+                                  border: `1px solid ${flight === opt ? T.gold : T.line}`,
+                                  borderRadius: "5px", fontSize: "10px",
+                                  fontWeight: 700, cursor: "pointer",
+                                }}>
+                                {opt || "—"}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                {/* v45: Nearest-to-Pin pro Par-3 in Trip-Runden */}
+                {(trip.pots?.nearestPin > 0 && day.roundIds?.length > 0) && (() => {
+                  // Sammle alle Par-3-Löcher aus den Runden dieses Tages
+                  const par3Items = [];
+                  day.roundIds.forEach(rid => {
+                    const r = rounds.find(x => x.id === rid);
+                    if (!r) return;
+                    getPar3Holes(r).forEach(p3 => {
+                      par3Items.push({
+                        roundId: rid,
+                        clubName: r.cfg?.clubName || "",
+                        holeIdx: p3.holeIdx,
+                        par: p3.par,
+                      });
+                    });
+                  });
+                  if (par3Items.length === 0) return null;
+                  return (
+                    <div style={{ marginTop: "8px", paddingTop: "8px", borderTop: `1px solid ${T.line}` }}>
+                      <div style={{ fontSize: "9px", color: T.textDim, fontWeight: 700, letterSpacing: "0.04em", marginBottom: "5px" }}>
+                        🎯 NEAREST-TO-PIN (€{trip.pots.nearestPin}/Spieler)
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+                        {par3Items.map(item => {
+                          const key = `${item.roundId}::${item.holeIdx}`;
+                          const winnerId = trip.nearestPins?.[key] || "";
+                          const winner = trip.players.find(tp => tp.playerId === winnerId);
+                          return (
+                            <div key={key} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                              <span style={{ fontSize: "11px", color: T.text, flex: 1 }}>
+                                Loch {item.holeIdx + 1} · Par {item.par}
+                              </span>
+                              <select
+                                value={winnerId}
+                                onChange={e => setNearestPinWinner(trip.id, key, e.target.value || null)}
+                                style={{ ...S.input, fontSize: "11px", padding: "5px 8px", maxWidth: "150px" }}>
+                                <option value="">— kein Sieger —</option>
+                                {trip.players.map(tp => (
+                                  <option key={tp.playerId} value={tp.playerId}>{tp.name}</option>
+                                ))}
+                              </select>
+                              {winner && (
+                                <span style={{ fontSize: "10px", color: T.gold, fontWeight: 700 }}>
+                                  🏆 €{trip.pots.nearestPin * (trip.players.length - 1)}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            );
+            })}
+          </div>
+            </>
+          )}
+
+          {/* v44: Stats-View */}
+          {tripDetailView === "stats" && (() => {
+            const stats = computeTripStats(trip);
+            if (!stats || stats.tripRounds === 0) {
+              return <EmptyState icon="📊" title="Noch keine Trip-Stats" sub="Stats erscheinen sobald die ersten Runden den Trip-Tagen zugewiesen sind." />;
+            }
+            const playersList = Object.values(stats.perPlayer).sort((a, b) => b.bestSf - a.bestSf);
+
+            return (
+              <>
+                <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "12px", lineHeight: 1.5, fontStyle: "italic" }}>
+                  Aggregierte Statistiken über alle Trip-Runden ({stats.tripRounds} Runde{stats.tripRounds === 1 ? "" : "n"}).
+                </p>
+
+                {/* Pro-Spieler-Karten */}
+                {playersList.map(p => {
+                  const totalScores = p.birdies + p.pars + p.bogeys + p.doubles;
+                  return (
+                    <div key={p.playerId || p.name} style={{ ...S.card, padding: "12px 14px", marginBottom: "10px" }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+                        <div style={{ fontSize: "14px", fontWeight: 700, color: T.text }}>{p.name}</div>
+                        <div style={{ display: "flex", gap: "8px", fontSize: "11px", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                          {p.bestSf > 0 && (
+                            <span style={{ color: T.gold, fontWeight: 700 }}>Best <span className="mono">{p.bestSf}</span></span>
+                          )}
+                          {p.avgSf > 0 && (
+                            <span style={{ color: T.textSoft }}>⌀ <span className="mono">{p.avgSf}</span></span>
+                          )}
+                          {p.totalBrut > 0 && (
+                            <span style={{ color: T.textDim }}>Br Σ <span className="mono">{p.totalBrut}</span></span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* SF-Verlauf pro Tag */}
+                      {p.sfHistory.length > 0 && (
+                        <div style={{ display: "flex", gap: "4px", marginBottom: "8px" }}>
+                          {p.sfHistory.map(h => (
+                            <div key={h.dayNumber} style={{
+                              flex: 1,
+                              padding: "6px 4px",
+                              background: T.surface2,
+                              borderRadius: "5px",
+                              border: `1px solid ${h.sf >= 36 ? T.sage + "40" : T.line}`,
+                              textAlign: "center",
+                            }}>
+                              <div style={{ fontSize: "9px", color: T.textDim }}>T{h.dayNumber}</div>
+                              <div className="mono" style={{
+                                fontSize: "13px", fontWeight: 700,
+                                color: h.sf >= 36 ? T.sage : h.sf >= 30 ? T.gold : T.textSoft,
+                              }}>{h.sf}</div>
+                              {h.sfBrut > 0 && (
+                                <div className="mono" style={{ fontSize: "9px", color: T.textDim, marginTop: "1px" }}>{h.sfBrut}b</div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Stats-Pills */}
+                      {totalScores > 0 && (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "5px", marginBottom: p.flights.length > 0 ? "8px" : 0 }}>
+                          {p.birdies > 0 && <span style={{ background: `${T.gold}15`, color: T.gold, padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700 }}>🎯 {p.birdies} Birdies</span>}
+                          <span style={{ background: T.surface2, color: T.text, padding: "3px 8px", borderRadius: "6px", fontSize: "10px" }}>⛳ {p.pars}</span>
+                          <span style={{ background: T.surface2, color: T.textSoft, padding: "3px 8px", borderRadius: "6px", fontSize: "10px" }}>⚠️ {p.bogeys}</span>
+                          <span style={{ background: T.surface2, color: T.textSoft, padding: "3px 8px", borderRadius: "6px", fontSize: "10px" }}>💀 {p.doubles}</span>
+                          {p.strichCount > 0 && <span style={{ background: `${T.double}15`, color: T.double, padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700 }}>✗ {p.strichCount}</span>}
+                          {p.ladies > 0 && <span style={{ background: `${T.gold}25`, color: T.gold, padding: "3px 8px", borderRadius: "6px", fontSize: "10px", fontWeight: 700 }}>👯 {p.ladies} Ladies</span>}
+                        </div>
+                      )}
+
+                      {/* Flight-Historie */}
+                      {p.flights.length > 0 && (
+                        <div style={{ paddingTop: "6px", borderTop: `1px solid ${T.line}` }}>
+                          <div style={{ fontSize: "9px", color: T.textDim, fontWeight: 700, letterSpacing: "0.04em", marginBottom: "4px" }}>FLIGHT-HISTORIE</div>
+                          <div style={{ display: "flex", gap: "5px", flexWrap: "wrap" }}>
+                            {p.flights.sort((a, b) => a.dayNumber - b.dayNumber).map(f => (
+                              <span key={f.dayNumber} style={{
+                                background: T.surface2, color: T.gold,
+                                padding: "3px 6px", borderRadius: "5px",
+                                fontSize: "10px", fontWeight: 600,
+                              }}>
+                                T{f.dayNumber}: <strong>{f.flight}</strong>
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </>
+            );
+          })()}
+
+          {/* v44: Money-View */}
+          {tripDetailView === "money" && (() => {
+            const money = computeTripMoney(trip);
+            if (!money) return <EmptyState icon="💰" title="Noch keine Geld-Bilanz" sub="Bilanz erscheint sobald die ersten Tagesergebnisse da sind." />;
+            const ranked = money.ranked;
+            const maxAbs = Math.max(...ranked.map(p => Math.abs(p.net)), 1);
+
+            return (
+              <>
+                <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "12px", lineHeight: 1.5, fontStyle: "italic" }}>
+                  Geld-Bilanz pro Spieler. Tippe ein Datum-Häkchen wenn jemand bezahlt hat.
+                </p>
+
+                {/* Bilanz-Karten */}
+                {ranked.map(p => {
+                  const isWin = p.net > 0;
+                  const isEven = p.net === 0;
+                  return (
+                    <div key={p.playerId || p.name} style={{
+                      ...S.card, padding: "12px 14px", marginBottom: "10px",
+                      borderColor: isWin ? `${T.sage}50` : isEven ? T.line : `${T.double}50`,
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+                        <div style={{ fontSize: "14px", fontWeight: 700, color: T.text }}>{p.name}</div>
+                        <div className="mono" style={{
+                          fontSize: "20px", fontWeight: 700,
+                          color: isWin ? T.sage : isEven ? T.textDim : T.double,
+                        }}>
+                          {isWin ? "+" : ""}€{p.net}
+                        </div>
+                      </div>
+
+                      {/* Bilanz-Bar */}
+                      <div style={{ height: "4px", background: T.surface2, borderRadius: "2px", overflow: "hidden", marginBottom: "8px", position: "relative" }}>
+                        <div style={{
+                          height: "100%",
+                          width: `${Math.abs(p.net) / maxAbs * 50}%`,
+                          background: isWin ? T.sage : T.double,
+                          marginLeft: isWin ? "50%" : `${50 - Math.abs(p.net) / maxAbs * 50}%`,
+                        }}/>
+                        <div style={{
+                          position: "absolute", left: "50%", top: 0, bottom: 0,
+                          width: "1px", background: T.line,
+                        }}/>
+                      </div>
+
+                      <div style={{ fontSize: "10px", color: T.textDim, marginBottom: p.wins.length > 0 ? "8px" : 0 }}>
+                        Gewonnen: <span style={{ color: T.sage, fontWeight: 600 }}>€{p.won}</span> · Schuldet: <span style={{ color: T.double, fontWeight: 600 }}>€{p.owes}</span>
+                      </div>
+
+                      {/* Wins-Liste */}
+                      {p.wins.length > 0 && (
+                        <div style={{ paddingTop: "8px", borderTop: `1px solid ${T.line}` }}>
+                          <div style={{ fontSize: "9px", color: T.textDim, fontWeight: 700, letterSpacing: "0.04em", marginBottom: "5px" }}>SIEGE</div>
+                          {p.wins.map((w, wi) => {
+                            const dayKey = String(w.dayNumber) + (w.holeInfo ? `_${w.holeInfo}` : "");
+                            const paid = !!p.paid[dayKey];
+                            const label = w.dayNumber === "GESAMT" ? "🏆 Gesamtwertung"
+                              : w.dayNumber === "TEAM" ? `🤝 Team mit ${w.partnerName || "Partner"}`
+                              : w.dayNumber === "NEAREST" ? `🎯 Nearest-to-Pin · ${w.holeInfo || ""}`
+                              : `Tag ${w.dayNumber}`;
+                            const subInfo = typeof w.sf === "number"
+                              ? ` · ${w.sf} SF`
+                              : "";
+                            return (
+                              <div key={wi} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "4px 0" }}>
+                                <span style={{ fontSize: "11px", color: T.text, flex: 1, minWidth: 0 }}>
+                                  {label}
+                                  <span style={{ color: T.textDim, marginLeft: "5px" }}>{subInfo}</span>
+                                </span>
+                                <span style={{ fontSize: "11px", color: T.gold, fontWeight: 700 }}>€{w.prize}</span>
+                                <button
+                                  onClick={() => togglePlayerPaid(trip.id, p.playerId || `name:${normName(p.name)}`, dayKey)}
+                                  style={{
+                                    width: "22px", height: "22px",
+                                    background: paid ? T.sage : T.surface2,
+                                    color: paid ? T.canvas : T.textSoft,
+                                    border: `1px solid ${paid ? T.sage : T.line}`,
+                                    borderRadius: "5px",
+                                    fontSize: "13px",
+                                    fontWeight: 700,
+                                    cursor: "pointer",
+                                  }}
+                                  title={paid ? "Bezahlt — tippen zum Zurücksetzen" : "Tippen wenn bezahlt"}>
+                                  {paid ? "✓" : ""}
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+                {/* Hinweis */}
+                <div style={{ ...S.card, padding: "10px 12px", background: T.surface2, fontSize: "10px", color: T.textDim, lineHeight: 1.5, marginTop: "8px" }}>
+                  💡 Tippe das Häkchen rechts neben einem Sieg wenn der Schuldner bezahlt hat. Die Geld-Bilanz wird basierend auf den Trip-Pots berechnet.
+                </div>
+              </>
+            );
+          })()}
+
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button
+              onClick={async () => {
+                if (confirm(`Trip "${trip.name}" wirklich löschen?`)) {
+                  await deleteTrip(trip.id);
+                  close();
+                }
+              }}
+              style={{ ...S.btnSecondary, flex: 1, color: T.double, borderColor: `${T.double}40` }}>
+              🗑️ Löschen
+            </button>
+            <button onClick={close} className="gold-hover" style={{ ...S.btnPrimary, flex: 2 }}>Schließen</button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ── v33: Trash modal — soft-deleted rounds recoverable for 30 days ──
+  const renderTrash = () => {
+    if (!showTrash) return null;
+    return (
       <div onClick={() => setShowTrash(false)}
         style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
         <div onClick={e => e.stopPropagation()} className="slide-up"
