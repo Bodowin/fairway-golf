@@ -6441,6 +6441,168 @@ function GolfAppInner() {
     }
   };
 
+  // ─── v58: Cyprus-Test-Daten-Generator (für Branch "cyprus-test") ───────────
+  // Lädt 4 vorgefertigte Friends + Cyprus-Trip + 2 realistische 18-Loch-Runden
+  // Damit Bodo nicht alles per Hand eintippen muss beim Trip-Test.
+  const loadCyprusTestData = async () => {
+    const confirmed = window.confirm(
+      "🧪 Cyprus Test-Daten laden?\n\n" +
+      "Es werden hinzugefügt:\n" +
+      "• 4 Freunde: Wagner, Toddler, Nudler, Bodo\n" +
+      "• 1 Trip: Cyprus 2026 (3 Tage, 25.-27.5.)\n" +
+      "• 2 fertig gespielte Runden (Tag 1 + Tag 2)\n\n" +
+      "Bestehende Daten bleiben erhalten — neue kommen dazu."
+    );
+    if (!confirmed) return;
+
+    // 1. Friends erstellen — mit playerIds
+    const wagnerId = newPlayerId();
+    const toddlerId = newPlayerId();
+    const nudlerId = newPlayerId();
+    const bodoId = newPlayerId();
+    const today = toDay();
+    const newFriends = [
+      { name: "Wagner",  hcp: 14.5, playerId: wagnerId,  aliases: [], hcpHistory: [{ date: today, hcp: 14.5 }] },
+      { name: "Toddler", hcp: 31.0, playerId: toddlerId, aliases: [], hcpHistory: [{ date: today, hcp: 31.0 }] },
+      { name: "Nudler",  hcp: 24.5, playerId: nudlerId,  aliases: [], hcpHistory: [{ date: today, hcp: 24.5 }] },
+      { name: "Bodo",    hcp: 29.4, playerId: bodoId,    aliases: [], hcpHistory: [{ date: today, hcp: 29.4 }] },
+    ];
+    // Merge: nur fehlende hinzufügen
+    const mergedFriends = [...friends];
+    for (const f of newFriends) {
+      const existing = mergedFriends.find(x => normName(x.name) === normName(f.name));
+      if (!existing) mergedFriends.push(f);
+    }
+    setFriends(mergedFriends);
+    try { await window.storage.set("golf-friends", JSON.stringify(mergedFriends)); } catch {}
+
+    // Reuse-IDs falls Friend schon existiert (nutze die echten IDs aus mergedFriends)
+    const findId = (name) => mergedFriends.find(x => normName(x.name) === normName(name))?.playerId;
+    const realWagnerId = findId("Wagner") || wagnerId;
+    const realToddlerId = findId("Toddler") || toddlerId;
+    const realNudlerId = findId("Nudler") || nudlerId;
+    const realBodoId = findId("Bodo") || bodoId;
+
+    // 2. Cyprus-Trip
+    const tripId = "trip_cy_" + Math.random().toString(36).slice(2, 9);
+    const cyprusTrip = {
+      id: tripId,
+      name: "Cyprus 2026 · TEST",
+      location: "Aphrodite Hills",
+      startDate: "2026-05-25",
+      endDate: "2026-05-27",
+      syncCode: syncCode || "",
+      days: [
+        { dayNumber: 1, date: "2026-05-25", roundIds: [] },
+        { dayNumber: 2, date: "2026-05-26", roundIds: [] },
+        { dayNumber: 3, date: "2026-05-27", roundIds: [] },
+      ],
+      players: [
+        { playerId: realWagnerId,  name: "Wagner",  hcp: 14.5, baseHcp: 14.5, hcpAdjustments: {} },
+        { playerId: realToddlerId, name: "Toddler", hcp: 31.0, baseHcp: 31.0, hcpAdjustments: {} },
+        { playerId: realNudlerId,  name: "Nudler",  hcp: 24.5, baseHcp: 24.5, hcpAdjustments: {} },
+        { playerId: realBodoId,    name: "Bodo",    hcp: 29.4, baseHcp: 29.4, hcpAdjustments: {} },
+      ],
+      pots: { dayWin: 10, threeDayPot: 50, weekTeamPot: 50, nearestPin: 5 },
+      hcpRules: { enabled: true, bestAdj: [-3, -2, -1], worstAdj: [3, 2, 1] },
+      flightAllocations: {},
+      payments: {},
+      nearestPins: {},
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    // 3. Aphrodite Hills Custom-Club
+    const cyprusClub = {
+      name: "Aphrodite Hills (TEST)",
+      region: "Cyprus",
+      numHoles: 18,
+      tees: [{ name: "Gelb (Herren)", color: "yellow", cr: 73.0, slope: 132, par: 71, gender: "men" }],
+      holes: [
+        { par: 4, si: 13 }, { par: 4, si: 5 },  { par: 3, si: 17 }, { par: 5, si: 9 },
+        { par: 4, si: 1 },  { par: 4, si: 11 }, { par: 3, si: 15 }, { par: 4, si: 7 },
+        { par: 5, si: 3 },  { par: 4, si: 14 }, { par: 4, si: 6 },  { par: 3, si: 18 },
+        { par: 5, si: 10 }, { par: 4, si: 2 },  { par: 4, si: 12 }, { par: 3, si: 16 },
+        { par: 4, si: 8 },  { par: 5, si: 4 },
+      ],
+    };
+    const mergedClubs = [...customClubs];
+    if (!mergedClubs.find(c => c.name === cyprusClub.name)) mergedClubs.push(cyprusClub);
+    setCustomClubs(mergedClubs);
+    try { await window.storage.set("golf-custom-clubs", JSON.stringify(mergedClubs)); } catch {}
+
+    // 4. Realistische Scores
+    const genRealisticScores = (parArr, hcp, seed) => {
+      const scores = [];
+      const skill = Math.min(1, Math.max(0, hcp / 36));
+      let r = seed;
+      for (let i = 0; i < 18; i++) {
+        const p = parArr[i];
+        r = (r * 9301 + 49297) % 233280;
+        const rand = r / 233280;
+        let svp;
+        if (rand < 0.05) svp = -1;
+        else if (rand < 0.05 + (1 - skill) * 0.4) svp = 0;
+        else if (rand < 0.6) svp = 1;
+        else if (rand < 0.85) svp = 2;
+        else if (rand < 0.95) svp = 3;
+        else svp = 4;
+        scores.push(p + svp);
+      }
+      return scores;
+    };
+
+    const buildRound = (date, dayNumber, seed) => {
+      const roundId = "rnd_test_" + Math.random().toString(36).slice(2, 9);
+      const players = [
+        { id: uid(), playerId: realWagnerId,  name: "Wagner",  hcp: 14.5, teeName: "Gelb (Herren)" },
+        { id: uid(), playerId: realToddlerId, name: "Toddler", hcp: 31.0, teeName: "Gelb (Herren)" },
+        { id: uid(), playerId: realNudlerId,  name: "Nudler",  hcp: 24.5, teeName: "Gelb (Herren)" },
+        { id: uid(), playerId: realBodoId,    name: "Bodo",    hcp: 29.4, teeName: "Gelb (Herren)" },
+      ];
+      const parsArr = cyprusClub.holes.map(h => h.par);
+      const scores = {};
+      players.forEach((p, idx) => {
+        const ps = genRealisticScores(parsArr, p.hcp, seed + idx * 1337);
+        scores[p.id] = {};
+        ps.forEach((s, i) => { scores[p.id][i] = s; });
+      });
+      return {
+        id: roundId,
+        cfg: {
+          name: "Cyprus 2026 · Tag " + dayNumber,
+          date, numHoles: 18,
+          clubName: cyprusClub.name,
+          defaultTeeName: "Gelb (Herren)",
+          tripContext: { tripId, dayNumber },
+        },
+        holes: cyprusClub.holes,
+        players, scores,
+        gameMode: "stableford",
+        teams: null, par3Data: {}, ladies: {},
+        selectedClubSnapshot: cyprusClub,
+        bestBallConfig: null, roundGoals: null,
+        savedAt: new Date().toISOString(),
+      };
+    };
+
+    const day1Round = buildRound("2026-05-25", 1, 12345);
+    const day2Round = buildRound("2026-05-26", 2, 67890);
+    cyprusTrip.days[0].roundIds = [day1Round.id];
+    cyprusTrip.days[1].roundIds = [day2Round.id];
+
+    // 5. State updaten
+    const updatedTrips = [cyprusTrip, ...trips];
+    setTrips(updatedTrips);
+    try { await window.storage.set("golf-trips", JSON.stringify(updatedTrips)); } catch {}
+
+    const updatedRounds = [day1Round, day2Round, ...rounds].slice(0, 50);
+    setRounds(updatedRounds);
+    try { await window.storage.set("golf-rounds", JSON.stringify(updatedRounds)); } catch {}
+
+    showUndoToast("✓ Cyprus Test-Daten geladen! Wechsle zum Trips-Tab", null);
+  };
+
   // Parse imported JSON, validate shape, return { ok, data, error }
   const parseImportJson = (text) => {
     try {
@@ -14714,16 +14876,21 @@ WICHTIG:
                               setF({ hcpRules: { ...f.hcpRules, bestAdj: arr } });
                             };
                             return (
-                              <div key={i} style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                                <span style={{ fontSize: "13px", color: T.text, fontWeight: 600, minWidth: "70px" }}>
-                                  {i + 1}. Platz
-                                </span>
-                                {/* +/- Buttons + zentrale Anzeige */}
-                                <div style={{ flex: 1, display: "flex", alignItems: "stretch", gap: "0", borderRadius: "8px", overflow: "hidden", border: `1px solid ${T.line}` }}>
+                              <div key={i} style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                  <span style={{ fontSize: "12px", color: T.text, fontWeight: 600 }}>
+                                    {i + 1}. Platz
+                                  </span>
+                                  <span style={{ fontSize: "10px", color: T.textDim }}>
+                                    {currentVal === 0 ? "kein Effekt" : currentVal < 0 ? `${Math.abs(currentVal)} härter` : `${currentVal} leichter`}
+                                  </span>
+                                </div>
+                                {/* +/- Buttons + zentrale Anzeige — volle Breite */}
+                                <div style={{ display: "flex", alignItems: "stretch", gap: "0", borderRadius: "8px", overflow: "hidden", border: `1px solid ${T.line}` }}>
                                   <button
                                     onClick={() => updateVal(currentVal - 1)}
                                     style={{
-                                      width: "40px", background: T.surface1, color: T.sage,
+                                      width: "44px", background: T.surface1, color: T.sage,
                                       border: "none", borderRight: `1px solid ${T.line}`,
                                       fontSize: "20px", fontWeight: 700, cursor: "pointer",
                                       fontFamily: "inherit",
@@ -14736,22 +14903,19 @@ WICHTIG:
                                     style={{
                                       flex: 1, textAlign: "center", background: T.surface1,
                                       color: currentVal < 0 ? T.sage : currentVal > 0 ? T.double : T.text,
-                                      border: "none", padding: "8px",
+                                      border: "none", padding: "8px", minWidth: 0,
                                       fontSize: "16px", fontWeight: 700,
                                       fontFamily: "inherit",
                                     }}/>
                                   <button
                                     onClick={() => updateVal(currentVal + 1)}
                                     style={{
-                                      width: "40px", background: T.surface1, color: T.double,
+                                      width: "44px", background: T.surface1, color: T.double,
                                       border: "none", borderLeft: `1px solid ${T.line}`,
                                       fontSize: "20px", fontWeight: 700, cursor: "pointer",
                                       fontFamily: "inherit",
                                     }}>+</button>
                                 </div>
-                                <span style={{ fontSize: "10px", color: T.textDim, minWidth: "60px", textAlign: "right" }}>
-                                  {currentVal === 0 ? "kein Effekt" : currentVal < 0 ? `${Math.abs(currentVal)} härter` : `${currentVal} leichter`}
-                                </span>
                               </div>
                             );
                           })}
@@ -14775,15 +14939,20 @@ WICHTIG:
                               setF({ hcpRules: { ...f.hcpRules, worstAdj: arr } });
                             };
                             return (
-                              <div key={i} style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                                <span style={{ fontSize: "13px", color: T.text, fontWeight: 600, minWidth: "70px" }}>
-                                  {worstLabels[i] || `${i + 1}.-Letzter`}
-                                </span>
-                                <div style={{ flex: 1, display: "flex", alignItems: "stretch", gap: "0", borderRadius: "8px", overflow: "hidden", border: `1px solid ${T.line}` }}>
+                              <div key={i} style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                  <span style={{ fontSize: "12px", color: T.text, fontWeight: 600 }}>
+                                    {worstLabels[i] || `${i + 1}.-Letzter`}
+                                  </span>
+                                  <span style={{ fontSize: "10px", color: T.textDim }}>
+                                    {currentVal === 0 ? "kein Effekt" : currentVal > 0 ? `${currentVal} leichter` : `${Math.abs(currentVal)} härter`}
+                                  </span>
+                                </div>
+                                <div style={{ display: "flex", alignItems: "stretch", gap: "0", borderRadius: "8px", overflow: "hidden", border: `1px solid ${T.line}` }}>
                                   <button
                                     onClick={() => updateVal(currentVal - 1)}
                                     style={{
-                                      width: "40px", background: T.surface1, color: T.sage,
+                                      width: "44px", background: T.surface1, color: T.sage,
                                       border: "none", borderRight: `1px solid ${T.line}`,
                                       fontSize: "20px", fontWeight: 700, cursor: "pointer",
                                       fontFamily: "inherit",
@@ -14796,22 +14965,19 @@ WICHTIG:
                                     style={{
                                       flex: 1, textAlign: "center", background: T.surface1,
                                       color: currentVal > 0 ? T.double : currentVal < 0 ? T.sage : T.text,
-                                      border: "none", padding: "8px",
+                                      border: "none", padding: "8px", minWidth: 0,
                                       fontSize: "16px", fontWeight: 700,
                                       fontFamily: "inherit",
                                     }}/>
                                   <button
                                     onClick={() => updateVal(currentVal + 1)}
                                     style={{
-                                      width: "40px", background: T.surface1, color: T.double,
+                                      width: "44px", background: T.surface1, color: T.double,
                                       border: "none", borderLeft: `1px solid ${T.line}`,
                                       fontSize: "20px", fontWeight: 700, cursor: "pointer",
                                       fontFamily: "inherit",
                                     }}>+</button>
                                 </div>
-                                <span style={{ fontSize: "10px", color: T.textDim, minWidth: "60px", textAlign: "right" }}>
-                                  {currentVal === 0 ? "kein Effekt" : currentVal > 0 ? `${currentVal} leichter` : `${Math.abs(currentVal)} härter`}
-                                </span>
                               </div>
                             );
                           })}
@@ -17180,6 +17346,19 @@ WICHTIG:
             <button onClick={() => setShowCleanup(true)}
               style={{ ...S.btnSecondary, fontSize: "12px", padding: "10px", width: "100%", color: T.gold, borderColor: `${T.gold}40` }}>
               🧹 Aufräum-Übersicht öffnen
+            </button>
+          </div>
+
+          {/* v58: Cyprus-Test-Daten-Loader (Branch cyprus-test) */}
+          <div style={{ marginTop: "22px", paddingTop: "18px", borderTop: `1px solid ${T.line}` }}>
+            <div style={{ ...S.eyebrow, marginBottom: "10px", color: T.sage }}>🧪 Test-Daten</div>
+            <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, marginBottom: "10px" }}>
+              Lädt 4 vorgefertigte Freunde (Wagner, Toddler, Nudler, Bodo) + Cyprus 2026 Trip mit 2 fertig gespielten Runden zum Testen.
+              Nützlich auf Test-Branches — bestehende Daten bleiben erhalten.
+            </p>
+            <button onClick={loadCyprusTestData}
+              style={{ ...S.btnSecondary, fontSize: "12px", padding: "10px", width: "100%", color: T.sage, borderColor: `${T.sage}40` }}>
+              🧪 Cyprus Test-Daten laden
             </button>
           </div>
 
