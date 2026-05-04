@@ -4933,11 +4933,13 @@ function GolfAppInner() {
         weekTeamPot: data.pots?.weekTeamPot || 50,
         nearestPin: data.pots?.nearestPin || 10,
       },
-      // v43: HCP-Regeln
+      // v43+v58: HCP-Regeln
+      // bestAdj[0] = 1. Platz (höchster Abzug, härtester Pole)
+      // worstAdj[0] = Letzter (höchster Aufschlag, größte Erleichterung)
       hcpRules: data.hcpRules || {
         enabled: true,
         bestAdj: [-3, -2, -1],
-        worstAdj: [1, 2, 3],
+        worstAdj: [3, 2, 1],
       },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -5020,7 +5022,7 @@ function GolfAppInner() {
 
     const ranked = dayStanding.ranked;
     const bestAdj = trip.hcpRules.bestAdj || [-3, -2, -1];
-    const worstAdj = trip.hcpRules.worstAdj || [1, 2, 3];
+    const worstAdj = trip.hcpRules.worstAdj || [3, 2, 1];
 
     // Adjustments pro Spieler bestimmen
     const adjustmentsForPlayer = {};
@@ -8704,7 +8706,7 @@ function GolfAppInner() {
                       hcpRules: {
                         enabled: true,
                         bestAdj: [-3, -2, -1],
-                        worstAdj: [1, 2, 3],
+                        worstAdj: [3, 2, 1],
                       },
                     });
                     setShowTripSetup(true);
@@ -14668,8 +14670,10 @@ WICHTIG:
               while (worstAdjArr.length < maxSlots) worstAdjArr.push(0);
 
               // Smart-Default-Werte bei initialer Spielerzahl
+              // bestDefaults[0] = 1. Platz (höchster Abzug)
+              // worstDefaults[0] = Letzter (höchster Aufschlag)
               const bestDefaults = [-3, -2, -1];
-              const worstDefaults = [1, 2, 3];
+              const worstDefaults = [3, 2, 1];
 
               // Worst-Labels: "Letzter", "2.-Letzter", "3.-Letzter"
               const worstLabels = ["Letzter", "2.-Letzter", "3.-Letzter"];
@@ -14693,86 +14697,175 @@ WICHTIG:
 
                   {/* v58-fix: Block IMMER zeigen — auch ohne Spieler. Sonst wirkt's "broken" */}
                   <>
-                      {/* BESTE → Abzug */}
+                      {/* BESTE → Abzug — Reihenfolge: 1. Platz oben (höchster Wert) */}
                       <div style={{ background: T.surface2, borderRadius: "8px", padding: "10px", marginBottom: "8px" }}>
-                        <div style={{ fontSize: "10px", color: T.sage, fontWeight: 700, marginBottom: "6px", letterSpacing: "0.04em" }}>
-                          {maxSlots === 1 ? "1. PLATZ" : `BESTE ${maxSlots}`} → HCP-ABZUG (negativ = leichter)
+                        <div style={{ fontSize: "10px", color: T.sage, fontWeight: 700, marginBottom: "8px", letterSpacing: "0.04em", display: "flex", alignItems: "center", gap: "6px" }}>
+                          <span>🏆 BESTE → HCP-ABZUG</span>
+                          <span style={{ fontSize: "9px", color: T.textDim, fontWeight: 400, fontStyle: "italic", textTransform: "none", letterSpacing: 0 }}>
+                            (negativ = nächste Runde härter)
+                          </span>
                         </div>
-                        <div style={{ display: "grid", gridTemplateColumns: gridCols, gap: "6px" }}>
-                          {Array.from({ length: maxSlots }).map((_, i) => (
-                            <div key={i}>
-                              <label style={{ fontSize: "9px", color: T.textDim, display: "block", marginBottom: "2px" }}>
-                                {i + 1}. Platz
-                              </label>
-                              <input type="number" value={bestAdjArr[i] !== undefined ? bestAdjArr[i] : (bestDefaults[i] || 0)}
-                                onChange={e => {
-                                  const v = parseInt(e.target.value) || 0;
-                                  const arr = [...bestAdjArr];
-                                  arr[i] = v;
-                                  setF({ hcpRules: { ...f.hcpRules, bestAdj: arr } });
-                                }}
-                                style={{ ...S.input, fontSize: "13px", padding: "6px 8px", textAlign: "center", color: T.sage, fontWeight: 700 }}/>
-                            </div>
-                          ))}
+                        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                          {Array.from({ length: maxSlots }).map((_, i) => {
+                            const currentVal = bestAdjArr[i] !== undefined ? bestAdjArr[i] : (bestDefaults[i] || 0);
+                            const updateVal = (newV) => {
+                              const arr = [...bestAdjArr];
+                              arr[i] = newV;
+                              setF({ hcpRules: { ...f.hcpRules, bestAdj: arr } });
+                            };
+                            return (
+                              <div key={i} style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                                <span style={{ fontSize: "13px", color: T.text, fontWeight: 600, minWidth: "70px" }}>
+                                  {i + 1}. Platz
+                                </span>
+                                {/* +/- Buttons + zentrale Anzeige */}
+                                <div style={{ flex: 1, display: "flex", alignItems: "stretch", gap: "0", borderRadius: "8px", overflow: "hidden", border: `1px solid ${T.line}` }}>
+                                  <button
+                                    onClick={() => updateVal(currentVal - 1)}
+                                    style={{
+                                      width: "40px", background: T.surface1, color: T.sage,
+                                      border: "none", borderRight: `1px solid ${T.line}`,
+                                      fontSize: "20px", fontWeight: 700, cursor: "pointer",
+                                      fontFamily: "inherit",
+                                    }}>−</button>
+                                  <input
+                                    type="number" inputMode="numeric" pattern="-?[0-9]*"
+                                    value={currentVal}
+                                    onChange={e => updateVal(parseInt(e.target.value) || 0)}
+                                    onFocus={e => e.target.select()}
+                                    style={{
+                                      flex: 1, textAlign: "center", background: T.surface1,
+                                      color: currentVal < 0 ? T.sage : currentVal > 0 ? T.double : T.text,
+                                      border: "none", padding: "8px",
+                                      fontSize: "16px", fontWeight: 700,
+                                      fontFamily: "inherit",
+                                    }}/>
+                                  <button
+                                    onClick={() => updateVal(currentVal + 1)}
+                                    style={{
+                                      width: "40px", background: T.surface1, color: T.double,
+                                      border: "none", borderLeft: `1px solid ${T.line}`,
+                                      fontSize: "20px", fontWeight: 700, cursor: "pointer",
+                                      fontFamily: "inherit",
+                                    }}>+</button>
+                                </div>
+                                <span style={{ fontSize: "10px", color: T.textDim, minWidth: "60px", textAlign: "right" }}>
+                                  {currentVal === 0 ? "kein Effekt" : currentVal < 0 ? `${Math.abs(currentVal)} härter` : `${currentVal} leichter`}
+                                </span>
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
 
-                      {/* SCHLECHTESTE → Aufschlag */}
+                      {/* SCHLECHTESTE → Aufschlag — Reihenfolge: Letzter oben (höchster Wert) */}
                       <div style={{ background: T.surface2, borderRadius: "8px", padding: "10px" }}>
-                        <div style={{ fontSize: "10px", color: T.double, fontWeight: 700, marginBottom: "6px", letterSpacing: "0.04em" }}>
-                          {maxSlots === 1 ? "LETZTER" : `SCHLECHTESTE ${maxSlots}`} → HCP-AUFSCHLAG (positiv = schwerer)
+                        <div style={{ fontSize: "10px", color: T.double, fontWeight: 700, marginBottom: "8px", letterSpacing: "0.04em", display: "flex", alignItems: "center", gap: "6px" }}>
+                          <span>💀 SCHLECHTESTE → HCP-AUFSCHLAG</span>
+                          <span style={{ fontSize: "9px", color: T.textDim, fontWeight: 400, fontStyle: "italic", textTransform: "none", letterSpacing: 0 }}>
+                            (positiv = nächste Runde leichter)
+                          </span>
                         </div>
-                        <div style={{ display: "grid", gridTemplateColumns: gridCols, gap: "6px" }}>
-                          {Array.from({ length: maxSlots }).map((_, i) => (
-                            <div key={i}>
-                              <label style={{ fontSize: "9px", color: T.textDim, display: "block", marginBottom: "2px" }}>
-                                {worstLabels[i] || `${i + 1}.-Letzter`}
-                              </label>
-                              <input type="number" value={worstAdjArr[i] !== undefined ? worstAdjArr[i] : (worstDefaults[i] || 0)}
-                                onChange={e => {
-                                  const v = parseInt(e.target.value) || 0;
-                                  const arr = [...worstAdjArr];
-                                  arr[i] = v;
-                                  setF({ hcpRules: { ...f.hcpRules, worstAdj: arr } });
-                                }}
-                                style={{ ...S.input, fontSize: "13px", padding: "6px 8px", textAlign: "center", color: T.double, fontWeight: 700 }}/>
-                            </div>
-                          ))}
+                        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                          {Array.from({ length: maxSlots }).map((_, i) => {
+                            const currentVal = worstAdjArr[i] !== undefined ? worstAdjArr[i] : (worstDefaults[i] || 0);
+                            const updateVal = (newV) => {
+                              const arr = [...worstAdjArr];
+                              arr[i] = newV;
+                              setF({ hcpRules: { ...f.hcpRules, worstAdj: arr } });
+                            };
+                            return (
+                              <div key={i} style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                                <span style={{ fontSize: "13px", color: T.text, fontWeight: 600, minWidth: "70px" }}>
+                                  {worstLabels[i] || `${i + 1}.-Letzter`}
+                                </span>
+                                <div style={{ flex: 1, display: "flex", alignItems: "stretch", gap: "0", borderRadius: "8px", overflow: "hidden", border: `1px solid ${T.line}` }}>
+                                  <button
+                                    onClick={() => updateVal(currentVal - 1)}
+                                    style={{
+                                      width: "40px", background: T.surface1, color: T.sage,
+                                      border: "none", borderRight: `1px solid ${T.line}`,
+                                      fontSize: "20px", fontWeight: 700, cursor: "pointer",
+                                      fontFamily: "inherit",
+                                    }}>−</button>
+                                  <input
+                                    type="number" inputMode="numeric" pattern="-?[0-9]*"
+                                    value={currentVal}
+                                    onChange={e => updateVal(parseInt(e.target.value) || 0)}
+                                    onFocus={e => e.target.select()}
+                                    style={{
+                                      flex: 1, textAlign: "center", background: T.surface1,
+                                      color: currentVal > 0 ? T.double : currentVal < 0 ? T.sage : T.text,
+                                      border: "none", padding: "8px",
+                                      fontSize: "16px", fontWeight: 700,
+                                      fontFamily: "inherit",
+                                    }}/>
+                                  <button
+                                    onClick={() => updateVal(currentVal + 1)}
+                                    style={{
+                                      width: "40px", background: T.surface1, color: T.double,
+                                      border: "none", borderLeft: `1px solid ${T.line}`,
+                                      fontSize: "20px", fontWeight: 700, cursor: "pointer",
+                                      fontFamily: "inherit",
+                                    }}>+</button>
+                                </div>
+                                <span style={{ fontSize: "10px", color: T.textDim, minWidth: "60px", textAlign: "right" }}>
+                                  {currentVal === 0 ? "kein Effekt" : currentVal > 0 ? `${currentVal} leichter` : `${Math.abs(currentVal)} härter`}
+                                </span>
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
 
                       {/* Visuelle Vorschau — nur bei tatsächlichen Spielern sinnvoll */}
                       {numPlayers > 0 && (
-                        <div style={{ marginTop: "10px", padding: "8px 10px", background: `${T.gold}05`, border: `1px dashed ${T.line}`, borderRadius: "6px", fontSize: "10px", color: T.textDim, lineHeight: 1.5 }}>
-                          <div style={{ fontWeight: 700, color: T.textSoft, marginBottom: "4px" }}>📊 So wirkt's bei {numPlayers} Spielern:</div>
-                          {(() => {
-                            const preview = [];
-                            for (let pos = 0; pos < numPlayers; pos++) {
-                              const fromBest = pos;
-                              const fromWorst = numPlayers - 1 - pos;
-                              let adj = 0;
-                              let label = "";
-                              if (fromBest < maxSlots) {
-                                adj = bestAdjArr[fromBest];
-                                label = `Platz ${pos + 1}`;
-                              } else if (fromWorst < maxSlots) {
-                                adj = worstAdjArr[fromWorst];
-                                label = fromWorst === 0 ? "Letzter" : `${fromWorst + 1}.-Letzter`;
-                              } else {
-                                label = `Platz ${pos + 1} (Mitte)`;
+                        <div style={{ marginTop: "10px", padding: "10px 12px", background: `${T.gold}05`, border: `1px dashed ${T.line}`, borderRadius: "6px" }}>
+                          <div style={{ fontSize: "10px", fontWeight: 700, color: T.gold, marginBottom: "8px", letterSpacing: "0.04em" }}>
+                            📊 VORSCHAU · {numPlayers} SPIELER
+                          </div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                            {(() => {
+                              const preview = [];
+                              for (let pos = 0; pos < numPlayers; pos++) {
+                                const fromBest = pos;
+                                const fromWorst = numPlayers - 1 - pos;
+                                let adj = 0;
+                                let label = "";
+                                let category = "mitte";
+                                if (fromBest < maxSlots) {
+                                  adj = bestAdjArr[fromBest] !== undefined ? bestAdjArr[fromBest] : (bestDefaults[fromBest] || 0);
+                                  label = `${pos + 1}. Platz`;
+                                  category = "best";
+                                } else if (fromWorst < maxSlots) {
+                                  adj = worstAdjArr[fromWorst] !== undefined ? worstAdjArr[fromWorst] : (worstDefaults[fromWorst] || 0);
+                                  label = fromWorst === 0 ? "Letzter" : `${fromWorst + 1}.-Letzter`;
+                                  category = "worst";
+                                } else {
+                                  label = `${pos + 1}. Platz · Mittelfeld`;
+                                  category = "mitte";
+                                }
+                                preview.push(
+                                  <div key={pos} style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "11px" }}>
+                                    <span style={{
+                                      width: "16px", height: "16px", borderRadius: "50%",
+                                      background: category === "best" ? `${T.sage}30` : category === "worst" ? `${T.double}30` : `${T.textDim}20`,
+                                      display: "flex", alignItems: "center", justifyContent: "center",
+                                      fontSize: "9px", fontWeight: 700,
+                                      color: category === "best" ? T.sage : category === "worst" ? T.double : T.textDim,
+                                    }}>{pos + 1}</span>
+                                    <span style={{ flex: 1, color: T.textSoft }}>{label}</span>
+                                    <span className="mono" style={{
+                                      fontSize: "12px", fontWeight: 700,
+                                      color: adj < 0 ? T.sage : adj > 0 ? T.double : T.textDim,
+                                      minWidth: "28px", textAlign: "right",
+                                    }}>{adj > 0 ? "+" : ""}{adj}</span>
+                                  </div>
+                                );
                               }
-                              preview.push(
-                                <span key={pos} style={{ marginRight: "8px" }}>
-                                  <span>{label}: </span>
-                                  <span style={{
-                                    color: adj < 0 ? T.sage : adj > 0 ? T.double : T.textDim,
-                                    fontWeight: 700,
-                                  }}>{adj > 0 ? "+" : ""}{adj}</span>
-                                </span>
-                              );
-                            }
-                            return preview;
-                          })()}
+                              return preview;
+                            })()}
+                          </div>
                         </div>
                       )}
                     </>
