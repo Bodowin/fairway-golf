@@ -1383,6 +1383,20 @@ function sfNormalized(sfRaw, numHoles) {
   return sfRaw || 0;
 }
 
+// ── v58: Ausreißer-Filter ──
+// Spieler können einzelne Runden als "Ausreißer" markieren — diese werden aus
+// allen Statistiken ausgeschlossen (Sim-HCP, Best-SF, Form-Trend, Saison-Graph).
+// Pro Spieler: round.excludedForPlayers ist ein Array von normalisierten Namen
+// die diese Runde als Ausreißer markiert haben.
+// Globale Ausreißer (round.excludedFromStats: true) werden für ALLE Stats ignoriert.
+function isExcludedForPlayer(round, playerName) {
+  if (!round) return false;
+  if (round.excludedFromStats === true) return true;
+  if (!playerName) return false;
+  const exclList = round.excludedForPlayers || [];
+  return exclList.includes(normName(playerName));
+}
+
 // ── v34: Total Strokes — Summe aller Schläge pro Spieler ──
 // Manueller Strich zählt mit Cap-Wert (Par + Vorgabeschläge + 2).
 // Manuelle Eingabe (auch ≥ Cap, z.B. 10) zählt mit echtem Wert.
@@ -1909,6 +1923,8 @@ function computeSimHcp(playerNameOrId, allRounds, fallbackName) {
 
   const playerRounds = allRounds
     .filter(r => (r.players || []).some(matches))
+    // v58: Ausreißer ausschließen
+    .filter(r => !isExcludedForPlayer(r, lookupName || fallbackName))
     .sort((a, b) => {
       const da = new Date(a.cfg?.date || a.savedAt || 0).getTime();
       const db = new Date(b.cfg?.date || b.savedAt || 0).getTime();
@@ -5951,6 +5967,33 @@ function GolfAppInner() {
     undoTimerRef.current = setTimeout(() => setUndoAction(null), 6000);
   };
 
+  // ── v58: Ausreißer-Toggle pro Runde (pro Spieler) ──
+  // Wird in Sim-HCP, Best-SF, Form-Trend, Saison-Graph respektiert.
+  // playerName=null → globaler Ausreißer (für ALLE Spieler ausgeschlossen)
+  const toggleRoundOutlier = async (roundId, playerName = null) => {
+    const updated = rounds.map(r => {
+      if (r.id !== roundId) return r;
+      if (playerName === null) {
+        // Global toggle
+        return { ...r, excludedFromStats: !r.excludedFromStats };
+      }
+      // Per-Player toggle
+      const norm = normName(playerName);
+      const list = r.excludedForPlayers || [];
+      const newList = list.includes(norm)
+        ? list.filter(x => x !== norm)
+        : [...list, norm];
+      return { ...r, excludedForPlayers: newList };
+    });
+    setRounds(updated);
+    try { await window.storage.set("golf-rounds", JSON.stringify(updated)); } catch {}
+    // Cloud-Push der einzelnen Runde
+    const round = updated.find(r => r.id === roundId);
+    if (round && SYNC_ENABLED && syncCode) {
+      try { await cloudPushRound(syncCode, round, deviceId); } catch {}
+    }
+  };
+
   const deleteRound = async (id) => {
     const deletedRound = rounds.find(r => r.id === id);
     const updated = rounds.filter(r => r.id !== id);
@@ -6576,9 +6619,9 @@ function GolfAppInner() {
       : aggregateClubStats(activeClub, allRoundsForStats);
 
     // Active focus player — must exist in stats for this club
-    const availablePlayers = stats?.playerStats.map(p => p.name) || [];
+    const availablePlayers = (stats && stats.playerStats) ? stats.playerStats.map(p => p.name) : [];
     const focusPlayerName = statsFocusPlayer && availablePlayers.includes(statsFocusPlayer) ? statsFocusPlayer : null;
-    const focusPlayerData = focusPlayerName ? stats.playerStats.find(p => p.name === focusPlayerName) : null;
+    const focusPlayerData = (focusPlayerName && stats && stats.playerStats) ? stats.playerStats.find(p => p.name === focusPlayerName) : null;
 
     return (
       <div>
@@ -6597,8 +6640,69 @@ function GolfAppInner() {
           </select>
         </div>
 
-        {/* Focus player selector */}
-        {stats && stats.playerStats.length > 0 && (
+        {/* v58: Alle-Clubs-Mode → eigene Übersichts-Card */}
+        {isAllClubsMode && (
+          <>
+            <div style={{ ...S.card, marginBottom: "14px", padding: "14px" }}>
+              <div style={{ ...S.eyebrow, marginBottom: "10px", color: T.gold }}>🌍 Übersicht aller Clubs</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "10px" }}>
+                <div style={{ padding: "10px", background: T.surface2, borderRadius: "8px", textAlign: "center" }}>
+                  <div className="mono" style={{ fontSize: "20px", fontWeight: 700, color: T.gold }}>{allRoundsForStats.length}</div>
+                  <div style={{ fontSize: "10px", color: T.textDim, marginTop: "2px" }}>RUNDEN</div>
+                </div>
+                <div style={{ padding: "10px", background: T.surface2, borderRadius: "8px", textAlign: "center" }}>
+                  <div className="mono" style={{ fontSize: "20px", fontWeight: 700, color: T.gold }}>{clubsPlayed.length}</div>
+                  <div style={{ fontSize: "10px", color: T.textDim, marginTop: "2px" }}>CLUBS</div>
+                </div>
+              </div>
+              <p style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5, fontStyle: "italic", margin: "10px 0 0" }}>
+                Für detaillierte Statistiken (Lieblingsloch, Sim-HCP, Vergleich) wähle bitte einen einzelnen Club aus.
+              </p>
+            </div>
+
+            {/* Club-Liste mit Rundenanzahl */}
+            <div style={{ ...S.card, marginBottom: "14px", padding: "14px" }}>
+              <div style={{ ...S.eyebrow, marginBottom: "10px" }}>🏌️ Clubs nach Häufigkeit</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                {clubsPlayed
+                  .map(c => ({ name: c, count: allRoundsForStats.filter(r => r.cfg?.clubName === c).length }))
+                  .sort((a, b) => b.count - a.count)
+                  .map(c => (
+                    <button key={c.name}
+                      onClick={() => setStatsClubName(c.name)}
+                      style={{
+                        display: "flex", alignItems: "center", justifyContent: "space-between",
+                        padding: "10px 12px", background: T.surface2,
+                        border: `1px solid ${T.line}`, borderRadius: "8px",
+                        textAlign: "left", cursor: "pointer", color: T.text,
+                        fontFamily: "inherit",
+                      }}>
+                      <span style={{ fontSize: "13px", fontWeight: 600 }}>{c.name}</span>
+                      <span className="mono" style={{ fontSize: "12px", color: T.gold }}>
+                        {c.count} {c.count === 1 ? "Runde" : "Runden"} →
+                      </span>
+                    </button>
+                  ))}
+              </div>
+            </div>
+
+            {/* Imported-data banner — auch in All-Mode */}
+            {statsImportedRounds.length > 0 && (
+              <div style={{
+                background: T.surface2, border: `1px solid ${T.line}`,
+                borderRadius: "10px", padding: "12px 14px", marginBottom: "14px",
+              }}>
+                <div style={{ ...S.eyebrow, marginBottom: "6px", color: T.sage }}>📥 Inkl. importierter Runden</div>
+                <div style={{ fontSize: "11px", color: T.textDim, lineHeight: 1.5 }}>
+                  {statsImportedRounds.length} importierte Runde{statsImportedRounds.length !== 1 && "n"} fließen in diese Statistik mit ein.
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* Focus player selector — nur wenn NICHT All-Mode und stats vorhanden */}
+        {!isAllClubsMode && stats && stats.playerStats && stats.playerStats.length > 0 && (
           <div style={{ marginBottom: "14px" }}>
             <div style={{ ...S.eyebrow, marginBottom: "6px" }}>👤 Perspektive</div>
             <select
@@ -6633,7 +6737,7 @@ function GolfAppInner() {
           <EmptyState icon="📊" title="Keine Daten für diesen Club" sub="Noch keine abgeschlossenen Runden." />
         )}
 
-        {stats && (
+        {!isAllClubsMode && stats && stats.playerStats && (
           <>
             {/* Reliability warning */}
             {stats.roundsCount < 3 && (
@@ -6647,7 +6751,7 @@ function GolfAppInner() {
             )}
 
             {/* Hall of Fame — only shown in "all players" mode */}
-            {!focusPlayerName && (
+            {!focusPlayerName && stats?.hallOfFame && (
               <div style={{ ...S.card, padding: "12px 14px", marginBottom: "14px" }}>
                 <div style={{ ...S.eyebrow, marginBottom: "10px", color: T.gold, display: "flex", alignItems: "center", gap: "6px" }}>
                   <span>🏆 Hall of Fame</span>
@@ -7061,9 +7165,13 @@ function GolfAppInner() {
     const totalRounds = rounds.length;
     const clubsPlayed = new Set(rounds.map(r => r.cfg.clubName).filter(Boolean)).size;
     const bestSFData = rounds.reduce((max, r) => {
+      // v58: Global-Ausreißer komplett überspringen
+      if (r.excludedFromStats === true) return max;
       const rClub = r.selectedClubSnapshot || allClubs.find(c => c.name === r.cfg.clubName);
       const par = sumPar(r.holes);
       const stats = r.players.map(p => {
+        // v58: Spieler-Ausreißer überspringen
+        if (isExcludedForPlayer(r, p.name)) return 0;
         const tee = playerTee(p, r.cfg, rClub);
         if (!tee) return 0;
         // v36: resolvePlayerPH konsistent zu allen anderen Stellen
@@ -7692,6 +7800,8 @@ function GolfAppInner() {
             const ownerSim = ownerName ? computeSimHcp(viewPlayerKey, rounds, ownerName) : null;
             const ownerLastFiveSf = ownerName ? rounds
               .filter(r => (r.players || []).some(p => normName(p.name) === normName(ownerName)))
+              // v58: Ausreißer ausschließen
+              .filter(r => !isExcludedForPlayer(r, ownerName))
               .slice(0, 5)
               .map(r => {
                 const player = (r.players || []).find(p => normName(p.name) === normName(ownerName));
@@ -7912,6 +8022,8 @@ function GolfAppInner() {
             const [seasonRange, _x] = [seasonRangeState || "30d", null]; // 30d | 90d | season
             const seasonRoundsRaw = ownerName ? rounds
               .filter(r => (r.players || []).some(p => normName(p.name) === normName(ownerName)))
+              // v58: Ausreißer ausschließen
+              .filter(r => !isExcludedForPlayer(r, ownerName))
               .map(r => {
                 const player = (r.players || []).find(p => normName(p.name) === normName(ownerName));
                 if (!player || !r.holes?.length) return null;
@@ -8767,6 +8879,21 @@ function GolfAppInner() {
                 </span>
               ) : (
                 <span>{r.cfg.numHoles}L</span>
+              )}
+              {/* v58: Ausreißer-Badge */}
+              {r.excludedFromStats && (
+                <span
+                  title="Diese Runde ist als Ausreißer markiert und wird in Statistiken nicht gezählt"
+                  style={{
+                    fontSize: "10px", padding: "1px 5px",
+                    background: `${T.double}20`, color: T.double,
+                    border: `1px solid ${T.double}40`,
+                    borderRadius: "4px", fontWeight: 700,
+                    letterSpacing: "0.04em",
+                  }}
+                >
+                  🚫 OUTLIER
+                </span>
               )}
             </div>
             {/* Player initials with winner highlighted */}
@@ -11579,26 +11706,48 @@ function GolfAppInner() {
           </div>
 
           {/* Delete button - only shown when viewing/editing a saved round */}
-          {loadedRoundId && rounds.find(r => r.id === loadedRoundId) && (
-            <button
-              onClick={() => {
-                const r = rounds.find(rr => rr.id === loadedRoundId);
-                if (r) confirmDelete(r);
-              }}
-              style={{
-                width: "100%", marginTop: "14px",
-                background: "transparent",
-                color: T.double,
-                border: `1px solid ${T.double}40`,
-                borderRadius: "12px",
-                padding: "12px",
-                fontSize: "13px",
-                fontWeight: 500,
-                fontFamily: "Inter, sans-serif",
-              }}>
-              🗑 Diese Runde löschen
-            </button>
-          )}
+          {loadedRoundId && rounds.find(r => r.id === loadedRoundId) && (() => {
+            const r = rounds.find(rr => rr.id === loadedRoundId);
+            const isExcluded = r?.excludedFromStats === true;
+            return (
+              <>
+                {/* v58: Ausreißer-Toggle */}
+                <button
+                  onClick={() => toggleRoundOutlier(loadedRoundId, null)}
+                  style={{
+                    width: "100%", marginTop: "14px",
+                    background: isExcluded ? `${T.gold}10` : "transparent",
+                    color: isExcluded ? T.gold : T.textSoft,
+                    border: `1px solid ${isExcluded ? T.gold + "60" : T.line}`,
+                    borderRadius: "12px",
+                    padding: "12px",
+                    fontSize: "13px",
+                    fontWeight: 600,
+                    fontFamily: "Inter, sans-serif",
+                  }}>
+                  {isExcluded
+                    ? "✓ Ausreißer aktiv — wird nicht in Statistiken gezählt"
+                    : "🚫 Als Ausreißer markieren (Bad Day, von Stats ausschließen)"
+                  }
+                </button>
+                <button
+                  onClick={() => confirmDelete(r)}
+                  style={{
+                    width: "100%", marginTop: "10px",
+                    background: "transparent",
+                    color: T.double,
+                    border: `1px solid ${T.double}40`,
+                    borderRadius: "12px",
+                    padding: "12px",
+                    fontSize: "13px",
+                    fontWeight: 500,
+                    fontFamily: "Inter, sans-serif",
+                  }}>
+                  🗑 Diese Runde löschen
+                </button>
+              </>
+            );
+          })()}
 
           {/* Runden-Analyse Button — only show if round has data */}
           {loadedRoundId && (
