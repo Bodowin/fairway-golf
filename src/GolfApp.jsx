@@ -14714,16 +14714,21 @@ WICHTIG:
                               setF({ hcpRules: { ...f.hcpRules, bestAdj: arr } });
                             };
                             return (
-                              <div key={i} style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                                <span style={{ fontSize: "13px", color: T.text, fontWeight: 600, minWidth: "70px" }}>
-                                  {i + 1}. Platz
-                                </span>
-                                {/* +/- Buttons + zentrale Anzeige */}
-                                <div style={{ flex: 1, display: "flex", alignItems: "stretch", gap: "0", borderRadius: "8px", overflow: "hidden", border: `1px solid ${T.line}` }}>
+                              <div key={i} style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                  <span style={{ fontSize: "12px", color: T.text, fontWeight: 600 }}>
+                                    {i + 1}. Platz
+                                  </span>
+                                  <span style={{ fontSize: "10px", color: T.textDim }}>
+                                    {currentVal === 0 ? "kein Effekt" : currentVal < 0 ? `${Math.abs(currentVal)} härter` : `${currentVal} leichter`}
+                                  </span>
+                                </div>
+                                {/* +/- Buttons + zentrale Anzeige — volle Breite */}
+                                <div style={{ display: "flex", alignItems: "stretch", gap: "0", borderRadius: "8px", overflow: "hidden", border: `1px solid ${T.line}` }}>
                                   <button
                                     onClick={() => updateVal(currentVal - 1)}
                                     style={{
-                                      width: "40px", background: T.surface1, color: T.sage,
+                                      width: "44px", background: T.surface1, color: T.sage,
                                       border: "none", borderRight: `1px solid ${T.line}`,
                                       fontSize: "20px", fontWeight: 700, cursor: "pointer",
                                       fontFamily: "inherit",
@@ -14736,22 +14741,19 @@ WICHTIG:
                                     style={{
                                       flex: 1, textAlign: "center", background: T.surface1,
                                       color: currentVal < 0 ? T.sage : currentVal > 0 ? T.double : T.text,
-                                      border: "none", padding: "8px",
+                                      border: "none", padding: "8px", minWidth: 0,
                                       fontSize: "16px", fontWeight: 700,
                                       fontFamily: "inherit",
                                     }}/>
                                   <button
                                     onClick={() => updateVal(currentVal + 1)}
                                     style={{
-                                      width: "40px", background: T.surface1, color: T.double,
+                                      width: "44px", background: T.surface1, color: T.double,
                                       border: "none", borderLeft: `1px solid ${T.line}`,
                                       fontSize: "20px", fontWeight: 700, cursor: "pointer",
                                       fontFamily: "inherit",
                                     }}>+</button>
                                 </div>
-                                <span style={{ fontSize: "10px", color: T.textDim, minWidth: "60px", textAlign: "right" }}>
-                                  {currentVal === 0 ? "kein Effekt" : currentVal < 0 ? `${Math.abs(currentVal)} härter` : `${currentVal} leichter`}
-                                </span>
                               </div>
                             );
                           })}
@@ -14775,15 +14777,20 @@ WICHTIG:
                               setF({ hcpRules: { ...f.hcpRules, worstAdj: arr } });
                             };
                             return (
-                              <div key={i} style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                                <span style={{ fontSize: "13px", color: T.text, fontWeight: 600, minWidth: "70px" }}>
-                                  {worstLabels[i] || `${i + 1}.-Letzter`}
-                                </span>
-                                <div style={{ flex: 1, display: "flex", alignItems: "stretch", gap: "0", borderRadius: "8px", overflow: "hidden", border: `1px solid ${T.line}` }}>
+                              <div key={i} style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                  <span style={{ fontSize: "12px", color: T.text, fontWeight: 600 }}>
+                                    {worstLabels[i] || `${i + 1}.-Letzter`}
+                                  </span>
+                                  <span style={{ fontSize: "10px", color: T.textDim }}>
+                                    {currentVal === 0 ? "kein Effekt" : currentVal > 0 ? `${currentVal} leichter` : `${Math.abs(currentVal)} härter`}
+                                  </span>
+                                </div>
+                                <div style={{ display: "flex", alignItems: "stretch", gap: "0", borderRadius: "8px", overflow: "hidden", border: `1px solid ${T.line}` }}>
                                   <button
                                     onClick={() => updateVal(currentVal - 1)}
                                     style={{
-                                      width: "40px", background: T.surface1, color: T.sage,
+                                      width: "44px", background: T.surface1, color: T.sage,
                                       border: "none", borderRight: `1px solid ${T.line}`,
                                       fontSize: "20px", fontWeight: 700, cursor: "pointer",
                                       fontFamily: "inherit",
@@ -14796,22 +14803,19 @@ WICHTIG:
                                     style={{
                                       flex: 1, textAlign: "center", background: T.surface1,
                                       color: currentVal > 0 ? T.double : currentVal < 0 ? T.sage : T.text,
-                                      border: "none", padding: "8px",
+                                      border: "none", padding: "8px", minWidth: 0,
                                       fontSize: "16px", fontWeight: 700,
                                       fontFamily: "inherit",
                                     }}/>
                                   <button
                                     onClick={() => updateVal(currentVal + 1)}
                                     style={{
-                                      width: "40px", background: T.surface1, color: T.double,
+                                      width: "44px", background: T.surface1, color: T.double,
                                       border: "none", borderLeft: `1px solid ${T.line}`,
                                       fontSize: "20px", fontWeight: 700, cursor: "pointer",
                                       fontFamily: "inherit",
                                     }}>+</button>
                                 </div>
-                                <span style={{ fontSize: "10px", color: T.textDim, minWidth: "60px", textAlign: "right" }}>
-                                  {currentVal === 0 ? "kein Effekt" : currentVal > 0 ? `${currentVal} leichter` : `${Math.abs(currentVal)} härter`}
-                                </span>
                               </div>
                             );
                           })}
