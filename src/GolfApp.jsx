@@ -14653,9 +14653,12 @@ WICHTIG:
               // 6 Spieler → 3 Best + 3 Worst (alle bekommen Adjustment)
               // 7+      → 3 Best + 3 Worst (Mittelfeld bleibt unverändert)
               // Faustregel: max 3 pro Seite, und nicht mehr als Math.floor(n/2)
-              const numPlayers = f.players?.length || 0;
+              //
+              // v58-fix: Im Trip-Setup-Modal heißt es "selectedFriendIds" (nicht "players").
+              // Im Trip-Detail-Modal heißt es "players". Wir versuchen beide.
+              const numPlayers = (f.selectedFriendIds?.length) || (f.players?.length) || 0;
               const maxSlots = numPlayers > 0
-                ? Math.min(3, Math.floor(numPlayers / 2))
+                ? Math.max(1, Math.min(3, Math.floor(numPlayers / 2)))
                 : 3; // Fallback wenn noch keine Spieler
 
               // Synchronisiere Array-Längen falls Spielerzahl sich geändert hat
@@ -14673,7 +14676,7 @@ WICHTIG:
 
               // Hilfetext basierend auf Spielerzahl
               const helpText = numPlayers === 0
-                ? "Füge zuerst Spieler hinzu, dann werden die Anpassungen passend angezeigt."
+                ? "Wähle Spieler aus, dann wird die Anzahl der Adjustments automatisch angepasst. Default: 3 Beste/Schlechteste."
                 : numPlayers <= 4
                   ? `Bei ${numPlayers} Spielern bekommen die ${maxSlots} besten Abzug und die ${maxSlots} schlechtesten Aufschlag.`
                   : numPlayers <= 5
@@ -14688,8 +14691,8 @@ WICHTIG:
                     Nach jedem Spieltag werden HCPs angepasst. {helpText}
                   </p>
 
-                  {numPlayers > 0 && (
-                    <>
+                  {/* v58-fix: Block IMMER zeigen — auch ohne Spieler. Sonst wirkt's "broken" */}
+                  <>
                       {/* BESTE → Abzug */}
                       <div style={{ background: T.surface2, borderRadius: "8px", padding: "10px", marginBottom: "8px" }}>
                         <div style={{ fontSize: "10px", color: T.sage, fontWeight: 700, marginBottom: "6px", letterSpacing: "0.04em" }}>
@@ -14738,40 +14741,41 @@ WICHTIG:
                         </div>
                       </div>
 
-                      {/* Visuelle Vorschau */}
-                      <div style={{ marginTop: "10px", padding: "8px 10px", background: `${T.gold}05`, border: `1px dashed ${T.line}`, borderRadius: "6px", fontSize: "10px", color: T.textDim, lineHeight: 1.5 }}>
-                        <div style={{ fontWeight: 700, color: T.textSoft, marginBottom: "4px" }}>📊 So wirkt's bei {numPlayers} Spielern:</div>
-                        {(() => {
-                          const preview = [];
-                          for (let pos = 0; pos < numPlayers; pos++) {
-                            const fromBest = pos;
-                            const fromWorst = numPlayers - 1 - pos;
-                            let adj = 0;
-                            let label = "";
-                            if (fromBest < maxSlots) {
-                              adj = bestAdjArr[fromBest];
-                              label = `Platz ${pos + 1}`;
-                            } else if (fromWorst < maxSlots) {
-                              adj = worstAdjArr[fromWorst];
-                              label = fromWorst === 0 ? "Letzter" : `${fromWorst + 1}.-Letzter`;
-                            } else {
-                              label = `Platz ${pos + 1} (Mitte)`;
+                      {/* Visuelle Vorschau — nur bei tatsächlichen Spielern sinnvoll */}
+                      {numPlayers > 0 && (
+                        <div style={{ marginTop: "10px", padding: "8px 10px", background: `${T.gold}05`, border: `1px dashed ${T.line}`, borderRadius: "6px", fontSize: "10px", color: T.textDim, lineHeight: 1.5 }}>
+                          <div style={{ fontWeight: 700, color: T.textSoft, marginBottom: "4px" }}>📊 So wirkt's bei {numPlayers} Spielern:</div>
+                          {(() => {
+                            const preview = [];
+                            for (let pos = 0; pos < numPlayers; pos++) {
+                              const fromBest = pos;
+                              const fromWorst = numPlayers - 1 - pos;
+                              let adj = 0;
+                              let label = "";
+                              if (fromBest < maxSlots) {
+                                adj = bestAdjArr[fromBest];
+                                label = `Platz ${pos + 1}`;
+                              } else if (fromWorst < maxSlots) {
+                                adj = worstAdjArr[fromWorst];
+                                label = fromWorst === 0 ? "Letzter" : `${fromWorst + 1}.-Letzter`;
+                              } else {
+                                label = `Platz ${pos + 1} (Mitte)`;
+                              }
+                              preview.push(
+                                <span key={pos} style={{ marginRight: "8px" }}>
+                                  <span>{label}: </span>
+                                  <span style={{
+                                    color: adj < 0 ? T.sage : adj > 0 ? T.double : T.textDim,
+                                    fontWeight: 700,
+                                  }}>{adj > 0 ? "+" : ""}{adj}</span>
+                                </span>
+                              );
                             }
-                            preview.push(
-                              <span key={pos} style={{ marginRight: "8px" }}>
-                                <span>{label}: </span>
-                                <span style={{
-                                  color: adj < 0 ? T.sage : adj > 0 ? T.double : T.textDim,
-                                  fontWeight: 700,
-                                }}>{adj > 0 ? "+" : ""}{adj}</span>
-                              </span>
-                            );
-                          }
-                          return preview;
-                        })()}
-                      </div>
+                            return preview;
+                          })()}
+                        </div>
+                      )}
                     </>
-                  )}
                 </>
               );
             })()}
