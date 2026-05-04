@@ -1397,6 +1397,26 @@ function isExcludedForPlayer(round, playerName) {
   return exclList.includes(normName(playerName));
 }
 
+// ── v58: Cloud-Status pro Runde ──
+// Für UI-Feedback: ist die Runde in der Cloud gesichert oder nur lokal?
+// Returns: "synced" | "modified" | "never" | "no-sync"
+//
+// "synced"   = Runde wurde nach letzter lokaler Änderung erfolgreich hochgeladen
+// "modified" = Lokale Änderungen seit letztem Upload
+// "never"    = Noch nie hochgeladen
+// "no-sync"  = Sync nicht konfiguriert (kein syncCode)
+function getRoundCloudStatus(round, syncEnabled, hasSyncCode) {
+  if (!syncEnabled || !hasSyncCode) return "no-sync";
+  if (!round) return "never";
+  const lastPush = round.lastCloudPush || 0;
+  const lastSaved = round.savedAt ? new Date(round.savedAt).getTime() : 0;
+  if (lastPush === 0) return "never";
+  // Wenn lokal nach letztem Push geändert: modified
+  // Toleranz von 2s damit der Push direkt nach Save als "synced" gilt
+  if (lastSaved > lastPush + 2000) return "modified";
+  return "synced";
+}
+
 // ── v34: Total Strokes — Summe aller Schläge pro Spieler ──
 // Manueller Strich zählt mit Cap-Wert (Par + Vorgabeschläge + 2).
 // Manuelle Eingabe (auch ≥ Cap, z.B. 10) zählt mit echtem Wert.
@@ -5835,6 +5855,19 @@ function GolfAppInner() {
             try { window.storage.set("golf-last-archive", String(ts)); } catch {}
           }
         });
+        // v58: Sofortiger Pro-Runde-Push für direktes Status-Feedback
+        // (nicht warten auf Auto-Sync-Debounce)
+        if (syncCode) {
+          cloudPushRound(syncCode, savedRound, deviceId).then(result => {
+            if (result.ok) {
+              // Runde mit Cloud-Status aktualisieren
+              setRounds(prev => prev.map(r => r.id === savedRound.id
+                ? { ...r, cloudVersion: result.version, lastCloudPush: Date.now() }
+                : r
+              ));
+            }
+          }).catch(() => {});
+        }
       }
     }
     // v58: Return savedRound damit Aufrufer (z.B. Trip-Nearest) die ID weiß
@@ -6347,6 +6380,63 @@ function GolfAppInner() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
     showUndoToast(`✓ Backup exportiert (${rounds.length} Runden, ${friends.length} Freunde, ${customClubs.length} Clubs)`, () => {});
+  };
+
+  // v58: Einzelne Runde als JSON exportieren — Notfall-Sicherung
+  const exportSingleRound = (round) => {
+    if (!round) return;
+    const payload = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      app: "Fairway",
+      type: "single-round",
+      data: {
+        rounds: [round],
+        friends: friends.filter(f =>
+          (round.players || []).some(p => normName(p.name) === normName(f.name))
+        ),
+        customClubs: round.cfg?.clubName
+          ? customClubs.filter(c => c.name === round.cfg.clubName)
+          : [],
+      },
+    };
+    const json = JSON.stringify(payload, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = (round.cfg?.date || new Date().toISOString().slice(0, 10));
+    const club = (round.cfg?.clubName || "runde").replace(/[^a-zA-Z0-9]+/g, "-").toLowerCase();
+    a.href = url;
+    a.download = `fairway-${club}-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showUndoToast(`✓ Runde exportiert: ${round.cfg?.clubName || "Runde"}`, () => {});
+  };
+
+  // v58: Manueller Cloud-Push einer einzelnen Runde
+  // Returns Promise<{ok, error?}>
+  const manualPushRound = async (round) => {
+    if (!SYNC_ENABLED || !syncCode) return { ok: false, error: "Sync nicht konfiguriert" };
+    if (!round?.id) return { ok: false, error: "Keine Runden-ID" };
+    if (!isOnline) return { ok: false, error: "Keine Internet-Verbindung" };
+    try {
+      const result = await cloudPushRound(syncCode, round, deviceId);
+      if (result.ok) {
+        // Lokale Runde mit neuem Cloud-Status updaten
+        setRounds(prev => prev.map(r => r.id === round.id
+          ? { ...r, cloudVersion: result.version, lastCloudPush: Date.now() }
+          : r
+        ));
+        // Auch im Legacy-Blob updaten als Doppel-Backup
+        await cloudPush(syncCode, { rounds, friends, customClubs, trips, ownerProfile, goals });
+        return { ok: true };
+      }
+      return { ok: false, error: result.error || "Upload fehlgeschlagen" };
+    } catch (e) {
+      return { ok: false, error: e.message || "Netzwerk-Fehler" };
+    }
   };
 
   // Parse imported JSON, validate shape, return { ok, data, error }
@@ -11486,6 +11576,94 @@ function GolfAppInner() {
             {gameMode === "bestball-plus" && <span style={{ color: T.gold, marginLeft: "6px" }}>· ☄️ Best Ball+</span>}
             {isUschi && <span style={{ color: T.gold, marginLeft: "6px" }}>· 🎯 Uschi-Modus{gameMode === "uschi-team" ? " (2v2)" : ""}</span>}
           </div>
+
+          {/* v58: Backup-Status-Card — wo steht meine Runde sicher? */}
+          {loadedRoundId && (() => {
+            const currentRound = rounds.find(r => r.id === loadedRoundId);
+            if (!currentRound) return null;
+            const status = getRoundCloudStatus(currentRound, SYNC_ENABLED, !!syncCode);
+            const lastPushAt = currentRound.lastCloudPush
+              ? new Date(currentRound.lastCloudPush).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })
+              : null;
+
+            // Status-Konfiguration
+            const config = {
+              "synced":   { emoji: "✅", color: T.sage,   bg: `${T.sage}10`,   border: `${T.sage}40`,
+                            title: "Sicher in der Cloud",
+                            desc: `Hochgeladen um ${lastPushAt}${currentRound.cloudVersion ? ` · v${currentRound.cloudVersion}` : ""}` },
+              "modified": { emoji: "⚠️", color: T.gold,   bg: `${T.gold}10`,   border: `${T.gold}40`,
+                            title: "Lokale Änderungen seit letztem Upload",
+                            desc: `Letzter Upload: ${lastPushAt} · Bitte erneut hochladen` },
+              "never":    { emoji: "⏳", color: T.gold,   bg: `${T.gold}10`,   border: `${T.gold}40`,
+                            title: "Noch nicht in der Cloud",
+                            desc: isOnline ? "Wird gleich automatisch hochgeladen…" : "Offline · wird gepusht sobald online" },
+              "no-sync":  { emoji: "📵", color: T.textSoft, bg: T.surface2,    border: T.line,
+                            title: "Cloud-Sync nicht eingerichtet",
+                            desc: "Runde liegt nur lokal. Empfehlung: JSON-Backup exportieren" },
+            }[status];
+
+            return (
+              <div style={{
+                ...S.card, marginBottom: "20px", padding: "12px 14px",
+                background: config.bg, borderColor: config.border,
+              }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: "10px" }}>
+                  <div style={{ fontSize: "20px" }}>{config.emoji}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: "13px", fontWeight: 700, color: config.color, marginBottom: "2px" }}>
+                      {config.title}
+                    </div>
+                    <div style={{ fontSize: "11px", color: T.textSoft, lineHeight: 1.4 }}>
+                      {config.desc}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Action-Buttons */}
+                <div style={{ display: "flex", gap: "8px", marginTop: "12px" }}>
+                  {/* Cloud-Push (wenn Sync möglich + nicht synced) */}
+                  {(status === "modified" || status === "never") && SYNC_ENABLED && syncCode && (
+                    <button
+                      onClick={async () => {
+                        if (!isOnline) {
+                          alert("📵 Keine Internet-Verbindung — kann nicht hochladen. JSON-Backup als Alternative empfohlen!");
+                          return;
+                        }
+                        const result = await manualPushRound(currentRound);
+                        if (result.ok) {
+                          showUndoToast("✓ Runde in Cloud gesichert", null);
+                        } else {
+                          alert(`❌ Upload fehlgeschlagen: ${result.error || "Unbekannter Fehler"}`);
+                        }
+                      }}
+                      disabled={!isOnline}
+                      style={{
+                        ...S.btnPrimary, flex: 1, fontSize: "12px", padding: "10px",
+                        opacity: isOnline ? 1 : 0.5,
+                        cursor: isOnline ? "pointer" : "not-allowed",
+                      }}>
+                      ☁️ {isOnline ? "Jetzt hochladen" : "Offline"}
+                    </button>
+                  )}
+                  {/* JSON-Backup immer verfügbar */}
+                  <button
+                    onClick={() => exportSingleRound(currentRound)}
+                    style={{
+                      ...S.btnGhost, flex: 1, fontSize: "12px", padding: "10px",
+                    }}>
+                    💾 JSON-Backup
+                  </button>
+                </div>
+
+                {/* Online-Hinweis falls offline + nie hochgeladen */}
+                {!isOnline && (status === "never" || status === "modified") && (
+                  <div style={{ marginTop: "8px", fontSize: "10px", color: T.textDim, fontStyle: "italic", textAlign: "center" }}>
+                    Tipp: JSON-Backup speichert die Runde auf deinem Gerät — auch ohne Internet.
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* v56: Pro-Runde-Ziel-Resultate */}
           {Object.keys(roundGoals).length > 0 && (() => {
