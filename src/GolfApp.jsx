@@ -14645,49 +14645,136 @@ WICHTIG:
                 {f.hcpRules.enabled ? "AKTIV" : "AUS"}
               </button>
             </div>
-            {f.hcpRules.enabled && (
-              <>
-                <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px", lineHeight: 1.5, fontStyle: "italic" }}>
-                  Nach jedem Spieltag werden HCPs angepasst. Die besten 3 bekommen Abzug, die schlechtesten 3 bekommen Aufschlag. Default: Cyprus-Regeln.
-                </p>
-                <div style={{ background: T.surface2, borderRadius: "8px", padding: "10px", marginBottom: "8px" }}>
-                  <div style={{ fontSize: "10px", color: T.gold, fontWeight: 700, marginBottom: "6px", letterSpacing: "0.04em" }}>BESTE 3 → HCP-ABZUG</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px" }}>
-                    {[0, 1, 2].map(i => (
-                      <div key={i}>
-                        <label style={{ fontSize: "9px", color: T.textDim, display: "block", marginBottom: "2px" }}>{i + 1}. Platz</label>
-                        <input type="number" value={f.hcpRules.bestAdj[i]}
-                          onChange={e => {
-                            const v = parseInt(e.target.value) || 0;
-                            const arr = [...f.hcpRules.bestAdj];
-                            arr[i] = v;
-                            setF({ hcpRules: { ...f.hcpRules, bestAdj: arr } });
-                          }}
-                          style={{ ...S.input, fontSize: "13px", padding: "6px 8px", textAlign: "center", color: T.sage, fontWeight: 700 }}/>
+            {f.hcpRules.enabled && (() => {
+              // v58: Dynamische Anzahl der Slots basierend auf Spieleranzahl
+              // Default-Logik:
+              // 4 Spieler → 2 Best + 2 Worst (1./2. Platz und 1./Letzter)
+              // 5 Spieler → 2 Best + 2 Worst (Mittelfeld bleibt unverändert)
+              // 6 Spieler → 3 Best + 3 Worst (alle bekommen Adjustment)
+              // 7+      → 3 Best + 3 Worst (Mittelfeld bleibt unverändert)
+              // Faustregel: max 3 pro Seite, und nicht mehr als Math.floor(n/2)
+              const numPlayers = f.players?.length || 0;
+              const maxSlots = numPlayers > 0
+                ? Math.min(3, Math.floor(numPlayers / 2))
+                : 3; // Fallback wenn noch keine Spieler
+
+              // Synchronisiere Array-Längen falls Spielerzahl sich geändert hat
+              const bestAdjArr = (f.hcpRules.bestAdj || []).slice(0, maxSlots);
+              const worstAdjArr = (f.hcpRules.worstAdj || []).slice(0, maxSlots);
+              while (bestAdjArr.length < maxSlots) bestAdjArr.push(0);
+              while (worstAdjArr.length < maxSlots) worstAdjArr.push(0);
+
+              // Smart-Default-Werte bei initialer Spielerzahl
+              const bestDefaults = [-3, -2, -1];
+              const worstDefaults = [1, 2, 3];
+
+              // Worst-Labels: "Letzter", "2.-Letzter", "3.-Letzter"
+              const worstLabels = ["Letzter", "2.-Letzter", "3.-Letzter"];
+
+              // Hilfetext basierend auf Spielerzahl
+              const helpText = numPlayers === 0
+                ? "Füge zuerst Spieler hinzu, dann werden die Anpassungen passend angezeigt."
+                : numPlayers <= 4
+                  ? `Bei ${numPlayers} Spielern bekommen die ${maxSlots} besten Abzug und die ${maxSlots} schlechtesten Aufschlag.`
+                  : numPlayers <= 5
+                    ? `Bei ${numPlayers} Spielern werden die besten ${maxSlots} und schlechtesten ${maxSlots} angepasst — Mittelfeld bleibt unverändert.`
+                    : `Bei ${numPlayers} Spielern werden die besten 3 und schlechtesten 3 angepasst — Mittelfeld bleibt unverändert.`;
+
+              const gridCols = `repeat(${maxSlots}, 1fr)`;
+
+              return (
+                <>
+                  <p style={{ fontSize: "11px", color: T.textDim, marginBottom: "10px", lineHeight: 1.5, fontStyle: "italic" }}>
+                    Nach jedem Spieltag werden HCPs angepasst. {helpText}
+                  </p>
+
+                  {numPlayers > 0 && (
+                    <>
+                      {/* BESTE → Abzug */}
+                      <div style={{ background: T.surface2, borderRadius: "8px", padding: "10px", marginBottom: "8px" }}>
+                        <div style={{ fontSize: "10px", color: T.sage, fontWeight: 700, marginBottom: "6px", letterSpacing: "0.04em" }}>
+                          {maxSlots === 1 ? "1. PLATZ" : `BESTE ${maxSlots}`} → HCP-ABZUG (negativ = leichter)
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: gridCols, gap: "6px" }}>
+                          {Array.from({ length: maxSlots }).map((_, i) => (
+                            <div key={i}>
+                              <label style={{ fontSize: "9px", color: T.textDim, display: "block", marginBottom: "2px" }}>
+                                {i + 1}. Platz
+                              </label>
+                              <input type="number" value={bestAdjArr[i] !== undefined ? bestAdjArr[i] : (bestDefaults[i] || 0)}
+                                onChange={e => {
+                                  const v = parseInt(e.target.value) || 0;
+                                  const arr = [...bestAdjArr];
+                                  arr[i] = v;
+                                  setF({ hcpRules: { ...f.hcpRules, bestAdj: arr } });
+                                }}
+                                style={{ ...S.input, fontSize: "13px", padding: "6px 8px", textAlign: "center", color: T.sage, fontWeight: 700 }}/>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    ))}
-                  </div>
-                </div>
-                <div style={{ background: T.surface2, borderRadius: "8px", padding: "10px" }}>
-                  <div style={{ fontSize: "10px", color: T.double, fontWeight: 700, marginBottom: "6px", letterSpacing: "0.04em" }}>SCHLECHTESTE 3 → HCP-AUFSCHLAG</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px" }}>
-                    {[0, 1, 2].map(i => (
-                      <div key={i}>
-                        <label style={{ fontSize: "9px", color: T.textDim, display: "block", marginBottom: "2px" }}>{i + 1}. Letzter</label>
-                        <input type="number" value={f.hcpRules.worstAdj[i]}
-                          onChange={e => {
-                            const v = parseInt(e.target.value) || 0;
-                            const arr = [...f.hcpRules.worstAdj];
-                            arr[i] = v;
-                            setF({ hcpRules: { ...f.hcpRules, worstAdj: arr } });
-                          }}
-                          style={{ ...S.input, fontSize: "13px", padding: "6px 8px", textAlign: "center", color: T.double, fontWeight: 700 }}/>
+
+                      {/* SCHLECHTESTE → Aufschlag */}
+                      <div style={{ background: T.surface2, borderRadius: "8px", padding: "10px" }}>
+                        <div style={{ fontSize: "10px", color: T.double, fontWeight: 700, marginBottom: "6px", letterSpacing: "0.04em" }}>
+                          {maxSlots === 1 ? "LETZTER" : `SCHLECHTESTE ${maxSlots}`} → HCP-AUFSCHLAG (positiv = schwerer)
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: gridCols, gap: "6px" }}>
+                          {Array.from({ length: maxSlots }).map((_, i) => (
+                            <div key={i}>
+                              <label style={{ fontSize: "9px", color: T.textDim, display: "block", marginBottom: "2px" }}>
+                                {worstLabels[i] || `${i + 1}.-Letzter`}
+                              </label>
+                              <input type="number" value={worstAdjArr[i] !== undefined ? worstAdjArr[i] : (worstDefaults[i] || 0)}
+                                onChange={e => {
+                                  const v = parseInt(e.target.value) || 0;
+                                  const arr = [...worstAdjArr];
+                                  arr[i] = v;
+                                  setF({ hcpRules: { ...f.hcpRules, worstAdj: arr } });
+                                }}
+                                style={{ ...S.input, fontSize: "13px", padding: "6px 8px", textAlign: "center", color: T.double, fontWeight: 700 }}/>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    ))}
-                  </div>
-                </div>
-              </>
-            )}
+
+                      {/* Visuelle Vorschau */}
+                      <div style={{ marginTop: "10px", padding: "8px 10px", background: `${T.gold}05`, border: `1px dashed ${T.line}`, borderRadius: "6px", fontSize: "10px", color: T.textDim, lineHeight: 1.5 }}>
+                        <div style={{ fontWeight: 700, color: T.textSoft, marginBottom: "4px" }}>📊 So wirkt's bei {numPlayers} Spielern:</div>
+                        {(() => {
+                          const preview = [];
+                          for (let pos = 0; pos < numPlayers; pos++) {
+                            const fromBest = pos;
+                            const fromWorst = numPlayers - 1 - pos;
+                            let adj = 0;
+                            let label = "";
+                            if (fromBest < maxSlots) {
+                              adj = bestAdjArr[fromBest];
+                              label = `Platz ${pos + 1}`;
+                            } else if (fromWorst < maxSlots) {
+                              adj = worstAdjArr[fromWorst];
+                              label = fromWorst === 0 ? "Letzter" : `${fromWorst + 1}.-Letzter`;
+                            } else {
+                              label = `Platz ${pos + 1} (Mitte)`;
+                            }
+                            preview.push(
+                              <span key={pos} style={{ marginRight: "8px" }}>
+                                <span>{label}: </span>
+                                <span style={{
+                                  color: adj < 0 ? T.sage : adj > 0 ? T.double : T.textDim,
+                                  fontWeight: 700,
+                                }}>{adj > 0 ? "+" : ""}{adj}</span>
+                              </span>
+                            );
+                          }
+                          return preview;
+                        })()}
+                      </div>
+                    </>
+                  )}
+                </>
+              );
+            })()}
           </div>
 
           {/* Pots */}
